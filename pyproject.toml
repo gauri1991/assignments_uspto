@@ -1,0 +1,40 @@
+[project]
+name = "assignment-uspto"
+version = "0.1.0"
+description = "USPTO patent assignment script."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+
+# NOTE: this project uses venv + pip (uv was not installed at scaffold time).
+# Dev tools: pip install pytest ruff pyright  (inside .venv)
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+# E/W pycodestyle, F pyflakes, I isort, UP pyupgrade, B bugbear, SIM simplify,
+# PL pylint, RUF ruff-specific, N naming, C4 comprehensions, PTH use-pathlib.
+select = ["E", "F", "I", "UP", "B", "SIM", "PL", "RUF", "N", "C4", "PTH"]
+ignore = ["PLR2004"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["PLR2004", "S101"]
+
+[tool.ruff.format]
+docstring-code-format = true
+
+[tool.pyright]
+include = ["main.py", "tests"]
+venvPath = "."
+venv = ".venv"
+pythonVersion = "3.12"
+typeCheckingMode = "strict"
+reportMissingTypeStubs = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers --strict-config"
+pythonpath = ["."]
+filterwarnings = ["error"]
