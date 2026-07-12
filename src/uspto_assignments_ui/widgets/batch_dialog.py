@@ -48,11 +48,14 @@ from uspto_assignments import (
     BatchTemplate,
     ClassifyStep,
     CompareStep,
+    CpcMatchStep,
+    CpcRunContext,
     DedupeStep,
     DeriveStep,
     EntityMemory,
     ExportFormat,
     ExportStep,
+    FetchCpcStep,
     FilterStep,
     LoadConfig,
     NormalizeStep,
@@ -70,8 +73,9 @@ from uspto_assignments import (
     validate_template,
 )
 
-from ..settings import BatchTemplateStore, EntityMemoryStore
+from ..settings import BatchTemplateStore, CpcConfigStore, EntityMemoryStore
 from ..workers import BatchWorker, CallWorker, LogEmitter, QtLogHandler
+from .cpc_settings_dialog import CpcSettingsDialog
 from .field_tree import FieldTree
 from .filter_bar import FilterBar
 from .page import SectionLabel
@@ -1218,6 +1222,172 @@ class ReferenceMatchStepDialog(QDialog):
         )
 
 
+class FetchCpcStepDialog(QDialog):
+    """Configure a fetch-CPC step: attach CPC codes to a patent-number column (grant-routed)."""
+
+    def __init__(self, step: FetchCpcStep | None = None, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Fetch CPC step")
+        self.setMinimumWidth(520)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(10)
+        layout.addWidget(SectionLabel("Attach CPC codes (exact grant join)"))
+
+        form = QFormLayout()
+        self._table = QComboBox()
+        self._table.addItems(list(STORE_TABLES))
+        self._table.setCurrentText("flat")
+        self._column = QComboBox()
+        self._kind_column = QComboBox()
+        form.addRow("Table", self._table)
+        form.addRow("Patent-number column", self._column)
+        form.addRow("Kind-code column", self._kind_column)
+        layout.addLayout(form)
+
+        note = QLabel(
+            "Uses the project CPC source (Settings ▸ CPC data source). Offline by default — enable"
+            " network on the run to fetch uncached codes. CPC is grant-only; non-grants skipped."
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self._table.currentIndexChanged.connect(self._rebuild_columns)
+        self._rebuild_columns()
+        if step is not None:
+            self._table.setCurrentText(step.table)
+            self._column.setCurrentText(step.column)
+            self._kind_column.setCurrentText(step.kind_column)
+
+    def _rebuild_columns(self) -> None:
+        cols = _cols(self._table.currentText())
+        for combo, default in ((self._column, "doc_number"), (self._kind_column, "doc_kind")):
+            combo.clear()
+            combo.addItems(cols)
+            if default in cols:
+                combo.setCurrentText(default)
+
+    def step(self) -> FetchCpcStep:
+        """Return the configured fetch-CPC step."""
+        return FetchCpcStep(
+            table=self._table.currentText(),
+            column=self._column.currentText() or "doc_number",
+            kind_column=self._kind_column.currentText() or "doc_kind",
+        )
+
+
+class CpcMatchStepDialog(QDialog):
+    """Configure a CPC-match step: rank buyers per sales-package (portfolio) patent."""
+
+    def __init__(  # noqa: PLR0915 - linear widget assembly
+        self, step: CpcMatchStep | None = None, parent: QWidget | None = None
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("CPC match step")
+        self.setMinimumWidth(560)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(10)
+        layout.addWidget(SectionLabel("Match portfolio to buyers by CPC overlap"))
+
+        form = QFormLayout()
+        self._table = QComboBox()
+        self._table.addItems(list(STORE_TABLES))
+        self._table.setCurrentText("flat")
+        self._mode = QComboBox()
+        self._mode.addItem("Portfolio patent list (fetch its CPC)", "patent_list")
+        self._mode.addItem("Pre-built CPC footprint file", "footprint_file")
+        self._portfolio = QLineEdit()
+        self._portfolio.setPlaceholderText("portfolio patents (.txt) or footprint (.csv/.parquet)…")
+        browse = QPushButton("Browse…")
+        browse.clicked.connect(self._pick_portfolio)
+        pf_row = QHBoxLayout()
+        pf_row.addWidget(self._portfolio, 1)
+        pf_row.addWidget(browse)
+        self._buyer_column = QComboBox()
+        self._buyer_column.setEditable(True)
+        self._number_column = QComboBox()
+        self._number_column.setEditable(True)
+        self._kind_column = QComboBox()
+        self._kind_column.setEditable(True)
+        self._date_column = QComboBox()
+        self._date_column.setEditable(True)
+
+        form.addRow("Table", self._table)
+        form.addRow("Portfolio input", self._mode)
+        form.addRow("Portfolio file", pf_row)
+        form.addRow("Buyer column", self._buyer_column)
+        form.addRow("Patent-number column", self._number_column)
+        form.addRow("Kind-code column", self._kind_column)
+        form.addRow("Date column", self._date_column)
+        layout.addLayout(form)
+
+        note = QLabel(
+            "Run a Fetch CPC step first. Match knobs (grain, metric, threshold, ranking, hit-rate"
+            " floor) come from Settings ▸ CPC data source. Output tables:"
+            " matched_buyers_by_portfolio_patent + matched_buyers_overall."
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self._table.currentIndexChanged.connect(self._rebuild_columns)
+        self._rebuild_columns()
+        if step is not None:
+            self._table.setCurrentText(step.table)
+            self._mode.setCurrentIndex(max(0, self._mode.findData(step.portfolio_mode)))
+            self._portfolio.setText(step.portfolio_path)
+            self._buyer_column.setCurrentText(step.buyer_column)
+            self._number_column.setCurrentText(step.number_column)
+            self._kind_column.setCurrentText(step.kind_column)
+            self._date_column.setCurrentText(step.date_column)
+
+    def _rebuild_columns(self) -> None:
+        cols = _cols(self._table.currentText())
+        for combo, default in (
+            (self._buyer_column, "assignee_names_canonical"),
+            (self._number_column, "doc_number"),
+            (self._kind_column, "doc_kind"),
+            (self._date_column, "transaction_date"),
+        ):
+            current = combo.currentText()
+            combo.clear()
+            combo.addItems(cols)
+            combo.setCurrentText(current or (default if default in cols else ""))
+
+    def _pick_portfolio(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Portfolio file", "", "Portfolio (*.txt *.csv *.parquet);;All files (*)"
+        )
+        if path:
+            self._portfolio.setText(path)
+
+    def step(self) -> CpcMatchStep:
+        """Return the configured CPC-match step."""
+        return CpcMatchStep(
+            table=self._table.currentText(),
+            portfolio_mode=self._mode.currentData(),
+            portfolio_path=self._portfolio.text().strip(),
+            buyer_column=self._buyer_column.currentText() or "assignee_names_canonical",
+            number_column=self._number_column.currentText() or "doc_number",
+            kind_column=self._kind_column.currentText() or "doc_kind",
+            date_column=self._date_column.currentText() or "transaction_date",
+        )
+
+
 _StepDialog = (
     FilterStepDialog
     | NormalizeStepDialog
@@ -1230,6 +1400,8 @@ _StepDialog = (
     | CompareStepDialog
     | TransferTypeStepDialog
     | ReferenceMatchStepDialog
+    | FetchCpcStepDialog
+    | CpcMatchStepDialog
     | ExportStepDialog
 )
 
@@ -1241,6 +1413,8 @@ _STEP_DIALOGS: list[tuple[str, type[_StepDialog]]] = [
     ("Compare columns…", CompareStepDialog),
     ("Transfer type (firm→firm…)…", TransferTypeStepDialog),
     ("Match against reference…", ReferenceMatchStepDialog),
+    ("Fetch CPC codes…", FetchCpcStepDialog),
+    ("CPC match to portfolio…", CpcMatchStepDialog),
     ("Deduplicate…", DedupeStepDialog),
     ("Select columns…", SelectStepDialog),
     ("Sort…", SortStepDialog),
@@ -1257,6 +1431,8 @@ _EDIT_DIALOGS: dict[type[BatchStep], type[_StepDialog]] = {
     CompareStep: CompareStepDialog,
     TransferTypeStep: TransferTypeStepDialog,
     ReferenceMatchStep: ReferenceMatchStepDialog,
+    FetchCpcStep: FetchCpcStepDialog,
+    CpcMatchStep: CpcMatchStepDialog,
     DedupeStep: DedupeStepDialog,
     SelectStep: SelectStepDialog,
     SortStep: SortStepDialog,
@@ -1274,6 +1450,8 @@ class BatchDialog(QDialog):
         store: BatchTemplateStore,
         memory_store: EntityMemoryStore | None = None,
         parent: QWidget | None = None,
+        *,
+        cpc_store: CpcConfigStore | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Batch processing")
@@ -1288,6 +1466,7 @@ class BatchDialog(QDialog):
         self.resize(980, 680)
         self._store = store
         self._memory_store = memory_store if memory_store is not None else EntityMemoryStore()
+        self._cpc_store = cpc_store if cpc_store is not None else CpcConfigStore()
         self._memory: EntityMemory | None = None  # populated at run time from the store
         self._steps: list[BatchStep] = []
         self._completed = 0  # files finished this run (drives the determinate progress bar)
@@ -1419,6 +1598,15 @@ class BatchDialog(QDialog):
         workers_row.addWidget(QLabel("Workers (1 = sequential)"))
         workers_row.addWidget(self._workers, 1)
         column.addLayout(workers_row)
+
+        # CPC: a per-run network opt-in for fetch_cpc steps, plus quick access to the source config.
+        self._allow_network = QCheckBox("Allow network for CPC fetch this run")
+        cpc_btn = QPushButton("CPC data source…")
+        cpc_btn.clicked.connect(self._open_cpc_settings)
+        cpc_row = QHBoxLayout()
+        cpc_row.addWidget(self._allow_network, 1)
+        cpc_row.addWidget(cpc_btn)
+        column.addLayout(cpc_row)
 
         column.addWidget(SectionLabel("Console"))
         self._console = QPlainTextEdit()
@@ -1645,6 +1833,15 @@ class BatchDialog(QDialog):
         if path:
             self._out_dir.setText(path)
 
+    def _open_cpc_settings(self) -> None:
+        CpcSettingsDialog(self._cpc_store, self).exec()
+
+    def _cpc_ctx(self) -> CpcRunContext:
+        """Build the per-run CPC context from the saved project config + the network checkbox."""
+        return CpcRunContext(
+            config=self._cpc_store.load(), allow_network=self._allow_network.isChecked()
+        )
+
     def _run(self) -> None:
         if self._thread is not None:
             return
@@ -1686,6 +1883,7 @@ class BatchDialog(QDialog):
             workers=self._workers.value(),
             timestamp=timestamp,
             memory=self._memory,
+            cpc_ctx=self._cpc_ctx(),
         )
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -1733,8 +1931,11 @@ class BatchDialog(QDialog):
         self._run_btn.setEnabled(False)
 
         thread = QThread(self)
+        cpc_ctx = self._cpc_ctx()
         worker = CallWorker(
-            lambda: run_preview(template, source, limit=_PREVIEW_LIMIT, describe=_describe_step)
+            lambda: run_preview(
+                template, source, limit=_PREVIEW_LIMIT, describe=_describe_step, cpc_ctx=cpc_ctx
+            )
         )
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -1797,7 +1998,7 @@ def _warnings_by_step(warnings: list[str]) -> dict[int, list[str]]:
     return grouped
 
 
-def _describe_step(step: BatchStep) -> str:  # noqa: PLR0911 - one line per step kind
+def _describe_step(step: BatchStep) -> str:  # noqa: PLR0911, PLR0912 - one line per step kind
     if isinstance(step, FilterStep):
         clause_count = len(step.clauses)
         return f"Filter · {step.table} · {clause_count} clause(s) · {step.combine.upper()}"
@@ -1830,5 +2031,10 @@ def _describe_step(step: BatchStep) -> str:  # noqa: PLR0911 - one line per step
     if isinstance(step, ReferenceMatchStep):
         ref = Path(step.reference_path).name or "(no file)"
         return f"Reference match · {step.table}.{step.column} vs {ref} · {step.action}"
+    if isinstance(step, FetchCpcStep):
+        return f"Fetch CPC · {step.table}.{step.column} → cpc_codes"
+    if isinstance(step, CpcMatchStep):
+        portfolio = Path(step.portfolio_path).name or "(no file)"
+        return f"CPC match · {step.table} vs {portfolio} · {step.portfolio_mode} → {step.out_table}"
     tables = "all tables" if step.tables is None else ", ".join(step.tables)
     return f"Export · {step.fmt}{FORMAT_SUFFIX[step.fmt]} · {tables}"

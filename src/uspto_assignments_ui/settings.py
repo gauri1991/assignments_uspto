@@ -15,13 +15,17 @@ from PyQt6.QtCore import QStandardPaths
 
 from uspto_assignments import (
     BatchTemplate,
+    CpcConfig,
     EntityMemory,
     Query,
     dump_queries,
     dump_templates,
+    load_config,
     load_queries,
     load_templates,
+    save_config,
 )
+from uspto_assignments.cpcconfig import CPC_CONFIG_FILENAME
 
 _APP_DIR = "uspto-assignment-viewer"
 _RECENT_LIMIT = 8
@@ -113,6 +117,26 @@ class BatchTemplateStore:
 
     def delete(self, name: str) -> None:
         self.save_all([t for t in self.load() if t.name != name])
+
+
+class CpcConfigStore:
+    """Persist the CPC data-source config in the **project** (default ``./cpc_config.json``).
+
+    Kept in the working folder (not the app-config dir) so it travels with the project and can be
+    shared/committed — it holds only the API-key **env-var name**, never the key itself.
+    """
+
+    def __init__(self, path: Path | None = None) -> None:
+        self._path = path if path is not None else Path.cwd() / CPC_CONFIG_FILENAME
+
+    def path(self) -> Path:
+        return self._path
+
+    def load(self) -> CpcConfig:
+        return load_config(self._path)
+
+    def save(self, config: CpcConfig) -> None:
+        save_config(config, self._path)
 
 
 class EntityMemoryStore:

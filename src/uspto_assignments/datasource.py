@@ -266,7 +266,8 @@ class CpcCache:
         # A local_file source is offline — always allowed. A network source (the API) needs the
         # per-run opt-in AND config not set to offline_only.
         is_network = self._config.source.type != "local_file"
-        source_allowed = (not is_network) or (allow_network and not self._config.source.offline_only)
+        network_ok = allow_network and not self._config.source.offline_only
+        source_allowed = (not is_network) or network_ok
         fetched = 0
         if misses and source_allowed:
             found = self._source.fetch(misses)

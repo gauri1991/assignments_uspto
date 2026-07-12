@@ -37,8 +37,15 @@ from uspto_assignments import (
     unique_path,
 )
 
-from .settings import BatchTemplateStore, EntityMemoryStore, QueryStore, RecentStore
+from .settings import (
+    BatchTemplateStore,
+    CpcConfigStore,
+    EntityMemoryStore,
+    QueryStore,
+    RecentStore,
+)
 from .widgets.batch_dialog import BatchDialog
+from .widgets.cpc_settings_dialog import CpcSettingsDialog
 from .widgets.entity_dialog import EntityDialog
 from .widgets.export_dialog import ExportDialog
 from .widgets.landing import LandingPage
@@ -78,6 +85,7 @@ class MainWindow(QMainWindow):
         self._query_store = QueryStore()
         self._batch_store = BatchTemplateStore()
         self._entity_store = EntityMemoryStore()
+        self._cpc_store = CpcConfigStore()
         self._batch_dialog: BatchDialog | None = None  # kept alive; shown non-modally (resizable)
         self._entity_dialog: EntityDialog | None = None  # non-modal so both windows coexist
 
@@ -130,6 +138,7 @@ class MainWindow(QMainWindow):
         self._act_manage_queries = self._make_action("&Manage queries…", self._manage_queries)
         self._act_batch = self._make_action("&Batch processing…", self._open_batch, "Ctrl+B")
         self._act_entities = self._make_action("&Entity memory…", self._open_entities)
+        self._act_cpc = self._make_action("&CPC data source…", self._open_cpc_settings)
         # Actions that require a loaded dataset.
         self._data_actions = (
             self._act_save,
@@ -173,6 +182,7 @@ class MainWindow(QMainWindow):
         if settings_menu is not None:
             settings_menu.addAction(self._act_batch)
             settings_menu.addAction(self._act_entities)
+            settings_menu.addAction(self._act_cpc)
 
     def _build_toolbar(self) -> None:
         toolbar = QToolBar("Main")
@@ -468,10 +478,15 @@ class MainWindow(QMainWindow):
         # Non-modal so it behaves like a normal window (minimize/maximize work on Windows + Linux);
         # reuse a single instance and just re-raise it if it's already open.
         if self._batch_dialog is None:
-            self._batch_dialog = BatchDialog(self._batch_store, self._entity_store, parent=self)
+            self._batch_dialog = BatchDialog(
+                self._batch_store, self._entity_store, parent=self, cpc_store=self._cpc_store
+            )
         self._batch_dialog.show()
         self._batch_dialog.raise_()
         self._batch_dialog.activateWindow()
+
+    def _open_cpc_settings(self) -> None:
+        CpcSettingsDialog(self._cpc_store, self).exec()
 
     def _open_entities(self) -> None:
         # Non-modal so it can sit alongside the batch window and minimize/maximize. If it's already

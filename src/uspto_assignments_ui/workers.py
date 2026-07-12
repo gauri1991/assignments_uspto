@@ -16,6 +16,7 @@ from PyQt6.QtCore import QObject, pyqtSignal
 from uspto_assignments import (
     BatchEvent,
     BatchTemplate,
+    CpcRunContext,
     EntityMemory,
     parse_to_store,
     run_batch,
@@ -102,6 +103,7 @@ class BatchWorker(QObject):
         workers: int,
         timestamp: str,
         memory: EntityMemory | None = None,
+        cpc_ctx: CpcRunContext | None = None,
     ) -> None:
         super().__init__()
         self._template = template
@@ -110,6 +112,7 @@ class BatchWorker(QObject):
         self._workers = workers
         self._timestamp = timestamp
         self._memory = memory
+        self._cpc_ctx = cpc_ctx
 
     def run(self) -> None:
         """Run the batch; emit ``finished`` or ``failed``. Runs on the worker thread."""
@@ -122,6 +125,7 @@ class BatchWorker(QObject):
                 timestamp=self._timestamp,
                 memory=self._memory,
                 on_event=self._emit_event,
+                cpc_ctx=self._cpc_ctx,
             )
         except Exception as exc:  # thread boundary: report any error via the failed signal
             self.failed.emit(f"{type(exc).__name__}: {exc}")
