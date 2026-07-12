@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<patent-assignments>
+  <patent-assignment>
+    <assignment-record>
+      <reel-no>012345</reel-no>
+      <frame-no>0678</frame-no>
+      <last-update-date><date>20240115</date></last-update-date>
+      <recorded-date><date>20240110</date></recorded-date>
+      <purge-indicator>N</purge-indicator>
+      <page-count>4</page-count>
+      <correspondent>
+        <name>ACME IP LAW GROUP</name>
+        <address-1>100 MAIN ST</address-1>
+        <address-2>SUITE 200</address-2>
+      </correspondent>
+      <conveyance-text>ASSIGNMENT OF ASSIGNORS INTEREST</conveyance-text>
+    </assignment-record>
+    <patent-assignors>
+      <patent-assignor>
+        <name>SMITH, JOHN</name>
+        <execution-date><date>20231201</date></execution-date>
+        <date-acknowledged><date>20231205</date></date-acknowledged>
+      </patent-assignor>
+      <patent-assignor>
+        <name>DOE, JANE</name>
+        <execution-date><date>20231202</date></execution-date>
+      </patent-assignor>
+    </patent-assignors>
+    <patent-assignees>
+      <patent-assignee>
+        <name>WIDGET CORP</name>
+        <address-1>500 TECH BLVD</address-1>
+        <city>SAN JOSE</city>
+        <state>CA</state>
+        <country-name>USA</country-name>
+        <postcode>95110</postcode>
+      </patent-assignee>
+    </patent-assignees>
+    <patent-properties>
+      <patent-property>
+        <invention-title lang="en">WIDGET <b>FASTENING</b> MECHANISM</invention-title>
+        <document-id>
+          <country>US</country>
+          <doc-number>16123456</doc-number>
+          <kind>X0</kind>
+          <name>WIDGET CORP</name>
+          <date>20200401</date>
+        </document-id>
+        <document-id>
+          <country>US</country>
+          <doc-number>10987654</doc-number>
+          <kind>B2</kind>
+          <date>20220301</date>
+        </document-id>
+      </patent-property>
+      <patent-property>
+        <invention-title lang="en">IMPROVED WIDGET COATING</invention-title>
+        <document-id>
+          <country>US</country>
+          <doc-number>16999888</doc-number>
+          <kind>X0</kind>
+          <date>20201105</date>
+        </document-id>
+      </patent-property>
+    </patent-properties>
+  </patent-assignment>
+
+  <patent-assignment>
+    <assignment-record>
+      <reel-no>054321</reel-no>
+      <frame-no>0001</frame-no>
+      <recorded-date><date>20230630</date></recorded-date>
+      <page-count>2</page-count>
+      <conveyance-text>MERGER</conveyance-text>
+    </assignment-record>
+    <patent-assignors>
+      <patent-assignor>
+        <name>OLDCO INC</name>
+      </patent-assignor>
+    </patent-assignors>
+    <patent-assignees>
+      <patent-assignee>
+        <name>NEWCO LLC</name>
+        <city>AUSTIN</city>
+        <state>TX</state>
+        <country-name>USA</country-name>
+      </patent-assignee>
+    </patent-assignees>
+    <patent-properties>
+      <patent-property>
+        <invention-title lang="en">TITLE ONLY NO DOCID</invention-title>
+      </patent-property>
+    </patent-properties>
+  </patent-assignment>
+</patent-assignments>

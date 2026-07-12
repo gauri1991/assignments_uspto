@@ -1,13 +1,53 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "assignment-uspto"
 version = "0.1.0"
-description = "USPTO patent assignment script."
+description = "Parse USPTO patent-assignment XML/ZIP into normalized Parquet + Excel tables."
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "lxml>=5.0",       # fast, recoverable streaming XML parse
+    "pyarrow>=15.0",   # Parquet / Arrow tables + memory-mapped interactive store
+    "openpyxl>=3.1",   # streaming (write_only) Excel output
+    "rapidfuzz>=3",    # fast fuzzy matching for entity-name normalization
+    "duckdb>=1.0",     # query layer over Arrow/Parquet (transaction ledger + leaderboards)
+]
+
+[project.optional-dependencies]
+# Native desktop UI (Phase 3+). Core installs and runs headless without this.
+ui = [
+    "PyQt6>=6.6",
+]
+# Optional ML backend for entity-type classification. Rules work without it; classify falls back
+# to rules (with a logged note) if a step selects "probablepeople" and it isn't installed.
+ml = [
+    "probablepeople>=0.5",
+]
+# Dev tooling + type stubs (the stubs are what let `pyright` strict pass on lxml/pyarrow).
+dev = [
+    "pytest",
+    "pytest-qt",
+    "ruff",
+    "pyright",
+    "lxml-stubs",
+    "pyarrow-stubs",
+]
+
+[project.scripts]
+uspto-assign = "uspto_assignments.cli:main"
+uspto-assign-ui = "uspto_assignments_ui.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+uspto_assignments_ui = ["resources/*.qss"]
 
 # NOTE: this project uses venv + pip (uv was not installed at scaffold time).
-# Dev tools: pip install pytest ruff pyright  (inside .venv)
+# Install editable with dev extras: .venv/bin/pip install -e ".[dev]"
 
 [tool.ruff]
 line-length = 100
@@ -18,23 +58,44 @@ target-version = "py312"
 # PL pylint, RUF ruff-specific, N naming, C4 comprehensions, PTH use-pathlib.
 select = ["E", "F", "I", "UP", "B", "SIM", "PL", "RUF", "N", "C4", "PTH"]
 ignore = ["PLR2004"]
+# Intentional Metro typography: × (remove chip) and – (range). Not confusable typos here.
+allowed-confusables = ["×", "–"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["PLR2004", "S101"]
+# Qt's API is camelCase, and overriding virtuals (rowCount, headerData, setText, ...) must match.
+"src/uspto_assignments_ui/**" = ["N802"]
 
 [tool.ruff.format]
 docstring-code-format = true
 
 [tool.pyright]
-include = ["main.py", "tests"]
+include = ["src", "tests", "main.py"]
+extraPaths = ["src"]
 venvPath = "."
 venv = ".venv"
 pythonVersion = "3.12"
 typeCheckingMode = "strict"
 reportMissingTypeStubs = false
 
+# PyQt6's signal/slot API is dynamically typed (every ``.connect(slot)`` is ``Unknown``), so the
+# reportUnknown* family produces only noise in the Qt layer. Relax it there ONLY; the Qt-free core
+# stays fully strict. Real errors (bad overrides, Optional access, arg types) still fire everywhere.
+[[tool.pyright.executionEnvironments]]
+root = "src/uspto_assignments_ui"
+reportUnknownMemberType = false
+reportUnknownVariableType = false
+reportUnknownArgumentType = false
+reportUnknownParameterType = false
+reportUnknownLambdaType = false
+
+# UI tests simulate input by poking widget internals; allow protected access there only.
+[[tool.pyright.executionEnvironments]]
+root = "tests"
+reportPrivateUsage = false
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q --strict-markers --strict-config"
-pythonpath = ["."]
+pythonpath = ["src"]
 filterwarnings = ["error"]

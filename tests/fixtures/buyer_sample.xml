@@ -1,0 +1,137 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<patent-assignments>
+  <!-- 1: inventor -> employer assignment (must be EXCLUDED: sellers resolve to persons) -->
+  <patent-assignment>
+    <assignment-record>
+      <reel-no>100001</reel-no>
+      <frame-no>0001</frame-no>
+      <recorded-date><date>20240110</date></recorded-date>
+      <purge-indicator>N</purge-indicator>
+      <conveyance-text>ASSIGNMENT OF ASSIGNORS INTEREST (SEE DOCUMENT FOR DETAILS).</conveyance-text>
+    </assignment-record>
+    <patent-assignors>
+      <patent-assignor>
+        <name>SMITH, JOHN</name>
+        <execution-date><date>20231201</date></execution-date>
+      </patent-assignor>
+    </patent-assignors>
+    <patent-assignees>
+      <patent-assignee><name>WIDGET CORP</name></patent-assignee>
+    </patent-assignees>
+    <patent-properties>
+      <patent-property>
+        <invention-title lang="en">WIDGET MECHANISM</invention-title>
+        <document-id><country>US</country><doc-number>16123456</doc-number><kind>X0</kind></document-id>
+        <document-id><country>US</country><doc-number>10987654</doc-number><kind>B2</kind></document-id>
+      </patent-property>
+    </patent-properties>
+  </patent-assignment>
+
+  <!-- 2: company -> company assignment (KEPT: firm-to-firm; seller in dictionary) -->
+  <patent-assignment>
+    <assignment-record>
+      <reel-no>100002</reel-no>
+      <frame-no>0002</frame-no>
+      <recorded-date><date>20240601</date></recorded-date>
+      <purge-indicator>N</purge-indicator>
+      <conveyance-text>ASSIGNMENT OF ASSIGNORS INTEREST</conveyance-text>
+    </assignment-record>
+    <patent-assignors>
+      <patent-assignor>
+        <name>WIDGET CORP</name>
+        <execution-date><date>20240201</date></execution-date>
+      </patent-assignor>
+      <patent-assignor>
+        <name>WIDGET CORPORATION</name>
+        <execution-date><date>20240215</date></execution-date>
+      </patent-assignor>
+    </patent-assignors>
+    <patent-assignees>
+      <patent-assignee><name>GADGET HOLDINGS LLC</name></patent-assignee>
+    </patent-assignees>
+    <patent-properties>
+      <patent-property>
+        <invention-title lang="en">WIDGET MECHANISM</invention-title>
+        <document-id><country>US</country><doc-number>16123456</doc-number><kind>X0</kind></document-id>
+        <document-id><country>US</country><doc-number>10987654</doc-number><kind>B2</kind><date>20220301</date></document-id>
+        <document-id><country>US</country><doc-number>20210012345</doc-number><kind>A1</kind></document-id>
+      </patent-property>
+      <patent-property>
+        <invention-title lang="en">GADGET COATING</invention-title>
+        <document-id><country>US</country><doc-number>11222333</doc-number><kind>B1</kind></document-id>
+      </patent-property>
+    </patent-properties>
+  </patent-assignment>
+
+  <!-- 3: self-transfer within a group (EXCLUDED: same provisional cluster / parent) -->
+  <patent-assignment>
+    <assignment-record>
+      <reel-no>100003</reel-no>
+      <frame-no>0003</frame-no>
+      <recorded-date><date>20240301</date></recorded-date>
+      <purge-indicator>N</purge-indicator>
+      <conveyance-text>ASSIGNMENT OF ASSIGNOR'S INTEREST</conveyance-text>
+    </assignment-record>
+    <patent-assignors>
+      <patent-assignor><name>ZORPTECH SYSTEMS INC</name></patent-assignor>
+    </patent-assignors>
+    <patent-assignees>
+      <patent-assignee><name>ZORPTECH SYSTEMS INCORPORATED</name></patent-assignee>
+    </patent-assignees>
+    <patent-properties>
+      <patent-property>
+        <invention-title lang="en">ZORP PROCESS</invention-title>
+        <document-id><country>US</country><doc-number>9555444</doc-number><kind>B2</kind></document-id>
+      </patent-property>
+    </patent-properties>
+  </patent-assignment>
+
+  <!-- 4: security interest (EXCLUDED by conveyance taxonomy) -->
+  <patent-assignment>
+    <assignment-record>
+      <reel-no>100004</reel-no>
+      <frame-no>0004</frame-no>
+      <recorded-date><date>20240401</date></recorded-date>
+      <purge-indicator>N</purge-indicator>
+      <conveyance-text>SECURITY INTEREST (SEE DOCUMENT FOR DETAILS).</conveyance-text>
+    </assignment-record>
+    <patent-assignors>
+      <patent-assignor><name>WIDGET CORP</name></patent-assignor>
+    </patent-assignors>
+    <patent-assignees>
+      <patent-assignee><name>BIG BANK NA</name></patent-assignee>
+    </patent-assignees>
+    <patent-properties>
+      <patent-property>
+        <invention-title lang="en">WIDGET MECHANISM</invention-title>
+        <document-id><country>US</country><doc-number>10987654</doc-number><kind>B2</kind></document-id>
+      </patent-property>
+    </patent-properties>
+  </patent-assignment>
+
+  <!-- 5: company -> off-gazetteer company (KEPT: buyer minted a provisional id) -->
+  <patent-assignment>
+    <assignment-record>
+      <reel-no>100005</reel-no>
+      <frame-no>0005</frame-no>
+      <recorded-date><date>20241001</date></recorded-date>
+      <purge-indicator>N</purge-indicator>
+      <conveyance-text>NUNC PRO TUNC ASSIGNMENT (SEE DOCUMENT FOR DETAILS).</conveyance-text>
+    </assignment-record>
+    <patent-assignors>
+      <patent-assignor>
+        <name>GADGET HOLDINGS LLC</name>
+        <execution-date><date>20240815</date></execution-date>
+      </patent-assignor>
+    </patent-assignors>
+    <patent-assignees>
+      <patent-assignee><name>QUANTUM FLUX VENTURES LLC</name></patent-assignee>
+    </patent-assignees>
+    <patent-properties>
+      <patent-property>
+        <invention-title lang="en">GADGET COATING</invention-title>
+        <document-id><country>US</country><doc-number>11222333</doc-number><kind>B1</kind></document-id>
+      </patent-property>
+    </patent-properties>
+  </patent-assignment>
+</patent-assignments>

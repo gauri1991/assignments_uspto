@@ -1,0 +1,338 @@
+/* ==========================================================================
+   Metro / Modern UI (Windows 8.1) stylesheet for the USPTO assignment viewer.
+
+   Palette (the only colours used anywhere):
+     #FFFFFF content   #F0F0F0 chrome     #E6E6E6 hover
+     #CCCCCC control    #ABABAB border    #6D6D6D secondary
+     #1D1D1D text       #0078D7 accent
+   Accent appears ONLY on: selection, focus border, checked state, primary
+   button, tile fills, progress chunk. Nowhere else.
+
+   Rules honoured: border-radius 0 everywhere; flat fills only (no gradients,
+   shadows, bevels, gloss); borders 1-2px solid; focus = border colour change.
+   Letter-spacing / uppercase / the 300-weight title are applied in Python
+   (Qt QSS supports none of those) — see widgets/page.py.
+   ========================================================================== */
+
+* {
+    border-radius: 0px;
+    outline: 0;                       /* focus is shown by border colour, never a glow */
+}
+
+QWidget {
+    background-color: #FFFFFF;
+    color: #1D1D1D;
+    font-family: "Segoe UI", "Selawik", "Noto Sans", sans-serif;
+    font-size: 12px;
+}
+
+/* Chrome surfaces (frames marked with the "chrome" property, menu/status bars). */
+QWidget[chrome="true"], QMenuBar, QStatusBar, QToolBar {
+    background-color: #F0F0F0;
+}
+QStatusBar {
+    color: #6D6D6D;
+    border-top: 1px solid #ABABAB;
+}
+QToolBar {
+    border: none;
+    border-bottom: 1px solid #ABABAB;
+    padding: 4px;
+    spacing: 6px;
+}
+QToolBar QToolButton {
+    background-color: #CCCCCC;
+    color: #1D1D1D;
+    border: none;
+    padding: 6px 12px;
+}
+QToolBar QToolButton:hover {
+    background-color: #BFBFBF;
+}
+QToolBar QToolButton:pressed {
+    background-color: #0078D7;
+    color: #FFFFFF;
+}
+QToolBar QToolButton:disabled {
+    color: #ABABAB;
+    background-color: #E6E6E6;
+}
+
+/* Typography roles (size/colour here; weight, uppercase, tracking set in Python). */
+QLabel[role="h1"] {
+    font-size: 26px;
+    color: #1D1D1D;
+}
+QLabel[role="section"] {
+    font-size: 11px;
+    color: #6D6D6D;
+}
+QLabel[role="hint"] {
+    color: #6D6D6D;
+}
+
+/* ---- Buttons -------------------------------------------------------------- */
+QPushButton {
+    background-color: #CCCCCC;
+    color: #1D1D1D;
+    border: none;
+    padding: 6px 16px;
+    min-height: 20px;
+}
+QPushButton:hover {
+    background-color: #BFBFBF;
+}
+QPushButton:pressed {
+    background-color: #0078D7;         /* pressed inverts to accent + white */
+    color: #FFFFFF;
+}
+QPushButton:disabled {
+    color: #6D6D6D;
+    background-color: #E6E6E6;
+}
+QPushButton[primary="true"] {
+    background-color: #0078D7;
+    color: #FFFFFF;
+}
+QPushButton[primary="true"]:hover {
+    background-color: #0078D7;
+    border: 2px solid #1D1D1D;
+}
+QPushButton[primary="true"]:pressed {
+    background-color: #1D1D1D;
+    color: #FFFFFF;
+}
+
+/* ---- Text inputs & combos ------------------------------------------------- */
+QLineEdit, QComboBox, QSpinBox, QPlainTextEdit, QTextEdit {
+    background-color: #FFFFFF;
+    color: #1D1D1D;
+    border: 2px solid #ABABAB;
+    padding: 5px 6px;
+    selection-background-color: #0078D7;
+    selection-color: #FFFFFF;
+}
+QLineEdit:hover, QComboBox:hover, QSpinBox:hover {
+    border-color: #6D6D6D;
+}
+QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QPlainTextEdit:focus, QTextEdit:focus {
+    border-color: #0078D7;             /* focus = accent border */
+}
+QComboBox::drop-down {
+    border: none;
+    width: 20px;
+    background-color: #CCCCCC;
+}
+QComboBox QAbstractItemView {
+    background-color: #FFFFFF;
+    border: 1px solid #ABABAB;
+    selection-background-color: #0078D7;
+    selection-color: #FFFFFF;
+}
+
+/* ---- Tabs: no folder shape; 3px bottom border, accent when selected ------- */
+QTabWidget::pane {
+    border: none;
+    border-top: 1px solid #ABABAB;
+}
+QTabBar::tab {
+    background: transparent;
+    border: none;
+    border-bottom: 3px solid transparent;
+    padding: 8px 18px;
+    margin: 0;
+    color: #6D6D6D;
+}
+QTabBar::tab:hover {
+    color: #1D1D1D;
+    background-color: #E6E6E6;
+}
+QTabBar::tab:selected {
+    color: #1D1D1D;
+    border-bottom: 3px solid #0078D7;
+}
+
+/* ---- Tables: no grid, flat header w/ bottom rule, full-row accent select --- */
+QTableView, QTreeView {
+    background-color: #FFFFFF;
+    alternate-background-color: #FFFFFF;
+    gridline-color: transparent;
+    border: 1px solid #ABABAB;         /* subtle structural frame */
+    selection-background-color: #0078D7;
+    selection-color: #FFFFFF;
+}
+/* Framed section container (filter panel, dialog field group). */
+QWidget[panel="true"] {
+    border: 1px solid #ABABAB;
+}
+QTableView::item {
+    border: none;
+    padding: 0px 8px;
+}
+QTableView::item:hover {
+    background-color: #E6E6E6;
+}
+QTableView::item:selected {
+    background-color: #0078D7;
+    color: #FFFFFF;
+}
+QHeaderView {
+    background-color: #F0F0F0;
+    border: none;
+}
+QHeaderView::section {
+    background-color: #F0F0F0;
+    color: #6D6D6D;
+    border: none;
+    border-bottom: 1px solid #ABABAB;
+    padding: 8px;
+    font-weight: 600;
+}
+QHeaderView::section:hover {
+    background-color: #E6E6E6;
+}
+QTableView QTableCornerButton::section {
+    background-color: #F0F0F0;
+    border: none;
+    border-bottom: 1px solid #ABABAB;
+}
+
+/* ---- Scrollbars: 14px, square, flat handle, zero-size arrow buttons -------- */
+QScrollBar:vertical {
+    background-color: #F0F0F0;
+    width: 14px;
+    margin: 0;
+}
+QScrollBar:horizontal {
+    background-color: #F0F0F0;
+    height: 14px;
+    margin: 0;
+}
+QScrollBar::handle:vertical, QScrollBar::handle:horizontal {
+    background-color: #CDCDCD;
+    min-height: 24px;
+    min-width: 24px;
+}
+QScrollBar::handle:hover {
+    background-color: #ABABAB;
+}
+QScrollBar::add-line, QScrollBar::sub-line {
+    height: 0px;
+    width: 0px;
+    background: none;
+    border: none;
+}
+QScrollBar::add-page, QScrollBar::sub-page {
+    background: #F0F0F0;
+}
+
+/* ---- Progress bar --------------------------------------------------------- */
+QProgressBar {
+    background-color: #E6E6E6;
+    border: none;
+    text-align: center;
+    color: #1D1D1D;
+    min-height: 4px;
+}
+QProgressBar::chunk {
+    background-color: #0078D7;
+}
+
+/* ---- Checkboxes / radios: checked = accent -------------------------------- */
+QCheckBox, QRadioButton {
+    spacing: 8px;
+}
+QCheckBox::indicator, QRadioButton::indicator {
+    width: 16px;
+    height: 16px;
+    background-color: #FFFFFF;
+    border: 2px solid #ABABAB;
+}
+QCheckBox::indicator:hover, QRadioButton::indicator:hover {
+    border-color: #6D6D6D;
+}
+QCheckBox::indicator:checked, QRadioButton::indicator:checked {
+    background-color: #0078D7;
+    border-color: #0078D7;
+}
+
+/* ---- Tiles: square 140x140, no border, text bottom-left ------------------- */
+QPushButton[tile="true"] {
+    min-width: 140px;
+    max-width: 140px;
+    min-height: 140px;
+    max-height: 140px;
+    border: none;
+    padding: 10px;
+    text-align: left;
+    background-color: #CCCCCC;
+    color: #1D1D1D;
+}
+QPushButton[tile="true"][variant="accent"] {
+    background-color: #0078D7;
+    color: #FFFFFF;
+}
+QPushButton[tile="true"][variant="accent"]:hover {
+    background-color: #0078D7;
+    border: 2px solid #FFFFFF;
+}
+QPushButton[tile="true"][variant="neutral"] {
+    background-color: #E6E6E6;
+    color: #1D1D1D;
+}
+QPushButton[tile="true"]:hover {
+    background-color: #BFBFBF;
+}
+/* Tile caption sits bottom-left; colour follows the tile variant. */
+QPushButton[tile="true"] QLabel[role="tile"] {
+    background: transparent;
+    color: #1D1D1D;
+    font-size: 15px;
+}
+QPushButton[tile="true"][variant="accent"] QLabel[role="tile"] {
+    color: #FFFFFF;
+}
+
+/* ---- Batch console -------------------------------------------------------- */
+QPlainTextEdit[role="console"] {
+    font-family: "Consolas", "DejaVu Sans Mono", "Menlo", monospace;
+    font-size: 12px;
+    background-color: #FFFFFF;
+    border: 1px solid #ABABAB;
+}
+QListWidget[panel="true"] {
+    border: 1px solid #ABABAB;
+}
+
+/* ---- Filter chips (active filter clauses) --------------------------------- */
+QPushButton[chip="true"] {
+    background-color: #E6E6E6;
+    color: #1D1D1D;
+    border: none;
+    border-left: 3px solid #0078D7;   /* accent marker on the left edge */
+    padding: 4px 10px;
+    min-height: 16px;
+    font-size: 11px;
+}
+QPushButton[chip="true"]:hover {
+    background-color: #CCCCCC;
+}
+
+/* ---- Menus & tooltips ----------------------------------------------------- */
+QMenu {
+    background-color: #FFFFFF;
+    border: 1px solid #ABABAB;
+}
+QMenu::item {
+    padding: 6px 24px;
+}
+QMenu::item:selected {
+    background-color: #0078D7;
+    color: #FFFFFF;
+}
+QToolTip {
+    background-color: #1D1D1D;
+    color: #FFFFFF;
+    border: none;
+    padding: 4px 6px;
+}

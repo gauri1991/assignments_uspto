@@ -1,0 +1,5 @@
+patent_id	assignee_sequence	assignee_id	disambig_assignee_individual_name_first	disambig_assignee_individual_name_last	disambig_assignee_organization	assignee_type	location_id
+4000001	0	pv-widget	 	 	Widget Corp	2	loc1
+4000002	0	pv-gadget	 	 	Gadget Holdings LLC	2	loc2
+4000003	0	pv-bank	 	 	Big Bank NA	2	loc3
+4000004	0	pv-ind	John	Smith		4	loc4

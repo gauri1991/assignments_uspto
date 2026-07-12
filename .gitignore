@@ -18,3 +18,26 @@ venv/
 # Data / artifacts
 data/
 *.log
+
+# Generated outputs
+out/
+batch_output/
+*.parquet
+*.xlsx
+.~lock.*#
+# USPTO source XML can be very large; ignore at repo root and the xmls/ dir, keep test fixtures.
+/*.xml
+xmls/
+
+# USPTO source archives (can be large)
+*.zip
+
+# USPTO disambiguated-assignee reference data (large; point the reference-match step at it)
+reference/
+
+# Build-once entity-resolution dictionary artifact + pipeline outputs (regenerable, can be large)
+dictionary/
+data/
+
+# Generated entity-normalization memory (project-folder default). Force-add a curated one if wanted.
+/entities.json

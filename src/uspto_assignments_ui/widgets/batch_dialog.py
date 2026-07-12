@@ -1,0 +1,1834 @@
+"""The batch-processing dialog: build/run/save pipeline templates with a live console."""
+
+from __future__ import annotations
+
+import copy
+import html
+import logging
+import re
+from collections.abc import Callable
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+from PyQt6.QtCore import QObject, Qt, QThread
+from PyQt6.QtGui import QAction
+from PyQt6.QtWidgets import (
+    QAbstractItemView,
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QFileDialog,
+    QFormLayout,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
+    QMenu,
+    QMessageBox,
+    QPlainTextEdit,
+    QProgressBar,
+    QPushButton,
+    QSpinBox,
+    QTableWidget,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
+
+from uspto_assignments import (
+    FORMAT_SUFFIX,
+    LEGACY_NORMALIZE_TARGET,
+    STORE_TABLES,
+    AggregateStep,
+    BatchEvent,
+    BatchStep,
+    BatchTemplate,
+    ClassifyStep,
+    CompareStep,
+    DedupeStep,
+    DeriveStep,
+    EntityMemory,
+    ExportFormat,
+    ExportStep,
+    FilterStep,
+    LoadConfig,
+    NormalizeStep,
+    ReferenceMatchStep,
+    SelectStep,
+    SortStep,
+    TransferTypeStep,
+    columns_after,
+    columns_for,
+    dump_templates,
+    extract_distinct_reference,
+    load_templates,
+    run_preview,
+    scorer_names,
+    validate_template,
+)
+
+from ..settings import BatchTemplateStore, EntityMemoryStore
+from ..workers import BatchWorker, CallWorker, LogEmitter, QtLogHandler
+from .field_tree import FieldTree
+from .filter_bar import FilterBar
+from .page import SectionLabel
+from .preview_dialog import PreviewDialog
+
+_PREVIEW_LIMIT = 1000
+
+_MAX_RECORDS_CAP = 100_000_000
+_FORMATS: list[tuple[str, ExportFormat]] = [
+    ("Parquet", "parquet"),
+    ("CSV", "csv"),
+    ("Excel (.xlsx)", "xlsx"),
+    ("JSON", "json"),
+    ("Feather (Arrow)", "feather"),
+]
+_CORE_LOGGER = "uspto_assignments"
+_DERIVE_OPS: list[tuple[str, str]] = [
+    ("Year (YYYY of a date)", "year"),
+    ("Month (MM of a date)", "month"),
+    ("First part (split on '; ')", "split_first"),
+    ("Uppercase", "upper"),
+    ("Lowercase", "lower"),
+]
+_CLASSIFY_METHODS: list[tuple[str, str]] = [
+    ("Rules (fast, no dependency)", "rules"),
+    ("ML (probablepeople, if installed)", "probablepeople"),
+]
+_COMBINE_MODES: list[tuple[str, str]] = [
+    ("All parties agree", "all"),
+    ("Any party", "any"),
+    ("First party", "first"),
+    ("Majority", "majority"),
+]
+_ENTITY_TYPES: list[str] = ["company", "individual", "unknown"]
+_COMPARE_METHODS: list[tuple[str, str]] = [
+    ("Exact (fast; ideal on canonical columns)", "exact"),
+    ("Fuzzy (rapidfuzz ≥ threshold)", "fuzzy"),
+]
+_COMPARE_ACTIONS: list[tuple[str, str]] = [
+    ("Flag matches (add true/false column)", "flag"),
+    ("Drop matching rows", "drop_matches"),
+    ("Keep only matching rows", "keep_matches"),
+]
+_REFERENCE_MODES: list[tuple[str, str]] = [
+    ("Any party matches", "any"),
+    ("All parties match", "all"),
+]
+_REFERENCE_ACTIONS: list[tuple[str, str]] = [
+    ("Flag + normalize (add columns)", "flag"),
+    ("Keep only matched (known companies)", "keep_matched"),
+    ("Drop matched rows", "drop_matched"),
+]
+_REFERENCE_FILTER = "Reference (*.tsv *.csv *.parquet);;All files (*)"
+
+
+def _preset_firm_to_firm() -> BatchTemplate:
+    return BatchTemplate(
+        name="Firm-to-firm transfers",
+        steps=[TransferTypeStep(), ExportStep(fmt="parquet", tables=["flat"])],
+    )
+
+
+def _preset_top_assignees() -> BatchTemplate:
+    return BatchTemplate(
+        name="Top assignees",
+        steps=[
+            NormalizeStep(table="assignees", column="name"),
+            AggregateStep(table="assignees", group_by=["name_canonical"]),
+            ExportStep(fmt="csv", tables=["assignees_by_name_canonical"]),
+        ],
+    )
+
+
+def _preset_enrich_flat() -> BatchTemplate:
+    return BatchTemplate(
+        name="Enrich flat (names + types)",
+        steps=[
+            NormalizeStep(table="flat", column="assignor_names"),
+            NormalizeStep(table="flat", column="assignee_names"),
+            ClassifyStep(table="flat", column="assignor_names"),
+            ClassifyStep(table="flat", column="assignee_names"),
+            ExportStep(fmt="parquet", tables=["flat"]),
+        ],
+    )
+
+
+# Built-in example templates offered by "New from example ▾".
+_PRESETS: list[tuple[str, Callable[[], BatchTemplate]]] = [
+    ("Firm-to-firm transfers", _preset_firm_to_firm),
+    ("Top assignees", _preset_top_assignees),
+    ("Enrich flat (names + types)", _preset_enrich_flat),
+]
+
+
+# Columns available at the step being edited (base schema + columns added by earlier steps).
+# BatchDialog sets this around each modal step dialog (dialogs are modal + single-threaded, so a
+# module-scoped context is safe) and clears it afterwards; ``_cols`` reads it.
+_available_ctx: dict[str, list[str]] | None = None
+
+
+def _cols(table: str) -> list[str]:
+    """Columns for ``table`` — schema-aware (earlier steps' columns) when a context is set."""
+    if _available_ctx is not None and table in _available_ctx:
+        return list(_available_ctx[table])
+    return columns_for(table)
+
+
+def _checkable_columns(columns: list[str], checked: set[str] | None) -> QListWidget:
+    """A checkable column list; ``checked=None`` checks every column."""
+    widget = QListWidget()
+    widget.setProperty("panel", "true")
+    for name in columns:
+        item = QListWidgetItem(name)
+        item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+        on = checked is None or name in checked
+        item.setCheckState(Qt.CheckState.Checked if on else Qt.CheckState.Unchecked)
+        widget.addItem(item)
+    return widget
+
+
+def _checked_columns(widget: QListWidget) -> list[str]:
+    """Return the text of every checked item, preserving list order."""
+    result: list[str] = []
+    for i in range(widget.count()):
+        item = widget.item(i)
+        if item is not None and item.checkState() == Qt.CheckState.Checked:
+            result.append(item.text())
+    return result
+
+
+def _set_checks(widget: QListWidget, names: list[str]) -> None:
+    """Check exactly the items whose text is in ``names`` (uncheck the rest)."""
+    wanted = set(names)
+    for i in range(widget.count()):
+        item = widget.item(i)
+        if item is not None:
+            on = item.text() in wanted
+            item.setCheckState(Qt.CheckState.Checked if on else Qt.CheckState.Unchecked)
+
+
+class FilterStepDialog(QDialog):
+    """Configure a filter step: a table plus filter clauses (AND/OR)."""
+
+    def __init__(self, step: FilterStep | None = None, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Filter step")
+        self.setMinimumWidth(560)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(10)
+        layout.addWidget(SectionLabel("Filter step"))
+
+        self._table = QComboBox()
+        self._table.addItems(list(STORE_TABLES))
+        self._table.currentIndexChanged.connect(self._rebuild_filter_bar)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Table"))
+        row.addWidget(self._table, 1)
+        layout.addLayout(row)
+
+        self._filter_bar = FilterBar(_cols(self._table.currentText()))
+        layout.addWidget(self._filter_bar)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        if step is not None:
+            self._table.setCurrentText(step.table)  # rebuilds the filter bar for that table
+            self._filter_bar.set_state(step.clauses, step.combine, None)
+
+    def _rebuild_filter_bar(self) -> None:
+        new_bar = FilterBar(_cols(self._table.currentText()))
+        layout = self.layout()
+        if layout is not None:
+            layout.replaceWidget(self._filter_bar, new_bar)
+        self._filter_bar.deleteLater()
+        self._filter_bar = new_bar
+
+    def step(self) -> FilterStep:
+        """Return the configured filter step."""
+        return FilterStep(
+            table=self._table.currentText(),
+            clauses=self._filter_bar.clauses(),
+            combine=self._filter_bar.combine(),
+        )
+
+
+class _ExportColumnEditor(QWidget):
+    """Per-table final-column editor: include (checkbox), reorder (up/down), and rename output."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        self._pick = QComboBox()
+        self._pick.currentIndexChanged.connect(self._on_table_changed)
+        layout.addWidget(self._pick)
+        self._grid = QTableWidget(0, 2)
+        self._grid.setHorizontalHeaderLabels(["Column (check = include)", "Output name"])
+        self._grid.setProperty("panel", "true")
+        self._grid.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        vh = self._grid.verticalHeader()
+        if vh is not None:
+            vh.setVisible(False)
+        hh = self._grid.horizontalHeader()
+        if hh is not None:
+            hh.setStretchLastSection(True)
+        layout.addWidget(self._grid)
+        row = QHBoxLayout()
+        up = QPushButton("Move up")
+        up.clicked.connect(lambda: self._move(-1))
+        down = QPushButton("Move down")
+        down.clicked.connect(lambda: self._move(1))
+        row.addWidget(up)
+        row.addWidget(down)
+        row.addStretch(1)
+        layout.addLayout(row)
+        self._states: dict[str, list[tuple[str, bool, str]]] = {}
+        self._current: str | None = None
+
+    def set_tables(
+        self,
+        tables: list[str],
+        columns: dict[str, list[str]] | None,
+        renames: dict[str, dict[str, str]] | None,
+    ) -> None:
+        """Seed per-table column state from ``columns``/``renames`` (or all-included defaults)."""
+        self._states = {}
+        for table in tables:
+            source_cols = _cols(table)
+            chosen = (columns or {}).get(table)
+            table_renames = (renames or {}).get(table, {})
+            if chosen:  # explicit: included in the chosen order, then the rest unchecked
+                ordered = [c for c in chosen if c in source_cols]
+                rest = [c for c in source_cols if c not in ordered]
+                self._states[table] = [(c, True, table_renames.get(c, c)) for c in ordered] + [
+                    (c, False, table_renames.get(c, c)) for c in rest
+                ]
+            else:
+                self._states[table] = [(c, True, table_renames.get(c, c)) for c in source_cols]
+        self._pick.blockSignals(True)
+        self._pick.clear()
+        self._pick.addItems(tables)
+        self._pick.blockSignals(False)
+        self._current = tables[0] if tables else None
+        self._load(self._current)
+
+    def _on_table_changed(self) -> None:
+        self._save()
+        self._current = self._pick.currentText() or None
+        self._load(self._current)
+
+    def _load(self, table: str | None) -> None:
+        self._grid.setRowCount(0)
+        if not table:
+            return
+        for source, included, output in self._states.get(table, []):
+            index = self._grid.rowCount()
+            self._grid.insertRow(index)
+            item = QTableWidgetItem(source)
+            item.setFlags(
+                (item.flags() | Qt.ItemFlag.ItemIsUserCheckable) & ~Qt.ItemFlag.ItemIsEditable
+            )
+            item.setCheckState(Qt.CheckState.Checked if included else Qt.CheckState.Unchecked)
+            self._grid.setItem(index, 0, item)
+            self._grid.setItem(index, 1, QTableWidgetItem(output))
+
+    def _save(self) -> None:
+        if not self._current:
+            return
+        rows: list[tuple[str, bool, str]] = []
+        for index in range(self._grid.rowCount()):
+            source_item = self._grid.item(index, 0)
+            output_item = self._grid.item(index, 1)
+            if source_item is None:
+                continue
+            source = source_item.text()
+            included = source_item.checkState() == Qt.CheckState.Checked
+            output = (output_item.text().strip() if output_item else "") or source
+            rows.append((source, included, output))
+        self._states[self._current] = rows
+
+    def _move(self, delta: int) -> None:
+        row = self._grid.currentRow()
+        target = row + delta
+        if row < 0 or target < 0 or target >= self._grid.rowCount():
+            return
+        for column in range(2):
+            a = self._grid.takeItem(row, column)
+            b = self._grid.takeItem(target, column)
+            self._grid.setItem(row, column, b)
+            self._grid.setItem(target, column, a)
+        self._grid.setCurrentCell(target, 0)
+
+    def result(
+        self, tables: list[str]
+    ) -> tuple[dict[str, list[str]] | None, dict[str, dict[str, str]] | None]:
+        """Return ``(columns, renames)``; a table is omitted when it keeps all columns as-is."""
+        self._save()
+        columns: dict[str, list[str]] = {}
+        renames: dict[str, dict[str, str]] = {}
+        for table in tables:
+            rows = self._states.get(table)
+            if not rows:
+                continue
+            included = [(s, o) for (s, inc, o) in rows if inc]
+            is_default = len(included) == len(rows) and all(s == o for s, _, o in rows)
+            if is_default:
+                continue  # keep all columns, no rename → leave as default (None)
+            columns[table] = [s for s, _ in included]
+            table_renames = {s: o for s, o in included if o != s}
+            if table_renames:
+                renames[table] = table_renames
+        return (columns or None), (renames or None)
+
+
+class ExportStepDialog(QDialog):
+    """Configure an export step: format, which tables, and the final columns (order + rename)."""
+
+    def __init__(self, step: ExportStep | None = None, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Export step")
+        self.setMinimumWidth(460)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(10)
+        layout.addWidget(SectionLabel("Export step"))
+
+        self._format = QComboBox()
+        for label, fmt in _FORMATS:
+            self._format.addItem(label, fmt)
+        fmt_row = QHBoxLayout()
+        fmt_row.addWidget(QLabel("Format"))
+        fmt_row.addWidget(self._format, 1)
+        layout.addLayout(fmt_row)
+
+        layout.addWidget(QLabel("Tables (all checked = every table)"))
+        self._tables = QListWidget()
+        chosen = None if step is None else step.tables
+        for name in STORE_TABLES:
+            item = QListWidgetItem(name)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            checked = chosen is None or name in chosen
+            item.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+            self._tables.addItem(item)
+        self._tables.itemChanged.connect(self._refresh_editor)
+        layout.addWidget(self._tables)
+
+        self._customize = QCheckBox("Choose final columns (order + rename)")
+        self._customize.toggled.connect(self._on_customize_toggled)
+        layout.addWidget(self._customize)
+        self._editor = _ExportColumnEditor()
+        self._editor.setVisible(False)
+        layout.addWidget(self._editor)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self._pending_columns = None if step is None else step.columns
+        self._pending_renames = None if step is None else step.renames
+        if step is not None:
+            index = self._format.findData(step.fmt)
+            if index >= 0:
+                self._format.setCurrentIndex(index)
+            if step.columns or step.renames:
+                self._customize.setChecked(True)
+
+    def _checked_tables(self) -> list[str]:
+        checked: list[str] = []
+        for i in range(self._tables.count()):
+            item = self._tables.item(i)
+            if item is not None and item.checkState() == Qt.CheckState.Checked:
+                checked.append(item.text())
+        return checked
+
+    def _on_customize_toggled(self, on: bool) -> None:
+        self._editor.setVisible(on)
+        if on:
+            self._refresh_editor()
+
+    def _refresh_editor(self) -> None:
+        if self._customize.isChecked():
+            self._editor.set_tables(
+                self._checked_tables() or list(STORE_TABLES),
+                self._pending_columns,
+                self._pending_renames,
+            )
+
+    def step(self) -> ExportStep:
+        """Return the configured export step (``tables=None`` when all are selected)."""
+        checked = self._checked_tables()
+        tables = None if len(checked) == len(STORE_TABLES) else checked
+        columns: dict[str, list[str]] | None = None
+        renames: dict[str, dict[str, str]] | None = None
+        if self._customize.isChecked():
+            columns, renames = self._editor.result(checked or list(STORE_TABLES))
+        return ExportStep(
+            fmt=self._format.currentData(), tables=tables, columns=columns, renames=renames
+        )
+
+
+class NormalizeStepDialog(QDialog):
+    """Configure a normalize step: fuzzy-map a name column to a canonical column."""
+
+    def __init__(self, step: NormalizeStep | None = None, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Normalize step")
+        self.setMinimumWidth(440)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(10)
+        layout.addWidget(SectionLabel("Normalize step"))
+
+        form = QFormLayout()
+        self._table = QComboBox()
+        self._table.addItems(list(STORE_TABLES))
+        self._column = QComboBox()
+        self._target = QLineEdit()
+        self._target.setPlaceholderText("(auto: <column>_canonical)")
+        self._separator = QLineEdit()
+        self._separator.setPlaceholderText('e.g. "; " to normalize each concatenated part')
+        self._threshold = QSpinBox()
+        self._threshold.setRange(0, 100)
+        self._threshold.setValue(90)
+        self._scorer = QComboBox()
+        self._scorer.addItems(scorer_names())
+        self._learn = QCheckBox("Learn new canonicals (uncheck to match a curated memory only)")
+        self._learn.setChecked(True)
+        form.addRow("Table", self._table)
+        form.addRow("Name column", self._column)
+        form.addRow("Canonical column", self._target)
+        form.addRow("Split separator", self._separator)
+        form.addRow("Match threshold", self._threshold)
+        form.addRow("Scorer", self._scorer)
+        layout.addLayout(form)
+        layout.addWidget(self._learn)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self._table.currentIndexChanged.connect(self._rebuild_columns)
+        self._column.currentTextChanged.connect(self._suggest_for_column)
+        self._rebuild_columns()  # fills columns + primes target/separator suggestions
+
+        if step is not None:
+            self._table.setCurrentText(step.table)
+            # setCurrentText fires _suggest_for_column, priming a derived target + separator.
+            self._column.setCurrentText(step.column)
+            # Only override the suggestions with genuine custom values; a legacy/blank target or
+            # blank separator keeps the (repaired) auto-derived ones, fixing pre-fix templates.
+            if step.target and step.target != LEGACY_NORMALIZE_TARGET:
+                self._target.setText(step.target)
+            if step.separator:
+                self._separator.setText(step.separator)
+            self._threshold.setValue(step.threshold)
+            self._scorer.setCurrentText(step.scorer)
+            self._learn.setChecked(step.learn)
+
+    def _rebuild_columns(self) -> None:
+        self._column.clear()
+        self._column.addItems(_cols(self._table.currentText()))
+        name_index = self._column.findText("name")
+        if name_index >= 0:
+            self._column.setCurrentIndex(name_index)
+
+    def _suggest_for_column(self, column: str) -> None:
+        """Auto-fill the canonical target and suggest '; ' for concatenated ``*_names`` columns."""
+        if column:
+            self._target.setText(f"{column}_canonical")
+            self._separator.setText("; " if column.endswith("_names") else "")
+
+    def step(self) -> NormalizeStep:
+        """Return the configured normalize step (blank target derives ``<column>_canonical``)."""
+        column = self._column.currentText()
+        target = self._target.text().strip()
+        # Store blank when it just mirrors the derived name, so saved templates always re-derive.
+        stored_target = "" if target == f"{column}_canonical" else target
+        return NormalizeStep(
+            table=self._table.currentText(),
+            column=column,
+            target=stored_target,
+            threshold=self._threshold.value(),
+            separator=self._separator.text(),
+            learn=self._learn.isChecked(),
+            scorer=self._scorer.currentText(),
+        )
+
+
+class DedupeStepDialog(QDialog):
+    """Configure a dedupe step: drop duplicate rows (keep first), keyed by chosen columns."""
+
+    def __init__(self, step: DedupeStep | None = None, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Deduplicate step")
+        self.setMinimumWidth(420)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(10)
+        layout.addWidget(SectionLabel("Deduplicate step"))
+
+        self._table = QComboBox()
+        self._table.addItems(list(STORE_TABLES))
+        table_row = QHBoxLayout()
+        table_row.addWidget(QLabel("Table"))
+        table_row.addWidget(self._table, 1)
+        layout.addLayout(table_row)
+
+        layout.addWidget(QLabel("Key columns (none checked = whole row)"))
+        # Default: no key columns checked (dedupe on the whole row).
+        self._columns = _checkable_columns(_cols(self._table.currentText()), set())
+        layout.addWidget(self._columns)
+        self._table.currentIndexChanged.connect(self._rebuild_columns)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        if step is not None:
+            self._table.setCurrentText(step.table)  # may rebuild the column list
+            _set_checks(self._columns, step.subset or [])
+
+    def _rebuild_columns(self) -> None:
+        new = _checkable_columns(_cols(self._table.currentText()), set())
+        layout = self.layout()
+        if layout is not None:
+            layout.replaceWidget(self._columns, new)
+        self._columns.deleteLater()
+        self._columns = new
+
+    def step(self) -> DedupeStep:
+        """Return the configured dedupe step (``subset=None`` when no key columns are checked)."""
+        chosen = _checked_columns(self._columns)
+        return DedupeStep(table=self._table.currentText(), subset=chosen or None)
+
+
+class SelectStepDialog(QDialog):
+    """Configure a select step: keep (and reorder) a chosen set of columns."""
+
+    def __init__(self, step: SelectStep | None = None, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Select columns step")
+        self.setMinimumWidth(420)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(10)
+        layout.addWidget(SectionLabel("Select columns step"))
+
+        self._table = QComboBox()
+        self._table.addItems(list(STORE_TABLES))
+        table_row = QHBoxLayout()
+        table_row.addWidget(QLabel("Table"))
+        table_row.addWidget(self._table, 1)
+        layout.addLayout(table_row)
+
+        layout.addWidget(QLabel("Columns to keep"))
+        # Default: keep all columns (checked); a new table resets to all-kept.
+        self._columns = _checkable_columns(_cols(self._table.currentText()), None)
+        layout.addWidget(self._columns)
+        self._table.currentIndexChanged.connect(self._rebuild_columns)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        if step is not None:
+            self._table.setCurrentText(step.table)  # may rebuild the column list
+            _set_checks(self._columns, step.columns)
+
+    def _rebuild_columns(self) -> None:
+        new = _checkable_columns(_cols(self._table.currentText()), None)
+        layout = self.layout()
+        if layout is not None:
+            layout.replaceWidget(self._columns, new)
+        self._columns.deleteLater()
+        self._columns = new
+
+    def step(self) -> SelectStep:
+        """Return the configured select step."""
+        return SelectStep(table=self._table.currentText(), columns=_checked_columns(self._columns))
+
+
+class SortStepDialog(QDialog):
+    """Configure a sort step: order a table by one column."""
+
+    def __init__(self, step: SortStep | None = None, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Sort step")
+        self.setMinimumWidth(400)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(10)
+        layout.addWidget(SectionLabel("Sort step"))
+
+        form = QFormLayout()
+        self._table = QComboBox()
+        self._table.addItems(list(STORE_TABLES))
+        self._column = QComboBox()
+        self._ascending = QCheckBox("Ascending")
+        self._ascending.setChecked(True)
+        form.addRow("Table", self._table)
+        form.addRow("Column", self._column)
+        layout.addLayout(form)
+        layout.addWidget(self._ascending)
+
+        self._table.currentIndexChanged.connect(self._rebuild_columns)
+        self._rebuild_columns()
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        if step is not None:
+            self._table.setCurrentText(step.table)
+            self._column.setCurrentText(step.column)
+            self._ascending.setChecked(step.ascending)
+
+    def _rebuild_columns(self) -> None:
+        self._column.clear()
+        self._column.addItems(_cols(self._table.currentText()))
+
+    def step(self) -> SortStep:
+        """Return the configured sort step."""
+        return SortStep(
+            table=self._table.currentText(),
+            column=self._column.currentText(),
+            ascending=self._ascending.isChecked(),
+        )
+
+
+class DeriveStepDialog(QDialog):
+    """Configure a derive step: add a computed column (year/month/split/case)."""
+
+    def __init__(self, step: DeriveStep | None = None, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Derive column step")
+        self.setMinimumWidth(420)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(10)
+        layout.addWidget(SectionLabel("Derive column step"))
+
+        form = QFormLayout()
+        self._table = QComboBox()
+        self._table.addItems(list(STORE_TABLES))
+        self._source = QComboBox()
+        self._op = QComboBox()
+        for label, op in _DERIVE_OPS:
+            self._op.addItem(label, op)
+        self._target = QLineEdit()
+        self._target.setPlaceholderText("(auto: <source>_<op>)")
+        form.addRow("Table", self._table)
+        form.addRow("Source column", self._source)
+        form.addRow("Operation", self._op)
+        form.addRow("New column", self._target)
+        layout.addLayout(form)
+
+        self._table.currentIndexChanged.connect(self._rebuild_columns)
+        self._source.currentTextChanged.connect(self._suggest_target)
+        self._op.currentIndexChanged.connect(self._suggest_target)
+        self._rebuild_columns()
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        if step is not None:
+            self._table.setCurrentText(step.table)
+            self._source.setCurrentText(step.source)
+            op_index = self._op.findData(step.op)
+            if op_index >= 0:
+                self._op.setCurrentIndex(op_index)
+            self._target.setText(step.target)
+
+    def _rebuild_columns(self) -> None:
+        self._source.clear()
+        self._source.addItems(_cols(self._table.currentText()))
+
+    def _suggest_target(self) -> None:
+        source = self._source.currentText()
+        if source:
+            self._target.setText(f"{source}_{self._op.currentData()}")
+
+    def step(self) -> DeriveStep:
+        """Return the configured derive step (blank target derives ``<source>_<op>``)."""
+        return DeriveStep(
+            table=self._table.currentText(),
+            source=self._source.currentText(),
+            target=self._target.text().strip(),
+            op=self._op.currentData(),
+        )
+
+
+class AggregateStepDialog(QDialog):
+    """Configure an aggregate step: group + count rows into a new summary table."""
+
+    _NONE = "(none)"
+
+    def __init__(self, step: AggregateStep | None = None, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Aggregate step")
+        self.setMinimumWidth(440)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(10)
+        layout.addWidget(SectionLabel("Aggregate (group & count) step"))
+
+        self._table = QComboBox()
+        self._table.addItems(list(STORE_TABLES))
+        table_row = QHBoxLayout()
+        table_row.addWidget(QLabel("Table"))
+        table_row.addWidget(self._table, 1)
+        layout.addLayout(table_row)
+
+        layout.addWidget(QLabel("Group by columns"))
+        # Default: nothing grouped yet; a new table resets to no group-by columns.
+        self._columns = _checkable_columns(_cols(self._table.currentText()), set())
+        layout.addWidget(self._columns)
+
+        form = QFormLayout()
+        self._distinct = QComboBox()
+        self._out = QLineEdit()
+        self._out.setPlaceholderText("(auto: <table>_by_<columns>)")
+        form.addRow("Also count distinct", self._distinct)
+        form.addRow("Output table", self._out)
+        layout.addLayout(form)
+
+        self._table.currentIndexChanged.connect(self._rebuild_columns)
+        self._rebuild_distinct()
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        if step is not None:
+            self._table.setCurrentText(step.table)  # may rebuild the column list
+            _set_checks(self._columns, step.group_by)
+            if step.count_distinct:
+                self._distinct.setCurrentText(step.count_distinct)
+            self._out.setText(step.out_table)
+
+    def _rebuild_columns(self) -> None:
+        new = _checkable_columns(_cols(self._table.currentText()), set())
+        layout = self.layout()
+        if layout is not None:
+            layout.replaceWidget(self._columns, new)
+        self._columns.deleteLater()
+        self._columns = new
+        self._rebuild_distinct()
+
+    def _rebuild_distinct(self) -> None:
+        self._distinct.clear()
+        self._distinct.addItem(self._NONE)
+        self._distinct.addItems(_cols(self._table.currentText()))
+
+    def step(self) -> AggregateStep:
+        """Return the configured aggregate step."""
+        distinct = self._distinct.currentText()
+        return AggregateStep(
+            table=self._table.currentText(),
+            group_by=_checked_columns(self._columns),
+            count_distinct=None if distinct == self._NONE else distinct,
+            out_table=self._out.text().strip(),
+        )
+
+
+class ClassifyStepDialog(QDialog):
+    """Configure a classify step: label a name column as company / individual / unknown."""
+
+    def __init__(self, step: ClassifyStep | None = None, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Classify entity type step")
+        self.setMinimumWidth(440)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(10)
+        layout.addWidget(SectionLabel("Classify entity type step"))
+
+        form = QFormLayout()
+        self._table = QComboBox()
+        self._table.addItems(list(STORE_TABLES))
+        self._column = QComboBox()
+        self._target = QLineEdit()
+        self._target.setPlaceholderText("(auto: <column>_type)")
+        self._method = QComboBox()
+        for label, value in _CLASSIFY_METHODS:
+            self._method.addItem(label, value)
+        self._mode = QComboBox()
+        for label, value in _COMBINE_MODES:
+            self._mode.addItem(label, value)
+        self._separator = QLineEdit()
+        self._separator.setPlaceholderText('e.g. "; " to classify each concatenated party')
+        form.addRow("Table", self._table)
+        form.addRow("Name column", self._column)
+        form.addRow("Type column", self._target)
+        form.addRow("Method", self._method)
+        form.addRow("Multi-party mode", self._mode)
+        form.addRow("Split separator", self._separator)
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self._table.currentIndexChanged.connect(self._rebuild_columns)
+        self._column.currentTextChanged.connect(self._suggest_for_column)
+        self._rebuild_columns()
+
+        if step is not None:
+            self._table.setCurrentText(step.table)
+            self._column.setCurrentText(step.column)
+            if step.target:
+                self._target.setText(step.target)
+            self._method.setCurrentIndex(max(0, self._method.findData(step.method)))
+            self._mode.setCurrentIndex(max(0, self._mode.findData(step.mode)))
+            if step.separator:
+                self._separator.setText(step.separator)
+
+    def _rebuild_columns(self) -> None:
+        self._column.clear()
+        self._column.addItems(_cols(self._table.currentText()))
+
+    def _suggest_for_column(self, column: str) -> None:
+        if column:
+            self._target.setText(f"{column}_type")
+            self._separator.setText("; " if column.endswith("_names") else "")
+
+    def step(self) -> ClassifyStep:
+        """Return the configured classify step (blank target derives ``<column>_type``)."""
+        column = self._column.currentText()
+        target = self._target.text().strip()
+        stored_target = "" if target == f"{column}_type" else target
+        return ClassifyStep(
+            table=self._table.currentText(),
+            column=column,
+            target=stored_target,
+            method=self._method.currentData(),
+            mode=self._mode.currentData(),
+            separator=self._separator.text(),
+        )
+
+
+class CompareStepDialog(QDialog):
+    """Configure a compare step: match two columns and flag, drop, or keep matches."""
+
+    def __init__(self, step: CompareStep | None = None, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Compare columns step")
+        self.setMinimumWidth(460)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(10)
+        layout.addWidget(SectionLabel("Compare columns step"))
+
+        form = QFormLayout()
+        self._table = QComboBox()
+        self._table.addItems(list(STORE_TABLES))
+        self._left = QComboBox()
+        self._right = QComboBox()
+        self._method = QComboBox()
+        for label, value in _COMPARE_METHODS:
+            self._method.addItem(label, value)
+        self._scorer = QComboBox()
+        self._scorer.addItems(scorer_names())
+        self._threshold = QSpinBox()
+        self._threshold.setRange(0, 100)
+        self._threshold.setValue(90)
+        self._action = QComboBox()
+        for label, value in _COMPARE_ACTIONS:
+            self._action.addItem(label, value)
+        form.addRow("Table", self._table)
+        form.addRow("Left column", self._left)
+        form.addRow("Right column", self._right)
+        form.addRow("Method", self._method)
+        form.addRow("Scorer (fuzzy)", self._scorer)
+        form.addRow("Threshold (fuzzy)", self._threshold)
+        form.addRow("Action", self._action)
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self._table.currentIndexChanged.connect(self._rebuild_columns)
+        self._rebuild_columns()
+
+        if step is not None:
+            self._table.setCurrentText(step.table)
+            self._left.setCurrentText(step.left)
+            self._right.setCurrentText(step.right)
+            self._method.setCurrentIndex(max(0, self._method.findData(step.method)))
+            self._scorer.setCurrentText(step.scorer)
+            self._threshold.setValue(step.threshold)
+            self._action.setCurrentIndex(max(0, self._action.findData(step.action)))
+
+    def _rebuild_columns(self) -> None:
+        cols = _cols(self._table.currentText())
+        for combo in (self._left, self._right):
+            combo.clear()
+            combo.addItems(cols)
+
+    def step(self) -> CompareStep:
+        """Return the configured compare step."""
+        return CompareStep(
+            table=self._table.currentText(),
+            left=self._left.currentText(),
+            right=self._right.currentText(),
+            method=self._method.currentData(),
+            scorer=self._scorer.currentText(),
+            threshold=self._threshold.value(),
+            action=self._action.currentData(),
+        )
+
+
+class TransferTypeStepDialog(QDialog):
+    """Configure the transfer-type preset: keep only a chosen assignor→assignee pairing."""
+
+    def __init__(self, step: TransferTypeStep | None = None, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Transfer type step")
+        self.setMinimumWidth(440)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(10)
+        layout.addWidget(SectionLabel("Transfer type (assignor → assignee) step"))
+
+        form = QFormLayout()
+        self._table = QComboBox()
+        self._table.addItems(list(STORE_TABLES))
+        self._table.setCurrentText("flat")
+        self._assignor_col = QComboBox()
+        self._assignee_col = QComboBox()
+        self._assignor_type = QComboBox()
+        self._assignor_type.addItems(_ENTITY_TYPES)
+        self._assignee_type = QComboBox()
+        self._assignee_type.addItems(_ENTITY_TYPES)
+        self._method = QComboBox()
+        for label, value in _CLASSIFY_METHODS:
+            self._method.addItem(label, value)
+        form.addRow("Table", self._table)
+        form.addRow("Assignor column", self._assignor_col)
+        form.addRow("Assignee column", self._assignee_col)
+        form.addRow("Assignor is", self._assignor_type)
+        form.addRow("Assignee is", self._assignee_type)
+        form.addRow("Method", self._method)
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self._table.currentIndexChanged.connect(self._rebuild_columns)
+        self._rebuild_columns()
+
+        if step is not None:
+            self._table.setCurrentText(step.table)
+            self._assignor_col.setCurrentText(step.assignor_column)
+            self._assignee_col.setCurrentText(step.assignee_column)
+            self._assignor_type.setCurrentText(step.assignor_type)
+            self._assignee_type.setCurrentText(step.assignee_type)
+            self._method.setCurrentIndex(max(0, self._method.findData(step.method)))
+
+    def _rebuild_columns(self) -> None:
+        cols = _cols(self._table.currentText())
+        for combo, default in (
+            (self._assignor_col, "assignor_names"),
+            (self._assignee_col, "assignee_names"),
+        ):
+            combo.clear()
+            combo.addItems(cols)
+            if default in cols:
+                combo.setCurrentText(default)
+
+    def step(self) -> TransferTypeStep:
+        """Return the configured transfer-type step."""
+        return TransferTypeStep(
+            table=self._table.currentText(),
+            assignor_column=self._assignor_col.currentText(),
+            assignee_column=self._assignee_col.currentText(),
+            assignor_type=self._assignor_type.currentText(),
+            assignee_type=self._assignee_type.currentText(),
+            method=self._method.currentData(),
+        )
+
+
+class ReferenceMatchStepDialog(QDialog):
+    """Configure a reference-match step: match a name column against a disambiguated reference."""
+
+    def __init__(  # noqa: PLR0915 - linear widget assembly
+        self, step: ReferenceMatchStep | None = None, parent: QWidget | None = None
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Match against reference step")
+        self.setMinimumWidth(560)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(10)
+        layout.addWidget(SectionLabel("Match against disambiguated reference"))
+
+        form = QFormLayout()
+        self._table = QComboBox()
+        self._table.addItems(list(STORE_TABLES))
+        self._table.setCurrentText("flat")
+        self._column = QComboBox()
+        self._reference = QLineEdit()
+        self._reference.setPlaceholderText("reference file (.tsv / .csv / .parquet)…")
+        browse = QPushButton("Browse…")
+        browse.clicked.connect(self._pick_reference)
+        build = QPushButton("Build compact…")
+        build.clicked.connect(self._build_reference)
+        ref_row = QHBoxLayout()
+        ref_row.addWidget(self._reference, 1)
+        ref_row.addWidget(browse)
+        ref_row.addWidget(build)
+        self._name_column = QLineEdit("disambig_assignee_organization")
+        self._id_column = QLineEdit()
+        self._id_column.setPlaceholderText("(optional, e.g. assignee_id)")
+        self._scorer = QComboBox()
+        self._scorer.addItems(scorer_names())
+        self._threshold = QSpinBox()
+        self._threshold.setRange(0, 100)
+        self._threshold.setValue(90)
+        self._mode = QComboBox()
+        for label, value in _REFERENCE_MODES:
+            self._mode.addItem(label, value)
+        self._action = QComboBox()
+        for label, value in _REFERENCE_ACTIONS:
+            self._action.addItem(label, value)
+
+        form.addRow("Table", self._table)
+        form.addRow("Name column", self._column)
+        form.addRow("Reference file", ref_row)
+        form.addRow("Reference name column", self._name_column)
+        form.addRow("Reference id column", self._id_column)
+        form.addRow("Scorer", self._scorer)
+        form.addRow("Threshold", self._threshold)
+        form.addRow("Multi-party mode", self._mode)
+        form.addRow("Action", self._action)
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self._table.currentIndexChanged.connect(self._rebuild_columns)
+        self._rebuild_columns()
+
+        if step is not None:
+            self._table.setCurrentText(step.table)
+            self._column.setCurrentText(step.column)
+            self._reference.setText(step.reference_path)
+            self._name_column.setText(step.name_column)
+            self._id_column.setText(step.id_column)
+            self._scorer.setCurrentText(step.scorer)
+            self._threshold.setValue(step.threshold)
+            self._mode.setCurrentIndex(max(0, self._mode.findData(step.mode)))
+            self._action.setCurrentIndex(max(0, self._action.findData(step.action)))
+
+    def _rebuild_columns(self) -> None:
+        self._column.clear()
+        cols = _cols(self._table.currentText())
+        self._column.addItems(cols)
+        if "assignor_names" in cols:
+            self._column.setCurrentText("assignor_names")
+
+    def _pick_reference(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Reference file", "", _REFERENCE_FILTER)
+        if path:
+            self._reference.setText(path)
+
+    def _build_reference(self) -> None:
+        src, _ = QFileDialog.getOpenFileName(
+            self, "Big reference to compact (TSV/CSV)", "", _REFERENCE_FILTER
+        )
+        if not src:
+            return
+        dst, _ = QFileDialog.getSaveFileName(
+            self, "Save compact reference", "reference.parquet", "Parquet (*.parquet)"
+        )
+        if not dst:
+            return
+        try:
+            count = extract_distinct_reference(
+                Path(src),
+                Path(dst),
+                name_column=self._name_column.text().strip(),
+                id_column=self._id_column.text().strip(),
+            )
+        except (OSError, ValueError, KeyError) as exc:
+            self._reference.setText(f"Build failed: {exc}")
+            return
+        self._reference.setText(dst)
+        self._name_column.setText("organization")  # the compact file's column names
+        if self._id_column.text().strip():
+            self._id_column.setText("assignee_id")
+        self.setWindowTitle(f"Match against reference step — built {count:,} orgs")
+
+    def step(self) -> ReferenceMatchStep:
+        """Return the configured reference-match step."""
+        return ReferenceMatchStep(
+            table=self._table.currentText(),
+            column=self._column.currentText(),
+            reference_path=self._reference.text().strip(),
+            name_column=self._name_column.text().strip() or "disambig_assignee_organization",
+            id_column=self._id_column.text().strip(),
+            scorer=self._scorer.currentText(),
+            threshold=self._threshold.value(),
+            mode=self._mode.currentData(),
+            action=self._action.currentData(),
+        )
+
+
+_StepDialog = (
+    FilterStepDialog
+    | NormalizeStepDialog
+    | DedupeStepDialog
+    | SelectStepDialog
+    | SortStepDialog
+    | DeriveStepDialog
+    | AggregateStepDialog
+    | ClassifyStepDialog
+    | CompareStepDialog
+    | TransferTypeStepDialog
+    | ReferenceMatchStepDialog
+    | ExportStepDialog
+)
+
+# Step kinds offered by the "Add step" menu (order = menu order).
+_STEP_DIALOGS: list[tuple[str, type[_StepDialog]]] = [
+    ("Filter…", FilterStepDialog),
+    ("Normalize names…", NormalizeStepDialog),
+    ("Classify entity type…", ClassifyStepDialog),
+    ("Compare columns…", CompareStepDialog),
+    ("Transfer type (firm→firm…)…", TransferTypeStepDialog),
+    ("Match against reference…", ReferenceMatchStepDialog),
+    ("Deduplicate…", DedupeStepDialog),
+    ("Select columns…", SelectStepDialog),
+    ("Sort…", SortStepDialog),
+    ("Derive column…", DeriveStepDialog),
+    ("Aggregate (group & count)…", AggregateStepDialog),
+    ("Export…", ExportStepDialog),
+]
+
+# Maps a step dataclass to the dialog that edits it (for double-click editing).
+_EDIT_DIALOGS: dict[type[BatchStep], type[_StepDialog]] = {
+    FilterStep: FilterStepDialog,
+    NormalizeStep: NormalizeStepDialog,
+    ClassifyStep: ClassifyStepDialog,
+    CompareStep: CompareStepDialog,
+    TransferTypeStep: TransferTypeStepDialog,
+    ReferenceMatchStep: ReferenceMatchStepDialog,
+    DedupeStep: DedupeStepDialog,
+    SelectStep: SelectStepDialog,
+    SortStep: SortStepDialog,
+    DeriveStep: DeriveStepDialog,
+    AggregateStep: AggregateStepDialog,
+    ExportStep: ExportStepDialog,
+}
+
+
+class BatchDialog(QDialog):
+    """Build, save, and run batch-processing templates with a live console."""
+
+    def __init__(
+        self,
+        store: BatchTemplateStore,
+        memory_store: EntityMemoryStore | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Batch processing")
+        # Make this a normal top-level window (not a close-only modal dialog) so the window manager
+        # gives it working minimize/maximize/restore controls. It is opened non-modally.
+        self.setWindowFlags(
+            Qt.WindowType.Window
+            | Qt.WindowType.WindowMinimizeButtonHint
+            | Qt.WindowType.WindowMaximizeButtonHint
+            | Qt.WindowType.WindowCloseButtonHint
+        )
+        self.resize(980, 680)
+        self._store = store
+        self._memory_store = memory_store if memory_store is not None else EntityMemoryStore()
+        self._memory: EntityMemory | None = None  # populated at run time from the store
+        self._steps: list[BatchStep] = []
+        self._completed = 0  # files finished this run (drives the determinate progress bar)
+        self._thread: QThread | None = None
+        self._worker: QObject | None = None  # BatchWorker (run) or CallWorker (preview)
+        self._log_emitter = LogEmitter()
+        self._log_handler = QtLogHandler(self._log_emitter)
+        self._log_emitter.message.connect(self._append_console)
+
+        root = QHBoxLayout(self)
+        root.setContentsMargins(16, 16, 16, 16)
+        root.setSpacing(12)
+        root.addLayout(self._build_config_column(), 3)
+        root.addLayout(self._build_console_column(), 4)
+
+        self._reload_templates()
+
+    # -- config column -----------------------------------------------------
+    def _build_config_column(self) -> QVBoxLayout:  # noqa: PLR0915 - linear widget assembly
+        column = QVBoxLayout()
+        column.setSpacing(10)
+
+        column.addWidget(SectionLabel("Template"))
+        self._template_name = QLineEdit()
+        self._template_name.setPlaceholderText("template name")
+        self._saved = QComboBox()
+        self._saved.currentIndexChanged.connect(self._load_selected_template)
+        name_row = QHBoxLayout()
+        name_row.addWidget(self._template_name, 1)
+        save_btn = QPushButton("Save")
+        save_btn.setProperty("primary", "true")
+        save_btn.clicked.connect(self._save_template)
+        delete_btn = QPushButton("Delete")
+        delete_btn.clicked.connect(self._delete_template)
+        name_row.addWidget(save_btn)
+        name_row.addWidget(delete_btn)
+        column.addLayout(name_row)
+        column.addWidget(self._saved)
+
+        example_btn = QPushButton("New from example ▾")
+        example_menu = QMenu(example_btn)
+        for name, factory in _PRESETS:
+            action = QAction(name, example_menu)
+            action.triggered.connect(lambda _checked=False, f=factory: self._apply_template(f()))
+            example_menu.addAction(action)
+        example_btn.setMenu(example_menu)
+        column.addLayout(
+            self._button_row(
+                ("Duplicate", self._duplicate_template),
+                ("Import…", self._import_template),
+                ("Export…", self._export_template),
+            )
+        )
+        column.addWidget(example_btn)
+
+        column.addWidget(SectionLabel("Inputs (xml / zip files or dataset folders)"))
+        self._inputs = QListWidget()
+        self._inputs.setProperty("panel", "true")
+        column.addWidget(self._inputs)
+        column.addLayout(
+            self._button_row(
+                ("Add files…", self._add_files),
+                ("Add folder…", self._add_folder),
+                ("Remove", self._remove_input),
+            )
+        )
+
+        column.addWidget(SectionLabel("Load — fields & record cap"))
+        self._max = QSpinBox()
+        self._max.setRange(0, _MAX_RECORDS_CAP)
+        self._max.setSpecialValueText("All records")
+        self._max.setValue(0)
+        max_row = QHBoxLayout()
+        max_row.addWidget(QLabel("Max records"))
+        max_row.addWidget(self._max, 1)
+        column.addLayout(max_row)
+        self._fields = FieldTree()
+        column.addWidget(self._fields)
+
+        column.addWidget(SectionLabel("Steps (double-click to edit)"))
+        self._steps_list = QListWidget()
+        self._steps_list.setProperty("panel", "true")
+        self._steps_list.itemDoubleClicked.connect(self._edit_step)
+        column.addWidget(self._steps_list)
+
+        add_btn = QPushButton("Add step ▾")
+        add_btn.setProperty("primary", "true")
+        menu = QMenu(add_btn)
+        for label, dialog_cls in _STEP_DIALOGS:
+            action = QAction(label, menu)
+            action.triggered.connect(lambda _checked=False, cls=dialog_cls: self._add_step(cls))
+            menu.addAction(action)
+        add_btn.setMenu(menu)
+        steps_row = QHBoxLayout()
+        steps_row.addWidget(add_btn)
+        for label, slot in (
+            ("↑", lambda: self._move_step(-1)),
+            ("↓", lambda: self._move_step(1)),
+            ("Duplicate", self._duplicate_step),
+            ("Enable/Disable", self._toggle_step),
+            ("Remove", self._remove_step),
+        ):
+            button = QPushButton(label)
+            button.clicked.connect(lambda _checked=False, s=slot: s())
+            steps_row.addWidget(button)
+        steps_row.addStretch(1)
+        column.addLayout(steps_row)
+        return column
+
+    # -- console column ----------------------------------------------------
+    def _build_console_column(self) -> QVBoxLayout:
+        column = QVBoxLayout()
+        column.setSpacing(10)
+
+        column.addWidget(SectionLabel("Output"))
+        self._out_dir = QLineEdit()
+        self._out_dir.setPlaceholderText("output folder…")
+        browse = QPushButton("Browse…")
+        browse.clicked.connect(self._choose_output)
+        out_row = QHBoxLayout()
+        out_row.addWidget(self._out_dir, 1)
+        out_row.addWidget(browse)
+        column.addLayout(out_row)
+
+        self._workers = QSpinBox()
+        self._workers.setRange(1, 32)
+        self._workers.setValue(1)
+        workers_row = QHBoxLayout()
+        workers_row.addWidget(QLabel("Workers (1 = sequential)"))
+        workers_row.addWidget(self._workers, 1)
+        column.addLayout(workers_row)
+
+        column.addWidget(SectionLabel("Console"))
+        self._console = QPlainTextEdit()
+        self._console.setReadOnly(True)
+        self._console.setProperty("role", "console")
+        column.addWidget(self._console, 1)
+
+        self._progress = QProgressBar()
+        self._progress.setVisible(False)
+        column.addWidget(self._progress)
+
+        self._preview_btn = QPushButton("Preview…")
+        self._preview_btn.clicked.connect(self._preview)
+        self._run_btn = QPushButton("Run batch")
+        self._run_btn.setProperty("primary", "true")
+        self._run_btn.clicked.connect(self._run)
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.reject)
+        run_row = QHBoxLayout()
+        run_row.addStretch(1)
+        run_row.addWidget(self._preview_btn)
+        run_row.addWidget(self._run_btn)
+        run_row.addWidget(close_btn)
+        column.addLayout(run_row)
+        return column
+
+    @staticmethod
+    def _button_row(*buttons: tuple[str, Any]) -> QHBoxLayout:
+        row = QHBoxLayout()
+        for label, slot in buttons:
+            button = QPushButton(label)
+            button.clicked.connect(lambda _checked=False, s=slot: s())
+            row.addWidget(button)
+        row.addStretch(1)
+        return row
+
+    # -- template build / persistence -------------------------------------
+    def template(self) -> BatchTemplate:
+        """Build a :class:`BatchTemplate` from the current UI state."""
+        return BatchTemplate(
+            name=self._template_name.text().strip() or "batch",
+            load=LoadConfig(
+                limit=self._max.value() or None, columns=self._fields.selected_columns()
+            ),
+            steps=list(self._steps),
+        )
+
+    def _reload_templates(self) -> None:
+        self._saved.blockSignals(True)
+        self._saved.clear()
+        self._saved.addItem("— saved templates —", None)
+        for template in self._store.load():
+            self._saved.addItem(template.name, template.name)
+        self._saved.blockSignals(False)
+
+    def _apply_template(self, template: BatchTemplate) -> None:
+        """Load a template into the UI (name, record cap, field selection, and steps)."""
+        self._template_name.setText(template.name)
+        self._max.setValue(template.load.limit or 0)
+        self._fields.set_selected_columns(template.load.columns)
+        self._steps = [copy.deepcopy(s) for s in template.steps]
+        self._refresh_steps_list()
+
+    def _load_selected_template(self) -> None:
+        name = self._saved.currentData()
+        if not name:
+            return
+        match = next((t for t in self._store.load() if t.name == name), None)
+        if match is not None:
+            self._apply_template(match)
+
+    def _duplicate_template(self) -> None:
+        template = self.template()
+        template.name = f"{template.name} copy"
+        self._store.add(template)
+        self._reload_templates()
+        self._template_name.setText(template.name)
+        self._append_console(f"Duplicated as '{template.name}'")
+
+    def _export_template(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export template",
+            f"{self._template_name.text().strip() or 'template'}.json",
+            "JSON (*.json)",
+        )
+        if path:
+            dump_templates([self.template()], Path(path))
+            self._append_console(f"Exported template to {Path(path).name}")
+
+    def _import_template(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Import template", "", "JSON (*.json)")
+        if not path:
+            return
+        templates = load_templates(Path(path))
+        if templates:
+            self._apply_template(templates[0])
+            self._append_console(f"Imported template '{templates[0].name}'")
+
+    def _save_template(self) -> None:
+        template = self.template()
+        self._store.add(template)
+        self._reload_templates()
+        self._append_console(f"Saved template '{template.name}'")
+
+    def _delete_template(self) -> None:
+        name = self._template_name.text().strip()
+        if name:
+            self._store.delete(name)
+            self._reload_templates()
+            self._append_console(f"Deleted template '{name}'")
+
+    # -- inputs ------------------------------------------------------------
+    def _add_files(self) -> None:
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Add input files", "", "USPTO assignment (*.xml *.zip);;All files (*)"
+        )
+        for path in paths:
+            self._inputs.addItem(path)
+
+    def _add_folder(self) -> None:
+        path = QFileDialog.getExistingDirectory(self, "Add dataset folder")
+        if path:
+            self._inputs.addItem(path)
+
+    def _remove_input(self) -> None:
+        for item in self._inputs.selectedItems():
+            self._inputs.takeItem(self._inputs.row(item))
+
+    def _input_paths(self) -> list[Path]:
+        return [Path(self._inputs.item(i).text()) for i in range(self._inputs.count())]  # type: ignore[union-attr]
+
+    # -- steps -------------------------------------------------------------
+    def _load(self) -> LoadConfig:
+        return LoadConfig(limit=self._max.value() or None, columns=self._fields.selected_columns())
+
+    def _open_step_dialog(
+        self, dialog_cls: type[_StepDialog], step: BatchStep | None, index: int
+    ) -> BatchStep | None:
+        """Open a step dialog with the columns available at ``index`` in scope; return new step."""
+        global _available_ctx  # noqa: PLW0603 - modal, single-threaded schema context for dialogs
+        _available_ctx = columns_after(self._load(), self._steps, index)
+        try:
+            dialog = dialog_cls(step, parent=self) if step is not None else dialog_cls(parent=self)  # type: ignore[arg-type]
+            return dialog.step() if dialog.exec() == QDialog.DialogCode.Accepted else None
+        finally:
+            _available_ctx = None
+
+    def _add_step(self, dialog_cls: type[_StepDialog]) -> None:
+        row = self._steps_list.currentRow()
+        index = (
+            row + 1 if 0 <= row < len(self._steps) else len(self._steps)
+        )  # insert after selection
+        new = self._open_step_dialog(dialog_cls, None, index)
+        if new is not None:
+            self._steps.insert(index, new)
+            self._refresh_steps_list()
+            self._steps_list.setCurrentRow(index)
+
+    def _edit_step(self, item: QListWidgetItem) -> None:
+        row = self._steps_list.row(item)
+        if not (0 <= row < len(self._steps)):
+            return
+        step = self._steps[row]
+        dialog_cls = _EDIT_DIALOGS.get(type(step))
+        if dialog_cls is None:
+            return
+        new = self._open_step_dialog(dialog_cls, step, row)
+        if new is not None:
+            new.enabled = step.enabled  # editing preserves the enabled flag
+            self._steps[row] = new
+            self._refresh_steps_list()
+            self._steps_list.setCurrentRow(row)
+
+    def _remove_step(self) -> None:
+        row = self._steps_list.currentRow()
+        if 0 <= row < len(self._steps):
+            del self._steps[row]
+            self._refresh_steps_list()
+
+    def _move_step(self, delta: int) -> None:
+        row = self._steps_list.currentRow()
+        target = row + delta
+        if 0 <= row < len(self._steps) and 0 <= target < len(self._steps):
+            self._steps[row], self._steps[target] = self._steps[target], self._steps[row]
+            self._refresh_steps_list()
+            self._steps_list.setCurrentRow(target)
+
+    def _duplicate_step(self) -> None:
+        row = self._steps_list.currentRow()
+        if 0 <= row < len(self._steps):
+            self._steps.insert(row + 1, copy.deepcopy(self._steps[row]))
+            self._refresh_steps_list()
+            self._steps_list.setCurrentRow(row + 1)
+
+    def _toggle_step(self) -> None:
+        row = self._steps_list.currentRow()
+        if 0 <= row < len(self._steps):
+            self._steps[row].enabled = not self._steps[row].enabled
+            self._refresh_steps_list()
+            self._steps_list.setCurrentRow(row)
+
+    def _refresh_steps_list(self) -> None:
+        self._steps_list.clear()
+        warned = _warnings_by_step(validate_template(self._load(), self._steps))
+        for index, step in enumerate(self._steps, start=1):
+            badge = "⚠ " if index in warned else ""
+            text = f"{index}. {badge}{_describe_step(step)}"
+            if not step.enabled:
+                text += "   (disabled)"
+            item = QListWidgetItem(text)
+            if not step.enabled:
+                font = item.font()
+                font.setStrikeOut(True)
+                item.setFont(font)
+                item.setForeground(Qt.GlobalColor.gray)
+            if index in warned:
+                item.setToolTip("\n".join(warned[index]))
+            self._steps_list.addItem(item)
+
+    # -- run ---------------------------------------------------------------
+    def _choose_output(self) -> None:
+        path = QFileDialog.getExistingDirectory(self, "Choose output folder")
+        if path:
+            self._out_dir.setText(path)
+
+    def _run(self) -> None:
+        if self._thread is not None:
+            return
+        inputs = self._input_paths()
+        out_text = self._out_dir.text().strip()
+        if not inputs or not out_text:
+            self._append_console("Add at least one input and an output folder.")
+            return
+        template = self.template()
+        self._console.clear()
+        warnings = validate_template(template.load, template.steps)
+        if warnings:
+            for warning in warnings:
+                self._append_console(f"⚠ {warning}", "error")
+            proceed = QMessageBox.question(
+                self,
+                "Validation warnings",
+                f"The pipeline has {len(warnings)} warning(s). Run anyway?",
+            )
+            if proceed != QMessageBox.StandardButton.Yes:
+                return
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self._append_console(f"Running '{template.name}' over {len(inputs)} input(s)…")
+
+        logging.getLogger(_CORE_LOGGER).addHandler(self._log_handler)
+        self._completed = 0
+        self._progress.setRange(0, len(inputs))  # determinate: files completed
+        self._progress.setValue(0)
+        self._progress.setVisible(True)
+        self._run_btn.setEnabled(False)
+
+        self._memory = self._memory_store.load()
+        thread = QThread(self)
+        worker = BatchWorker(
+            template,
+            inputs,
+            Path(out_text),
+            workers=self._workers.value(),
+            timestamp=timestamp,
+            memory=self._memory,
+        )
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.batch_event.connect(self._on_event)
+        worker.finished.connect(self._on_finished)
+        worker.failed.connect(self._on_failed)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(self._cleanup)
+        self._thread = thread
+        self._worker = worker
+        thread.start()
+
+    def _on_event(self, event: object) -> None:
+        if isinstance(event, BatchEvent):
+            self._append_console(event.message, event.level)
+            if event.message.startswith(("✓", "✗")):  # a per-file completion line
+                self._completed += 1
+                self._progress.setValue(self._completed)
+
+    def _on_finished(self, result: object) -> None:
+        self._finish_run()
+        if self._memory is not None:  # persist any entities learned during the run
+            self._memory_store.save(self._memory)
+            canonicals, aliases = self._memory.counts()
+            self._append_console(f"Entity memory: {canonicals:,} canonicals, {aliases:,} aliases")
+        self._append_console("Done.")
+
+    # -- preview -----------------------------------------------------------
+    def _preview(self) -> None:
+        if self._thread is not None:
+            return
+        inputs = self._input_paths()
+        if not inputs:
+            self._append_console("Add at least one input to preview.")
+            return
+        template = self.template()
+        source = inputs[0]
+        self._append_console(
+            f"Previewing '{template.name}' on {source.name} (first {_PREVIEW_LIMIT:,} records)…"
+        )
+        self._progress.setRange(0, 0)  # indeterminate while the sample is computed
+        self._progress.setVisible(True)
+        self._preview_btn.setEnabled(False)
+        self._run_btn.setEnabled(False)
+
+        thread = QThread(self)
+        worker = CallWorker(
+            lambda: run_preview(template, source, limit=_PREVIEW_LIMIT, describe=_describe_step)
+        )
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_preview_ready)
+        worker.failed.connect(self._on_preview_failed)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(self._cleanup)
+        self._thread = thread
+        self._worker = worker
+        thread.start()
+
+    def _on_preview_ready(self, result: object) -> None:
+        self._finish_preview()
+        if not isinstance(result, tuple):
+            return
+        tables, stats = result
+        self._append_console(f"Preview ready ({len(tables)} table(s)).", "success")
+        PreviewDialog(tables, stats, parent=self).exec()
+
+    def _on_preview_failed(self, message: str) -> None:
+        self._finish_preview()
+        self._append_console(f"Preview error: {message}", "error")
+
+    def _finish_preview(self) -> None:
+        self._progress.setVisible(False)
+        self._preview_btn.setEnabled(True)
+        self._run_btn.setEnabled(True)
+
+    def _on_failed(self, message: str) -> None:
+        self._finish_run()
+        self._append_console(f"Batch error: {message}")
+
+    def _finish_run(self) -> None:
+        self._progress.setVisible(False)
+        self._run_btn.setEnabled(True)
+        logging.getLogger(_CORE_LOGGER).removeHandler(self._log_handler)
+
+    def _cleanup(self) -> None:
+        if self._thread is not None:
+            self._thread.deleteLater()
+        self._thread = None
+        self._worker = None
+
+    def _append_console(self, text: str, level: str = "info") -> None:
+        color = {"error": "#d9534f", "success": "#4a934a"}.get(level)
+        if color:
+            self._console.appendHtml(f'<span style="color:{color};">{html.escape(text)}</span>')
+        else:
+            self._console.appendPlainText(text)
+
+
+def _warnings_by_step(warnings: list[str]) -> dict[int, list[str]]:
+    """Group ``validate_template`` warnings by their 1-based step number (``"Step N …"``)."""
+    grouped: dict[int, list[str]] = {}
+    for message in warnings:
+        match = re.match(r"Step (\d+)", message)
+        if match:
+            grouped.setdefault(int(match.group(1)), []).append(message)
+    return grouped
+
+
+def _describe_step(step: BatchStep) -> str:  # noqa: PLR0911 - one line per step kind
+    if isinstance(step, FilterStep):
+        clause_count = len(step.clauses)
+        return f"Filter · {step.table} · {clause_count} clause(s) · {step.combine.upper()}"
+    if isinstance(step, NormalizeStep):
+        split = f" · split '{step.separator}'" if step.separator else ""
+        learn = "" if step.learn else " · match-only"
+        return (
+            f"Normalize · {step.table}.{step.column} → {step.resolved_target()} "
+            f"(≥{step.threshold}){split}{learn}"
+        )
+    if isinstance(step, DedupeStep):
+        key = ", ".join(step.subset) if step.subset else "whole row"
+        return f"Deduplicate · {step.table} · key: {key}"
+    if isinstance(step, SelectStep):
+        return f"Select · {step.table} · keep {len(step.columns)} column(s)"
+    if isinstance(step, SortStep):
+        return f"Sort · {step.table} by {step.column} · {'asc' if step.ascending else 'desc'}"
+    if isinstance(step, DeriveStep):
+        return f"Derive · {step.table}.{step.resolved_target()} = {step.op}({step.source})"
+    if isinstance(step, AggregateStep):
+        return f"Aggregate · {step.table} by {', '.join(step.group_by)} → {step.resolved_out()}"
+    if isinstance(step, ClassifyStep):
+        return f"Classify · {step.table}.{step.column} → {step.resolved_target()} ({step.method})"
+    if isinstance(step, CompareStep):
+        return (
+            f"Compare · {step.table} · {step.left} vs {step.right} · {step.method} · {step.action}"
+        )
+    if isinstance(step, TransferTypeStep):
+        return f"Transfer type · {step.table} · {step.assignor_type} → {step.assignee_type}"
+    if isinstance(step, ReferenceMatchStep):
+        ref = Path(step.reference_path).name or "(no file)"
+        return f"Reference match · {step.table}.{step.column} vs {ref} · {step.action}"
+    tables = "all tables" if step.tables is None else ", ".join(step.tables)
+    return f"Export · {step.fmt}{FORMAT_SUFFIX[step.fmt]} · {tables}"

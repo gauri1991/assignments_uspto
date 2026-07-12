@@ -1,0 +1,724 @@
+[
+  {
+    "name": "Buyers - firm-to-firm (strict gate, enriched) [reviewed]",
+    "load": {
+      "limit": null
+    },
+    "steps": [
+      {
+        "kind": "filter",
+        "table": "flat",
+        "clauses": [
+          {
+            "column": "conveyance_text",
+            "op": "contains",
+            "value": "ASSIGNORS INTEREST"
+          },
+          {
+            "column": "conveyance_text",
+            "op": "contains",
+            "value": "ASSIGNOR'S INTEREST"
+          }
+        ],
+        "combine": "or"
+      },
+      {
+        "kind": "filter",
+        "table": "flat",
+        "clauses": [
+          {
+            "column": "assignee_names",
+            "op": "not_empty"
+          },
+          {
+            "column": "recorded_date",
+            "op": "not_empty"
+          },
+          {
+            "column": "purge_indicator",
+            "op": "not_equals",
+            "value": "Y"
+          }
+        ],
+        "combine": "and"
+      },
+      {
+        "kind": "reference_match",
+        "table": "flat",
+        "column": "assignor_names",
+        "reference_path": "reference/g_assignee_disambiguated.tsv",
+        "name_column": "disambig_assignee_organization",
+        "id_column": "assignee_id",
+        "threshold": 90,
+        "scorer": "token_set",
+        "mode": "all",
+        "action": "keep_matched"
+      },
+      {
+        "kind": "classify",
+        "table": "flat",
+        "column": "assignee_names",
+        "method": "rules",
+        "mode": "all"
+      },
+      {
+        "kind": "filter",
+        "table": "flat",
+        "clauses": [
+          {
+            "column": "assignee_names_type",
+            "op": "equals",
+            "value": "company"
+          },
+          {
+            "column": "assignee_names_type",
+            "op": "equals",
+            "value": "unknown"
+          }
+        ],
+        "combine": "or"
+      },
+      {
+        "kind": "reference_match",
+        "table": "flat",
+        "column": "assignee_names",
+        "reference_path": "reference/g_assignee_disambiguated.tsv",
+        "name_column": "disambig_assignee_organization",
+        "id_column": "assignee_id",
+        "threshold": 90,
+        "scorer": "token_set",
+        "mode": "any",
+        "action": "flag"
+      },
+      {
+        "kind": "normalize",
+        "table": "flat",
+        "column": "assignor_names",
+        "scorer": "token_set",
+        "learn": false
+      },
+      {
+        "kind": "normalize",
+        "table": "flat",
+        "column": "assignee_names",
+        "scorer": "token_set",
+        "learn": false
+      },
+      {
+        "kind": "compare",
+        "table": "flat",
+        "left": "assignor_names_assignee_id",
+        "right": "assignee_names_assignee_id",
+        "method": "exact",
+        "action": "drop_matches"
+      },
+      {
+        "kind": "compare",
+        "table": "flat",
+        "left": "assignor_names_canonical",
+        "right": "assignee_names_canonical",
+        "method": "fuzzy",
+        "scorer": "token_set",
+        "threshold": 92,
+        "action": "drop_matches"
+      },
+      {
+        "kind": "derive",
+        "table": "flat",
+        "source": "transaction_date",
+        "op": "year"
+      },
+      {
+        "kind": "export",
+        "fmt": "parquet",
+        "tables": [
+          "flat"
+        ],
+        "columns": {
+          "flat": [
+            "reel_no",
+            "frame_no",
+            "recorded_date",
+            "execution_date",
+            "transaction_date_year",
+            "conveyance_text",
+            "assignor_names",
+            "assignor_names_canonical",
+            "assignor_names_assignee_id",
+            "assignee_names",
+            "assignee_names_canonical",
+            "assignee_names_matched",
+            "assignee_names_assignee_id",
+            "invention_title",
+            "doc_country",
+            "doc_number",
+            "doc_kind",
+            "doc_date"
+          ]
+        },
+        "renames": {
+          "flat": {
+            "assignor_names_canonical": "seller_clean",
+            "assignor_names_assignee_id": "seller_id",
+            "assignee_names_canonical": "buyer_clean",
+            "assignee_names_assignee_id": "buyer_id",
+            "assignee_names_matched": "buyer_in_gazetteer",
+            "transaction_date_year": "year"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "name": "Buyers - firm-to-firm (recall gate: unmatched = unconfirmed) [reviewed]",
+    "load": {
+      "limit": null
+    },
+    "steps": [
+      {
+        "kind": "filter",
+        "table": "flat",
+        "clauses": [
+          {
+            "column": "conveyance_text",
+            "op": "contains",
+            "value": "ASSIGNORS INTEREST"
+          },
+          {
+            "column": "conveyance_text",
+            "op": "contains",
+            "value": "ASSIGNOR'S INTEREST"
+          }
+        ],
+        "combine": "or"
+      },
+      {
+        "kind": "filter",
+        "table": "flat",
+        "clauses": [
+          {
+            "column": "assignee_names",
+            "op": "not_empty"
+          },
+          {
+            "column": "recorded_date",
+            "op": "not_empty"
+          },
+          {
+            "column": "purge_indicator",
+            "op": "not_equals",
+            "value": "Y"
+          }
+        ],
+        "combine": "and"
+      },
+      {
+        "kind": "classify",
+        "table": "flat",
+        "column": "assignor_names",
+        "method": "rules",
+        "mode": "all"
+      },
+      {
+        "kind": "classify",
+        "table": "flat",
+        "column": "assignee_names",
+        "method": "rules",
+        "mode": "all"
+      },
+      {
+        "kind": "filter",
+        "table": "flat",
+        "clauses": [
+          {
+            "column": "assignor_names_type",
+            "op": "equals",
+            "value": "company"
+          },
+          {
+            "column": "assignor_names_type",
+            "op": "equals",
+            "value": "unknown"
+          }
+        ],
+        "combine": "or"
+      },
+      {
+        "kind": "filter",
+        "table": "flat",
+        "clauses": [
+          {
+            "column": "assignee_names_type",
+            "op": "equals",
+            "value": "company"
+          },
+          {
+            "column": "assignee_names_type",
+            "op": "equals",
+            "value": "unknown"
+          }
+        ],
+        "combine": "or"
+      },
+      {
+        "kind": "reference_match",
+        "table": "flat",
+        "column": "assignor_names",
+        "reference_path": "reference/g_assignee_disambiguated.tsv",
+        "name_column": "disambig_assignee_organization",
+        "id_column": "assignee_id",
+        "threshold": 90,
+        "scorer": "token_set",
+        "mode": "any",
+        "action": "flag"
+      },
+      {
+        "kind": "reference_match",
+        "table": "flat",
+        "column": "assignee_names",
+        "reference_path": "reference/g_assignee_disambiguated.tsv",
+        "name_column": "disambig_assignee_organization",
+        "id_column": "assignee_id",
+        "threshold": 90,
+        "scorer": "token_set",
+        "mode": "any",
+        "action": "flag"
+      },
+      {
+        "kind": "normalize",
+        "table": "flat",
+        "column": "assignor_names",
+        "scorer": "token_set",
+        "learn": false
+      },
+      {
+        "kind": "normalize",
+        "table": "flat",
+        "column": "assignee_names",
+        "scorer": "token_set",
+        "learn": false
+      },
+      {
+        "kind": "compare",
+        "table": "flat",
+        "left": "assignor_names_canonical",
+        "right": "assignee_names_canonical",
+        "method": "fuzzy",
+        "scorer": "token_set",
+        "threshold": 92,
+        "action": "drop_matches"
+      },
+      {
+        "kind": "derive",
+        "table": "flat",
+        "source": "transaction_date",
+        "op": "year"
+      },
+      {
+        "kind": "export",
+        "fmt": "parquet",
+        "tables": [
+          "flat"
+        ],
+        "renames": {
+          "flat": {
+            "assignor_names_canonical": "seller_clean",
+            "assignor_names_matched": "seller_in_gazetteer",
+            "assignee_names_canonical": "buyer_clean",
+            "assignee_names_matched": "buyer_in_gazetteer",
+            "transaction_date_year": "year"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "name": "Buyer leaderboard - distinct granted documents [reviewed]",
+    "load": {
+      "limit": null
+    },
+    "steps": [
+      {
+        "kind": "filter",
+        "table": "flat",
+        "clauses": [
+          {
+            "column": "conveyance_text",
+            "op": "contains",
+            "value": "ASSIGNORS INTEREST"
+          },
+          {
+            "column": "conveyance_text",
+            "op": "contains",
+            "value": "ASSIGNOR'S INTEREST"
+          }
+        ],
+        "combine": "or"
+      },
+      {
+        "kind": "filter",
+        "table": "flat",
+        "clauses": [
+          {
+            "column": "assignee_names",
+            "op": "not_empty"
+          },
+          {
+            "column": "purge_indicator",
+            "op": "not_equals",
+            "value": "Y"
+          },
+          {
+            "column": "doc_kind",
+            "op": "starts_with",
+            "value": "B"
+          }
+        ],
+        "combine": "and"
+      },
+      {
+        "kind": "reference_match",
+        "table": "flat",
+        "column": "assignor_names",
+        "reference_path": "reference/g_assignee_disambiguated.tsv",
+        "name_column": "disambig_assignee_organization",
+        "id_column": "assignee_id",
+        "threshold": 90,
+        "scorer": "token_set",
+        "mode": "all",
+        "action": "keep_matched"
+      },
+      {
+        "kind": "classify",
+        "table": "flat",
+        "column": "assignee_names",
+        "method": "rules",
+        "mode": "all"
+      },
+      {
+        "kind": "filter",
+        "table": "flat",
+        "clauses": [
+          {
+            "column": "assignee_names_type",
+            "op": "equals",
+            "value": "company"
+          },
+          {
+            "column": "assignee_names_type",
+            "op": "equals",
+            "value": "unknown"
+          }
+        ],
+        "combine": "or"
+      },
+      {
+        "kind": "reference_match",
+        "table": "flat",
+        "column": "assignee_names",
+        "reference_path": "reference/g_assignee_disambiguated.tsv",
+        "name_column": "disambig_assignee_organization",
+        "id_column": "assignee_id",
+        "threshold": 90,
+        "scorer": "token_set",
+        "mode": "any",
+        "action": "flag"
+      },
+      {
+        "kind": "normalize",
+        "table": "flat",
+        "column": "assignor_names",
+        "scorer": "token_set",
+        "learn": false
+      },
+      {
+        "kind": "normalize",
+        "table": "flat",
+        "column": "assignee_names",
+        "scorer": "token_set",
+        "learn": false
+      },
+      {
+        "kind": "compare",
+        "table": "flat",
+        "left": "assignor_names_assignee_id",
+        "right": "assignee_names_assignee_id",
+        "method": "exact",
+        "action": "drop_matches"
+      },
+      {
+        "kind": "aggregate",
+        "table": "flat",
+        "group_by": [
+          "assignee_names_canonical"
+        ],
+        "count_distinct": "doc_number",
+        "out_table": "buyers_by_granted_docs"
+      },
+      {
+        "kind": "export",
+        "fmt": "csv",
+        "tables": [
+          "buyers_by_granted_docs"
+        ],
+        "renames": {
+          "buyers_by_granted_docs": {
+            "assignee_names_canonical": "buyer",
+            "count": "property_rows",
+            "doc_number_distinct": "distinct_document_ids"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "name": "Buyer leaderboard - deals closed [reviewed]",
+    "load": {
+      "limit": null
+    },
+    "steps": [
+      {
+        "kind": "filter",
+        "table": "flat",
+        "clauses": [
+          {
+            "column": "conveyance_text",
+            "op": "contains",
+            "value": "ASSIGNORS INTEREST"
+          },
+          {
+            "column": "conveyance_text",
+            "op": "contains",
+            "value": "ASSIGNOR'S INTEREST"
+          }
+        ],
+        "combine": "or"
+      },
+      {
+        "kind": "filter",
+        "table": "flat",
+        "clauses": [
+          {
+            "column": "assignee_names",
+            "op": "not_empty"
+          },
+          {
+            "column": "purge_indicator",
+            "op": "not_equals",
+            "value": "Y"
+          }
+        ],
+        "combine": "and"
+      },
+      {
+        "kind": "reference_match",
+        "table": "flat",
+        "column": "assignor_names",
+        "reference_path": "reference/g_assignee_disambiguated.tsv",
+        "name_column": "disambig_assignee_organization",
+        "id_column": "assignee_id",
+        "threshold": 90,
+        "scorer": "token_set",
+        "mode": "all",
+        "action": "keep_matched"
+      },
+      {
+        "kind": "classify",
+        "table": "flat",
+        "column": "assignee_names",
+        "method": "rules",
+        "mode": "all"
+      },
+      {
+        "kind": "filter",
+        "table": "flat",
+        "clauses": [
+          {
+            "column": "assignee_names_type",
+            "op": "equals",
+            "value": "company"
+          },
+          {
+            "column": "assignee_names_type",
+            "op": "equals",
+            "value": "unknown"
+          }
+        ],
+        "combine": "or"
+      },
+      {
+        "kind": "reference_match",
+        "table": "flat",
+        "column": "assignee_names",
+        "reference_path": "reference/g_assignee_disambiguated.tsv",
+        "name_column": "disambig_assignee_organization",
+        "id_column": "assignee_id",
+        "threshold": 90,
+        "scorer": "token_set",
+        "mode": "any",
+        "action": "flag"
+      },
+      {
+        "kind": "compare",
+        "table": "flat",
+        "left": "assignor_names_assignee_id",
+        "right": "assignee_names_assignee_id",
+        "method": "exact",
+        "action": "drop_matches"
+      },
+      {
+        "kind": "dedupe",
+        "table": "flat",
+        "subset": [
+          "reel_no",
+          "frame_no"
+        ]
+      },
+      {
+        "kind": "normalize",
+        "table": "flat",
+        "column": "assignee_names",
+        "scorer": "token_set",
+        "learn": false
+      },
+      {
+        "kind": "aggregate",
+        "table": "flat",
+        "group_by": [
+          "assignee_names_canonical"
+        ],
+        "out_table": "buyers_by_deals"
+      },
+      {
+        "kind": "export",
+        "fmt": "csv",
+        "tables": [
+          "buyers_by_deals"
+        ],
+        "renames": {
+          "buyers_by_deals": {
+            "assignee_names_canonical": "buyer",
+            "count": "deals"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "name": "Firm-to-firm buyers (rules only, no reference file) [reviewed]",
+    "load": {
+      "limit": null
+    },
+    "steps": [
+      {
+        "kind": "filter",
+        "table": "flat",
+        "clauses": [
+          {
+            "column": "conveyance_text",
+            "op": "contains",
+            "value": "ASSIGNORS INTEREST"
+          },
+          {
+            "column": "conveyance_text",
+            "op": "contains",
+            "value": "ASSIGNOR'S INTEREST"
+          }
+        ],
+        "combine": "or"
+      },
+      {
+        "kind": "filter",
+        "table": "flat",
+        "clauses": [
+          {
+            "column": "assignee_names",
+            "op": "not_empty"
+          },
+          {
+            "column": "recorded_date",
+            "op": "not_empty"
+          },
+          {
+            "column": "purge_indicator",
+            "op": "not_equals",
+            "value": "Y"
+          }
+        ],
+        "combine": "and"
+      },
+      {
+        "kind": "transfer_type",
+        "table": "flat",
+        "assignor_column": "assignor_names",
+        "assignee_column": "assignee_names",
+        "assignor_type": "company",
+        "assignee_type": "company",
+        "method": "rules"
+      },
+      {
+        "kind": "normalize",
+        "table": "flat",
+        "column": "assignor_names",
+        "scorer": "token_set",
+        "learn": false
+      },
+      {
+        "kind": "normalize",
+        "table": "flat",
+        "column": "assignee_names",
+        "scorer": "token_set",
+        "learn": false
+      },
+      {
+        "kind": "compare",
+        "table": "flat",
+        "left": "assignor_names_canonical",
+        "right": "assignee_names_canonical",
+        "method": "fuzzy",
+        "scorer": "token_set",
+        "threshold": 92,
+        "action": "drop_matches"
+      },
+      {
+        "kind": "derive",
+        "table": "flat",
+        "source": "transaction_date",
+        "op": "year"
+      },
+      {
+        "kind": "export",
+        "fmt": "parquet",
+        "tables": [
+          "flat"
+        ],
+        "columns": {
+          "flat": [
+            "reel_no",
+            "frame_no",
+            "recorded_date",
+            "execution_date",
+            "transaction_date_year",
+            "conveyance_text",
+            "assignor_names",
+            "assignor_names_canonical",
+            "assignee_names",
+            "assignee_names_canonical",
+            "invention_title",
+            "doc_country",
+            "doc_number",
+            "doc_kind",
+            "doc_date"
+          ]
+        },
+        "renames": {
+          "flat": {
+            "assignor_names_canonical": "seller_clean",
+            "assignee_names_canonical": "buyer_clean",
+            "transaction_date_year": "year"
+          }
+        }
+      }
+    ]
+  }
+]
