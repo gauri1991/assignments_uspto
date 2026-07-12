@@ -41,6 +41,25 @@ python3 -m venv .venv
 .venv/bin/pip install pytest ruff pyright lxml-stubs pyarrow-stubs   # dev + type stubs
 ```
 
+### Windows
+
+The commands are identical apart from the venv path: Windows puts executables in
+`.venv\Scripts\` (not `.venv/bin/`). Install **Python 3.12+** from
+[python.org](https://www.python.org/downloads/) with *"Add python.exe to PATH"* ticked, then:
+
+```powershell
+python -m venv .venv
+.venv\Scripts\Activate.ps1        # PowerShell  (cmd.exe: .venv\Scripts\activate.bat)
+pip install -e ".[dev,ui]"         # core + dev tools + desktop UI (PyQt6)
+```
+
+Once the venv is **activated** (your prompt shows `(.venv)`), plain `python` / `pip` / `pytest`
+/ `uspto-assign` all use it, so you can drop the `.venv\Scripts\` prefix from every command
+below. If PowerShell refuses to run the activate script, run once:
+`Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`. To run without activating, prefix the
+full path instead, e.g. `.venv\Scripts\python.exe main.py parse assignment.xml --outdir out`.
+Use backslashes in Windows paths (`out\assignments.xlsx`).
+
 ## Run
 
 The input may be a raw `.xml` **or** the `.zip` exactly as downloaded from USPTO — the XML is
