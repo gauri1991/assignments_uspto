@@ -30,6 +30,16 @@ import pyarrow.compute as _pc_module
 
 from .classify import ClassifyMethod, classify_column, classify_value
 from .classify import CombineMode as ClassifyCombineMode
+from .cpcconfig import CPC_CONFIG_FILENAME, load_config
+from .cpcmatch import (
+    OVERALL_COLUMNS,
+    PER_COLUMNS,
+    assert_hit_rate,
+    attach_cpc,
+    load_portfolio_footprint,
+    match_portfolio,
+)
+from .datasource import CpcCache, CpcRunContext, make_source
 from .exporters import FORMAT_SUFFIX, ExportFormat, export
 from .filters import CombineMode, FilterClause, SortSpec, filter_sort, sort_indices
 from .model import columns_for
@@ -395,6 +405,68 @@ class ReferenceMatchStep:
         }
 
 
+@dataclass(slots=True)
+class FetchCpcStep:
+    """Enrich a table with CPC codes for its patent-number column (routes to grants first).
+
+    Adds ``cpc_codes`` (full CPC symbols), ``cpc_subclasses`` (4-char grain), and
+    ``cpc_lookup_status`` (``na``/``found``/``not_found``/``uncached``). CPC is resolved through the
+    project's configured source + cache (see *Settings ▸ CPC data source*); it is **offline by
+    default** — misses are only fetched when the network is enabled for the run. This step performs
+    an exact join on the normalized grant number — it is not the fuzzy ``reference_match`` step.
+    """
+
+    table: str = "flat"
+    column: str = "doc_number"  # the patent-number column
+    kind_column: str = "doc_kind"  # kind code, used to route to grants (CPC is grant-only)
+    enabled: bool = True
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "kind": "fetch_cpc",
+            "table": self.table,
+            "column": self.column,
+            "kind_column": self.kind_column,
+        }
+
+
+@dataclass(slots=True)
+class CpcMatchStep:
+    """Match a sales-package portfolio against buyer CPC footprints; emit ranked buyers per patent.
+
+    Reads CPC already attached by a prior ``fetch_cpc`` step, resolves the portfolio per-patent CPC
+    footprint (from a patent-number list via the same source/cache, or a pre-built footprint file),
+    and writes a per-portfolio-patent ranked-buyer table plus a cross-portfolio summary. All match
+    knobs (grain, overlap metric/threshold, ranking weights, hit-rate floor) come from the project's
+    CPC config. Aborts if the CPC hit-rate is below the floor (a likely patent-number mismatch).
+    """
+
+    table: str = "flat"
+    portfolio_mode: str = "patent_list"  # patent_list | footprint_file
+    portfolio_path: str = ""
+    buyer_column: str = "assignee_names_canonical"
+    number_column: str = "doc_number"
+    kind_column: str = "doc_kind"
+    date_column: str = "transaction_date"
+    out_table: str = "matched_buyers_by_portfolio_patent"
+    overall_table: str = "matched_buyers_overall"
+    enabled: bool = True
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "kind": "cpc_match",
+            "table": self.table,
+            "portfolio_mode": self.portfolio_mode,
+            "portfolio_path": self.portfolio_path,
+            "buyer_column": self.buyer_column,
+            "number_column": self.number_column,
+            "kind_column": self.kind_column,
+            "date_column": self.date_column,
+            "out_table": self.out_table,
+            "overall_table": self.overall_table,
+        }
+
+
 BatchStep = (
     FilterStep
     | ExportStep
@@ -408,6 +480,8 @@ BatchStep = (
     | CompareStep
     | TransferTypeStep
     | ReferenceMatchStep
+    | FetchCpcStep
+    | CpcMatchStep
 )
 
 
@@ -428,7 +502,7 @@ def _step_from_dict(data: dict[str, Any]) -> BatchStep:
     return step
 
 
-def _decode_step(data: dict[str, Any]) -> BatchStep:  # noqa: PLR0911 - one branch per step kind
+def _decode_step(data: dict[str, Any]) -> BatchStep:  # noqa: PLR0911, PLR0912 - one per step kind
     kind = data.get("kind")
     if kind == "export":
         tables = data.get("tables")
@@ -539,6 +613,24 @@ def _decode_step(data: dict[str, Any]) -> BatchStep:  # noqa: PLR0911 - one bran
             count_distinct=str(cd) if cd else None,
             out_table=str(data.get("out_table", "")),
         )
+    if kind == "fetch_cpc":
+        return FetchCpcStep(
+            table=str(data.get("table", "flat")),
+            column=str(data.get("column", "doc_number")),
+            kind_column=str(data.get("kind_column", "doc_kind")),
+        )
+    if kind == "cpc_match":
+        return CpcMatchStep(
+            table=str(data.get("table", "flat")),
+            portfolio_mode=str(data.get("portfolio_mode", "patent_list")),
+            portfolio_path=str(data.get("portfolio_path", "")),
+            buyer_column=str(data.get("buyer_column", "assignee_names_canonical")),
+            number_column=str(data.get("number_column", "doc_number")),
+            kind_column=str(data.get("kind_column", "doc_kind")),
+            date_column=str(data.get("date_column", "transaction_date")),
+            out_table=str(data.get("out_table", "matched_buyers_by_portfolio_patent")),
+            overall_table=str(data.get("overall_table", "matched_buyers_overall")),
+        )
     raw_sort = data.get("sort")
     sort: SortSpec | None = (str(raw_sort[0]), bool(raw_sort[1])) if raw_sort else None
     return FilterStep(
@@ -639,6 +731,12 @@ def columns_after(  # noqa: PLR0912 - one branch per step kind
             if step.count_distinct:
                 out.append(f"{step.count_distinct}_distinct")
             cols[step.resolved_out()] = out
+        elif isinstance(step, FetchCpcStep):
+            for name in ("cpc_codes", "cpc_subclasses", "cpc_lookup_status"):
+                add(step.table, name)
+        elif isinstance(step, CpcMatchStep):
+            cols[step.out_table] = list(PER_COLUMNS)
+            cols[step.overall_table] = list(OVERALL_COLUMNS)
         # Dedupe / Sort / TransferType / Export: columns unchanged
     return cols
 
@@ -665,10 +763,16 @@ def _referenced_columns(step: BatchStep) -> tuple[str, list[str]]:  # noqa: PLR0
         return step.table, [*step.group_by, *distinct]
     if isinstance(step, TransferTypeStep):
         return step.table, [step.assignor_column, step.assignee_column]
+    if isinstance(step, FetchCpcStep):
+        return step.table, [step.column]
+    if isinstance(step, CpcMatchStep):
+        return step.table, [step.buyer_column, step.number_column, "cpc_codes"]
     return "", []  # ExportStep validated separately
 
 
-def validate_template(load: LoadConfig, steps: Sequence[BatchStep]) -> list[str]:
+def validate_template(  # noqa: PLR0912 - one validation branch per step kind
+    load: LoadConfig, steps: Sequence[BatchStep]
+) -> list[str]:
     """Return human-readable warnings about a template (missing columns/tables/reference files)."""
     warnings: list[str] = []
     if not any(s.enabled for s in steps):
@@ -695,6 +799,20 @@ def validate_template(load: LoadConfig, steps: Sequence[BatchStep]) -> list[str]
                 warnings.append(
                     f"Step {index} (ReferenceMatch): reference file not found: "
                     f"{step.reference_path}"
+                )
+        if isinstance(step, CpcMatchStep) and step.portfolio_mode == "footprint_file":
+            if not step.portfolio_path:
+                warnings.append(f"Step {index} (CpcMatch): no portfolio footprint file set.")
+            elif not Path(step.portfolio_path).is_file():
+                warnings.append(
+                    f"Step {index} (CpcMatch): portfolio file not found: {step.portfolio_path}"
+                )
+        if isinstance(step, CpcMatchStep) and step.portfolio_mode == "patent_list":
+            if not step.portfolio_path:
+                warnings.append(f"Step {index} (CpcMatch): no portfolio patent-list file set.")
+            elif not Path(step.portfolio_path).is_file():
+                warnings.append(
+                    f"Step {index} (CpcMatch): portfolio file not found: {step.portfolio_path}"
                 )
     return warnings
 
@@ -775,7 +893,9 @@ def _needed_tables(template: BatchTemplate) -> set[str] | None:
             | ClassifyStep
             | CompareStep
             | TransferTypeStep
-            | ReferenceMatchStep,
+            | ReferenceMatchStep
+            | FetchCpcStep
+            | CpcMatchStep,
         ):
             needed.add(step.table)  # every non-export step reads/writes a named source table
         elif step.tables is not None:  # ExportStep by elimination
@@ -1163,13 +1283,96 @@ def _apply_export(
     return written
 
 
-def _apply_step(  # noqa: PLR0913 - one branch per step kind
+def _resolve_cpc_ctx(cpc_ctx: CpcRunContext | None) -> CpcRunContext:
+    """Return the run's CPC context, loading the default project config if none was supplied."""
+    if cpc_ctx is not None:
+        return cpc_ctx
+    return CpcRunContext(config=load_config(Path(CPC_CONFIG_FILENAME)), allow_network=False)
+
+
+def _apply_fetch_cpc(
+    tables: dict[str, pa.Table], step: FetchCpcStep, ctx: CpcRunContext, emit: OnEvent
+) -> None:
+    table = tables.get(step.table)
+    if table is None:
+        emit(BatchEvent("info", f"  skip fetch_cpc: table '{step.table}' not present"))
+        return
+    if step.column not in table.column_names:
+        emit(BatchEvent("info", f"  skip fetch_cpc: column '{step.column}' not in '{step.table}'"))
+        return
+    cache = CpcCache(ctx.config, make_source(ctx.config))
+    out, stats = attach_cpc(
+        table,
+        number_column=step.column,
+        kind_column=step.kind_column,
+        cache=cache,
+        allow_network=ctx.allow_network,
+    )
+    tables[step.table] = out
+    emit(
+        BatchEvent(
+            "info",
+            f"  fetch_cpc {step.table}.{step.column}: {stats.found:,}/{stats.eligible:,} grants "
+            f"resolved (hit-rate {stats.hit_rate:.0%})",
+        )
+    )
+    if stats.uncached_offline:
+        emit(
+            BatchEvent(
+                "info",
+                f"  note: {stats.uncached_offline:,} grant patents are uncached — enable network "
+                f"for this run to fetch their CPC codes",
+            )
+        )
+
+
+def _apply_cpc_match(
+    tables: dict[str, pa.Table], step: CpcMatchStep, ctx: CpcRunContext, emit: OnEvent
+) -> None:
+    table = tables.get(step.table)
+    if table is None:
+        emit(BatchEvent("info", f"  skip cpc_match: table '{step.table}' not present"))
+        return
+    match_cfg = ctx.config.match
+    cache = CpcCache(ctx.config, make_source(ctx.config))
+    footprints, pstats = load_portfolio_footprint(
+        mode=step.portfolio_mode,
+        path=Path(step.portfolio_path),
+        grain=match_cfg.grain,
+        cache=cache,
+        allow_network=ctx.allow_network,
+    )
+    if step.portfolio_mode == "patent_list":
+        assert_hit_rate(pstats, match_cfg.hit_rate_floor, side="portfolio patents")
+    per, overall, report = match_portfolio(
+        table,
+        footprints,
+        config=match_cfg,
+        buyer_column=step.buyer_column,
+        number_column=step.number_column,
+        kind_column=step.kind_column,
+        date_column=step.date_column,
+    )
+    tables[step.out_table] = per
+    tables[step.overall_table] = overall
+    emit(
+        BatchEvent(
+            "info",
+            f"  cpc_match: {report.portfolio_patents} portfolio patent(s), buyer hit-rate "
+            f"{report.buyer_stats.hit_rate:.0%}; {report.matched_pairs} matched pair(s) → "
+            f"{per.num_rows:,} ranked rows across {report.buyers_out} buyer(s)",
+        )
+    )
+
+
+def _apply_step(  # noqa: PLR0912, PLR0913 - one branch per step kind
     tables: dict[str, pa.Table],
     step: BatchStep,
     memory: EntityMemory,
     used_targets: set[tuple[str, str]],
     source_dir: Path,
     emit: OnEvent,
+    cpc_ctx: CpcRunContext | None = None,
 ) -> list[str]:
     """Apply one step in place; returns written paths (only an ExportStep writes anything)."""
     if isinstance(step, FilterStep):
@@ -1194,6 +1397,10 @@ def _apply_step(  # noqa: PLR0913 - one branch per step kind
         _apply_transfer_type(tables, step, emit)
     elif isinstance(step, ReferenceMatchStep):
         _apply_reference_match(tables, step, emit)
+    elif isinstance(step, FetchCpcStep):
+        _apply_fetch_cpc(tables, step, _resolve_cpc_ctx(cpc_ctx), emit)
+    elif isinstance(step, CpcMatchStep):
+        _apply_cpc_match(tables, step, _resolve_cpc_ctx(cpc_ctx), emit)
     else:
         return _apply_export(tables, step, source_dir, emit)
     return []
@@ -1240,6 +1447,7 @@ def _process_input(  # noqa: PLR0913 - threads collaborators; one branch per ste
     emit: OnEvent,
     on_parse: OnParse | None = None,
     memory: EntityMemory | None = None,
+    cpc_ctx: CpcRunContext | None = None,
 ) -> FileResult:
     memory = memory if memory is not None else EntityMemory()
     learned_before = len(memory.learned)
@@ -1258,7 +1466,9 @@ def _process_input(  # noqa: PLR0913 - threads collaborators; one branch per ste
                 continue  # UI-disabled step: skip without deleting
             table_name: str = getattr(step, "table", "")
             before = tables[table_name].num_rows if table_name in tables else None
-            outputs.extend(_apply_step(tables, step, memory, used_targets, source_dir, emit))
+            outputs.extend(
+                _apply_step(tables, step, memory, used_targets, source_dir, emit, cpc_ctx)
+            )
             _warn_if_emptied(tables, step, index, table_name, before, emit)
         rows = {name: table.num_rows for name, table in tables.items()}
         result = FileResult(
@@ -1278,12 +1488,13 @@ def _process_input(  # noqa: PLR0913 - threads collaborators; one branch per ste
     return result
 
 
-def _process_one(
+def _process_one(  # noqa: PLR0913 - picklable worker threading the run's collaborators
     template: BatchTemplate,
     source: Path,
     template_dir: Path,
     event_queue: Any,
     memory: EntityMemory,
+    cpc_ctx: CpcRunContext | None = None,
 ) -> FileResult:
     """Picklable process-pool worker: streams events/progress live via ``event_queue``.
 
@@ -1299,6 +1510,7 @@ def _process_one(
         emit=lambda event: event_queue.put(("event", str(source), event)),
         on_parse=lambda count: event_queue.put(("parse", str(source), count)),
         memory=memory,
+        cpc_ctx=cpc_ctx,
     )
 
 
@@ -1309,6 +1521,7 @@ def _run_parallel(  # noqa: PLR0913 - internal helper threading the run's collab
     workers: int,
     emit: OnEvent,
     memory: EntityMemory,
+    cpc_ctx: CpcRunContext | None = None,
 ) -> list[FileResult]:
     """Process inputs across a worker pool, emitting each file's events plus a combined total."""
     results: list[FileResult] = []
@@ -1349,7 +1562,9 @@ def _run_parallel(  # noqa: PLR0913 - internal helper threading the run's collab
 
         with ProcessPoolExecutor(max_workers=workers) as pool:
             futures = {
-                pool.submit(_process_one, template, src, template_dir, event_queue, memory): src
+                pool.submit(
+                    _process_one, template, src, template_dir, event_queue, memory, cpc_ctx
+                ): src
                 for src in inputs
             }
             pending = set(futures)
@@ -1399,6 +1614,7 @@ def run_batch(  # noqa: PLR0913 - a clear public entry point with keyword-only o
     timestamp: str = "",
     memory: EntityMemory | None = None,
     on_event: OnEvent | None = None,
+    cpc_ctx: CpcRunContext | None = None,
 ) -> BatchResult:
     """Run ``template`` over ``inputs``, writing outputs under ``out_root``.
 
@@ -1425,7 +1641,7 @@ def run_batch(  # noqa: PLR0913 - a clear public entry point with keyword-only o
 
     if workers > 1 and len(inputs) > 1:
         emit(BatchEvent("info", f"Processing {len(inputs)} inputs with {workers} workers…"))
-        results = _run_parallel(template, inputs, template_dir, workers, emit, memory)
+        results = _run_parallel(template, inputs, template_dir, workers, emit, memory, cpc_ctx)
     else:
         for source in inputs:
             emit(BatchEvent("info", f"▶ {source.name}"))
@@ -1438,6 +1654,7 @@ def run_batch(  # noqa: PLR0913 - a clear public entry point with keyword-only o
                     BatchEvent("info", f"  parsing… {count:,} assignments")
                 ),
                 memory=memory,
+                cpc_ctx=cpc_ctx,
             )
             _emit_file_done(result, emit)
             results.append(result)
@@ -1480,13 +1697,14 @@ def _default_step_label(step: BatchStep) -> str:
     return type(step).__name__
 
 
-def run_preview(
+def run_preview(  # noqa: PLR0913 - a clear public entry point with keyword-only options
     template: BatchTemplate,
     source: Path,
     *,
     limit: int = PREVIEW_LIMIT,
     describe: Callable[[BatchStep], str] | None = None,
     on_event: OnEvent | None = None,
+    cpc_ctx: CpcRunContext | None = None,
 ) -> tuple[dict[str, pa.Table], list[StepStat]]:
     """Run ``template`` on ``source`` capped to ``limit`` records; return tables + per-step stats.
 
@@ -1537,7 +1755,9 @@ def run_preview(
                     )
                 )
                 continue
-            _apply_step(tables, step, memory, used_targets, work_dir or source.parent, emit)
+            _apply_step(
+                tables, step, memory, used_targets, work_dir or source.parent, emit, cpc_ctx
+            )
             after_rows = tables[table_name].num_rows if table_name in tables else before_rows
             after_cols: set[str] = (
                 set(tables[table_name].column_names) if table_name in tables else set()

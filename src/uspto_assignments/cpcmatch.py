@@ -456,6 +456,10 @@ _OVERALL_SCHEMA = pa.schema(
 )
 
 
+PER_COLUMNS: list[str] = list(_PER_SCHEMA.names)  # columns of the per-portfolio-patent output
+OVERALL_COLUMNS: list[str] = list(_OVERALL_SCHEMA.names)  # columns of the cross-portfolio output
+
+
 def _rows_to_table(rows: list[dict[str, Any]], schema: pa.Schema) -> pa.Table:
     columns = {name: [row[name] for row in rows] for name in schema.names}
     return pa.table(columns, schema=schema)

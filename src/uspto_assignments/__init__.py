@@ -21,9 +21,11 @@ from .batch import (
     BatchTemplate,
     ClassifyStep,
     CompareStep,
+    CpcMatchStep,
     DedupeStep,
     DeriveStep,
     ExportStep,
+    FetchCpcStep,
     FileResult,
     FilterStep,
     LoadConfig,
@@ -42,6 +44,16 @@ from .batch import (
 )
 from .classify import classify_column, classify_name, classify_value
 from .conveyance import classify_conveyance, conveyance_type_column
+from .cpcconfig import (
+    CpcCacheConfig,
+    CpcConfig,
+    CpcMatchConfig,
+    CpcSourceConfig,
+    load_config,
+    save_config,
+)
+from .cpcmatch import attach_cpc, load_portfolio_footprint, match_portfolio
+from .datasource import CpcCache, CpcRunContext, make_source
 from .dictionary import ResolutionDictionary, build_dictionary, load_dictionary
 from .exporters import FORMAT_SUFFIX, ExportFormat, export, export_store
 from .filters import CombineMode, FilterClause
@@ -106,12 +118,20 @@ __all__ = [
     "ClassifyStep",
     "CombineMode",
     "CompareStep",
+    "CpcCache",
+    "CpcCacheConfig",
+    "CpcConfig",
+    "CpcMatchConfig",
+    "CpcMatchStep",
+    "CpcRunContext",
+    "CpcSourceConfig",
     "DedupeStep",
     "DeriveStep",
     "EntityMemory",
     "ExportFormat",
     "ExportStep",
     "ExtractedRecord",
+    "FetchCpcStep",
     "FileResult",
     "FilterClause",
     "FilterStep",
@@ -129,6 +149,7 @@ __all__ = [
     "TableStore",
     "TransferTypeStep",
     "add_doc_columns",
+    "attach_cpc",
     "batch",
     "build_dictionary",
     "build_ledger",
@@ -153,11 +174,15 @@ __all__ = [
     "flat_schema",
     "iter_assignments",
     "iter_records",
+    "load_config",
     "load_dictionary",
+    "load_portfolio_footprint",
     "load_queries",
     "load_reference",
     "load_templates",
+    "make_source",
     "match_column",
+    "match_portfolio",
     "normalize_column",
     "normalize_patent_id",
     "open_dataset",
@@ -170,6 +195,7 @@ __all__ = [
     "rows_to_table",
     "run_batch",
     "run_preview",
+    "save_config",
     "schema_for",
     "scope_suffix",
     "scorer_names",

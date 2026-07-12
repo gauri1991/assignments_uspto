@@ -12,6 +12,18 @@ from typing import Any
 import pyarrow as pa
 import pytest
 
+from uspto_assignments import (
+    BatchTemplate,
+    CpcMatchStep,
+    CpcRunContext,
+    ExportStep,
+    FetchCpcStep,
+    LoadConfig,
+    columns_after,
+    run_preview,
+    validate_template,
+)
+from uspto_assignments.batch import _step_from_dict
 from uspto_assignments.cpcconfig import CpcConfig, load_config, save_config
 from uspto_assignments.cpcmatch import (
     HitRateError,
@@ -377,3 +389,101 @@ def test_match_portfolio_aborts_on_low_hit_rate(tmp_path: Path) -> None:
             kind_column="doc_kind",
             date_column="",
         )
+
+
+# ------------------------------------------------------------------ batch steps
+
+
+def test_cpc_steps_roundtrip() -> None:
+    for step in (FetchCpcStep(), CpcMatchStep(portfolio_path="p.txt")):
+        assert _step_from_dict(step.to_dict()).to_dict() == step.to_dict()
+
+
+def test_cpc_steps_in_columns_after() -> None:
+    steps = [FetchCpcStep(table="flat"), CpcMatchStep(table="flat")]
+    cols = columns_after(LoadConfig(), steps, upto=2)
+    assert {"cpc_codes", "cpc_subclasses", "cpc_lookup_status"} <= set(cols["flat"])
+    assert "portfolio_patent" in cols["matched_buyers_by_portfolio_patent"]
+
+
+def test_cpc_match_step_validates_portfolio_file(tmp_path: Path) -> None:
+    step = CpcMatchStep(
+        portfolio_mode="footprint_file", portfolio_path=str(tmp_path / "missing.csv")
+    )
+    warnings = validate_template(LoadConfig(), [FetchCpcStep(), step])
+    assert any("portfolio file not found" in w for w in warnings)
+
+
+FIXTURE = Path(__file__).parent / "fixtures" / "buyer_sample.xml"
+
+
+def _local_ctx(tmp_path: Path, tsv: Path) -> CpcRunContext:
+    config = CpcConfig()
+    config.source.type = "local_file"
+    config.source.path = str(tsv)
+    config.cache.path = str(tmp_path / "cache")
+    return CpcRunContext(config=config, allow_network=False)
+
+
+def test_end_to_end_fetch_then_match(tmp_path: Path) -> None:
+    """Two-step flow on a real fixture: fetch_cpc enriches, cpc_match ranks buyers per patent."""
+    tsv = tmp_path / "cpc.tsv"
+    _write_cpc_tsv(
+        tsv,
+        {
+            "10987654": ["H04L9/32"],  # H04L grant
+            "11222333": ["H04L1/00"],  # H04L grant
+            "9555444": ["A61K31/00"],  # A61K grant (off-domain)
+        },
+    )
+    footprint = tmp_path / "portfolio.csv"
+    footprint.write_text(
+        "patent,cpc\n9000001,H04L9/32\n", encoding="utf-8"
+    )  # sales package in H04L
+
+    template = BatchTemplate(
+        name="cpc",
+        steps=[
+            FetchCpcStep(table="flat", column="doc_number", kind_column="doc_kind"),
+            CpcMatchStep(
+                table="flat",
+                portfolio_mode="footprint_file",
+                portfolio_path=str(footprint),
+                buyer_column="assignee_names",
+                number_column="doc_number",
+                kind_column="doc_kind",
+                date_column="transaction_date",
+            ),
+            ExportStep(fmt="parquet", tables=["matched_buyers_by_portfolio_patent"]),
+        ],
+    )
+    tables, _stats = run_preview(template, FIXTURE, limit=100, cpc_ctx=_local_ctx(tmp_path, tsv))
+
+    flat = tables["flat"]
+    assert {"cpc_codes", "cpc_subclasses", "cpc_lookup_status"} <= set(flat.column_names)
+    ranked = tables["matched_buyers_by_portfolio_patent"].to_pylist()
+    buyers = {row["buyer"] for row in ranked}
+    assert all(row["portfolio_patent"] == "9000001" for row in ranked)
+    assert "WIDGET CORP" in buyers  # bought H04L grant 10987654
+    assert "ZORPTECH SYSTEMS INCORPORATED" not in buyers  # only A61K — off-domain, excluded
+    assert all(row["rank"] >= 1 for row in ranked)
+
+
+def test_fetch_cpc_offline_reports_uncached(tmp_path: Path) -> None:
+    """With the API source offline, fetch_cpc attaches nothing and flags uncached grants."""
+    events: list[str] = []
+    config = CpcConfig()  # default uspto_odp_api + offline_only=True
+    config.cache.path = str(tmp_path / "cache")
+    ctx = CpcRunContext(config=config, allow_network=True)  # offline_only still wins
+    template = BatchTemplate(
+        name="fetch",
+        steps=[FetchCpcStep(table="flat", column="doc_number", kind_column="doc_kind")],
+    )
+    run_preview(
+        template,
+        FIXTURE,
+        limit=100,
+        cpc_ctx=ctx,
+        on_event=lambda e: events.append(e.message),
+    )
+    assert any("uncached" in m for m in events)
