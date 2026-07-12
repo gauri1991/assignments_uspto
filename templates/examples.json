@@ -17,7 +17,7 @@
       { "kind": "filter", "table": "flat",
         "clauses": [
           { "column": "conveyance_text", "op": "starts_with", "value": "assignment" },
-          { "column": "recorded_date", "op": "in_range", "value": "20060101", "value2": "20261231" }
+          { "column": "transaction_date", "op": "in_range", "value": "20060101", "value2": "20261231" }
         ],
         "combine": "and" },
       { "kind": "normalize", "table": "flat", "column": "assignor_names" },
@@ -25,13 +25,14 @@
       { "kind": "classify", "table": "flat", "column": "assignor_names" },
       { "kind": "classify", "table": "flat", "column": "assignee_names" },
       { "kind": "transfer_type", "table": "flat", "assignor_type": "company", "assignee_type": "company" },
-      { "kind": "derive", "table": "flat", "source": "recorded_date", "op": "year" },
+      { "kind": "derive", "table": "flat", "source": "transaction_date", "op": "year" },
       { "kind": "export", "fmt": "parquet", "tables": ["flat"],
-        "columns": { "flat": ["reel_no", "frame_no", "recorded_date_year",
+        "columns": { "flat": ["reel_no", "frame_no", "transaction_date_year",
+                              "execution_date", "transaction_date", "date_source",
                               "assignor_names_canonical", "assignee_names_canonical"] },
         "renames": { "flat": { "assignor_names_canonical": "assignor_clean",
                               "assignee_names_canonical": "assignee_clean",
-                              "recorded_date_year": "year" } } }
+                              "transaction_date_year": "year" } } }
     ]
   },
   {
@@ -69,10 +70,10 @@
     "name": "Assignments per year",
     "load": { "limit": null },
     "steps": [
-      { "kind": "derive", "table": "flat", "source": "recorded_date", "op": "year" },
-      { "kind": "aggregate", "table": "flat", "group_by": ["recorded_date_year"] },
-      { "kind": "sort", "table": "flat_by_recorded_date_year", "column": "recorded_date_year", "ascending": true },
-      { "kind": "export", "fmt": "csv", "tables": ["flat_by_recorded_date_year"] }
+      { "kind": "derive", "table": "flat", "source": "transaction_date", "op": "year" },
+      { "kind": "aggregate", "table": "flat", "group_by": ["transaction_date_year"] },
+      { "kind": "sort", "table": "flat_by_transaction_date_year", "column": "transaction_date_year", "ascending": true },
+      { "kind": "export", "fmt": "csv", "tables": ["flat_by_transaction_date_year"] }
     ]
   },
   {

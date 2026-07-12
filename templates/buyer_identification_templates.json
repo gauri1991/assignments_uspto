@@ -35,17 +35,18 @@
         "left": "assignor_names_canonical", "right": "assignee_names_canonical",
         "method": "exact", "action": "drop_matches" },
 
-      { "kind": "derive", "table": "flat", "source": "recorded_date", "op": "year" },
+      { "kind": "derive", "table": "flat", "source": "transaction_date", "op": "year" },
 
       { "kind": "export", "fmt": "parquet", "tables": ["flat"],
         "columns": { "flat": [
-          "reel_no", "frame_no", "recorded_date", "recorded_date_year", "conveyance_text",
+          "reel_no", "frame_no", "recorded_date", "execution_date", "transaction_date",
+          "transaction_date_year", "date_source", "conveyance_text",
           "assignor_names", "assignor_names_canonical",
           "assignee_names", "assignee_names_canonical",
           "assignee_names_matched", "assignee_names_assignee_id",
           "invention_title", "doc_country", "doc_number", "doc_kind", "doc_date" ] },
         "renames": { "flat": {
-          "recorded_date_year": "year",
+          "transaction_date_year": "year",
           "assignee_names_canonical": "buyer_clean",
           "assignee_names_assignee_id": "buyer_id",
           "assignee_names_matched": "buyer_in_gazetteer",
@@ -159,16 +160,17 @@
         "left": "assignor_names_canonical", "right": "assignee_names_canonical",
         "method": "exact", "action": "drop_matches" },
 
-      { "kind": "derive", "table": "flat", "source": "recorded_date", "op": "year" },
+      { "kind": "derive", "table": "flat", "source": "transaction_date", "op": "year" },
 
       { "kind": "export", "fmt": "parquet", "tables": ["flat"],
         "columns": { "flat": [
-          "reel_no", "frame_no", "recorded_date", "recorded_date_year", "conveyance_text",
+          "reel_no", "frame_no", "recorded_date", "execution_date", "transaction_date",
+          "transaction_date_year", "date_source", "conveyance_text",
           "assignor_names", "assignor_names_canonical",
           "assignee_names", "assignee_names_canonical",
           "invention_title", "doc_country", "doc_number", "doc_kind", "doc_date" ] },
         "renames": { "flat": {
-          "recorded_date_year": "year",
+          "transaction_date_year": "year",
           "assignee_names_canonical": "buyer_clean",
           "assignor_names_canonical": "seller_clean" } } }
     ]

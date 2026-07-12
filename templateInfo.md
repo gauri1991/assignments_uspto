@@ -250,10 +250,11 @@ omitted) **auto-derives** the name per §2a — prefer leaving it blank so names
 
 ### `derive` — add a computed column
 ```json
-{ "kind": "derive", "table": "flat", "source": "recorded_date", "target": "", "op": "year" }
+{ "kind": "derive", "table": "flat", "source": "transaction_date", "target": "", "op": "year" }
 ```
 - `op`: `year` (chars 0–4 of a `YYYYMMDD` date), `month` (chars 5–6), `split_first` (first `"; "`
-  part), `upper`, `lower`. `target` blank → `<source>_<op>`.
+  part), `upper`, `lower`. `target` blank → `<source>_<op>`. Prefer `transaction_date` over
+  `recorded_date` as the year/month source — it is the true-event axis (see §top note on dates).
 
 ### `dedupe` — drop duplicate rows (keep first)
 ```json
@@ -400,20 +401,20 @@ template → how to verify with the tool**.
     "steps": [
       { "kind": "filter", "table": "flat",
         "clauses": [ { "column": "conveyance_text", "op": "starts_with", "value": "assignment" },
-                     { "column": "recorded_date", "op": "in_range", "value": "20060101", "value2": "20261231" } ],
+                     { "column": "transaction_date", "op": "in_range", "value": "20060101", "value2": "20261231" } ],
         "combine": "and" },
       { "kind": "normalize", "table": "flat", "column": "assignor_names" },
       { "kind": "normalize", "table": "flat", "column": "assignee_names" },
       { "kind": "classify", "table": "flat", "column": "assignor_names" },
       { "kind": "classify", "table": "flat", "column": "assignee_names" },
       { "kind": "transfer_type", "table": "flat", "assignor_type": "company", "assignee_type": "company" },
-      { "kind": "derive", "table": "flat", "source": "recorded_date", "op": "year" },
+      { "kind": "derive", "table": "flat", "source": "transaction_date", "op": "year" },
       { "kind": "export", "fmt": "parquet", "tables": ["flat"],
-        "columns": { "flat": ["reel_no","frame_no","recorded_date_year",
+        "columns": { "flat": ["reel_no","frame_no","transaction_date_year",
                                "assignor_names_canonical","assignee_names_canonical"] },
         "renames": { "flat": { "assignor_names_canonical": "assignor_clean",
                                "assignee_names_canonical": "assignee_clean",
-                               "recorded_date_year": "year" } } }
+                               "transaction_date_year": "year" } } }
     ]
   },
   {

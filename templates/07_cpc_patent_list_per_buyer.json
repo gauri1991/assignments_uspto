@@ -115,7 +115,7 @@
       {
         "kind": "derive",
         "table": "flat",
-        "source": "recorded_date",
+        "source": "transaction_date",
         "op": "year"
       },
       {
@@ -132,7 +132,10 @@
             "reel_no",
             "frame_no",
             "recorded_date",
-            "recorded_date_year",
+            "execution_date",
+            "transaction_date",
+            "transaction_date_year",
+            "date_source",
             "doc_number",
             "doc_kind",
             "doc_country",
@@ -145,7 +148,7 @@
             "assignee_names_assignee_id": "buyer_id",
             "assignee_names_canonical": "buyer_clean",
             "assignee_names_matched": "buyer_in_gazetteer",
-            "recorded_date_year": "year",
+            "transaction_date_year": "year",
             "doc_number": "patent_number_raw",
             "doc_kind": "kind_code",
             "doc_country": "doc_country"
