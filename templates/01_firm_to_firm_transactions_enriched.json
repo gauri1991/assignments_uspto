@@ -123,7 +123,7 @@
       {
         "kind": "derive",
         "table": "flat",
-        "source": "recorded_date",
+        "source": "transaction_date",
         "op": "year"
       },
       {
@@ -137,7 +137,10 @@
             "reel_no",
             "frame_no",
             "recorded_date",
-            "recorded_date_year",
+            "execution_date",
+            "transaction_date",
+            "transaction_date_year",
+            "date_source",
             "conveyance_text",
             "assignor_names",
             "assignor_names_canonical",
@@ -156,7 +159,7 @@
         },
         "renames": {
           "flat": {
-            "recorded_date_year": "year",
+            "transaction_date_year": "year",
             "assignor_names_canonical": "seller_clean",
             "assignor_names_assignee_id": "seller_id",
             "assignee_names_canonical": "buyer_clean",

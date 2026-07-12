@@ -187,6 +187,42 @@ def test_bundled_template_files_load_and_roundtrip() -> None:
             assert template.to_dict()["steps"]
 
 
+def test_firm_to_firm_templates_key_time_axis_on_transaction_date() -> None:
+    """Regression: the firm-to-firm / CPC templates must derive their year from
+    ``transaction_date`` (the true-event axis), not ``recorded_date`` (which lags the deal),
+    and export ``execution_date`` alongside it. Guards against a silent revert."""
+    templates_dir = Path(__file__).resolve().parent.parent / "templates"
+    files = [
+        "01_firm_to_firm_transactions_enriched.json",
+        "06_firm_to_firm_rules_only.json",
+        "07_cpc_patent_list_per_buyer.json",
+        "buyer_identification_templates.json",
+    ]
+    checked = 0
+    for name in files:
+        for template in load_templates(templates_dir / name):
+            year_derives = [
+                s for s in template.steps if isinstance(s, DeriveStep) and s.op == "year"
+            ]
+            if not year_derives:  # leaderboard templates have no time axis — skip
+                continue
+            for step in year_derives:
+                assert step.source == "transaction_date", (
+                    f"{name}/{template.name}: year derived from {step.source!r}"
+                )
+            flat_cols = [
+                col
+                for export in template.steps
+                if isinstance(export, ExportStep) and export.columns
+                for col in (export.columns.get("flat") or [])
+            ]
+            assert "execution_date" in flat_cols, (
+                f"{name}/{template.name}: export omits execution_date"
+            )
+            checked += 1
+    assert checked, "expected at least one firm-to-firm template with a year-derive step"
+
+
 def test_run_preview_returns_tables_and_stats() -> None:
     template = BatchTemplate(
         name="p",
