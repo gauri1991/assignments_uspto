@@ -22,9 +22,10 @@ match, and export it.
 10. [Batch processing](#10-batch-processing)
     - [Batch step catalog](#batch-step-catalog)
     - [Recipes](#recipes)
-11. [Config & file locations](#11-config--file-locations)
-12. [Develop & quality gate](#12-develop--quality-gate)
-13. [Maintaining this guide](#maintaining-this-guide)
+11. [Troubleshooting & known issues](#11-troubleshooting--known-issues)
+12. [Config & file locations](#12-config--file-locations)
+13. [Develop & quality gate](#13-develop--quality-gate)
+14. [Maintaining this guide](#maintaining-this-guide)
 
 ---
 
@@ -513,6 +514,13 @@ Add a computed column. Fields: `table`, `source`, `target` (blank → `<source>_
 `op` values: `year` (first 4 chars of a `YYYYMMDD` date), `month` (chars 5–6), `split_first` (first
 part of a `"; "`-joined value), `upper`, `lower`.
 
+> **Use `transaction_date` as the date `source`, not `recorded_date`.** `recorded_date` is when the
+> USPTO *recorded* the transfer and lags the real event; `transaction_date` is the latest assignor
+> `execution_date`, falling back to `recorded_date` only when no signer date was filed (with
+> `date_source` recording which). It is the true-event axis and is always populated. The bundled
+> firm-to-firm / CPC templates derive their `year` from `transaction_date` for exactly this reason —
+> match that when you build your own.
+
 #### Aggregate (group & count)
 Group by columns and count rows into a **new summary table**. Fields: `table`, `group_by[]`,
 `count_distinct` (optional column to also count distinct values of), `out_table` (blank →
@@ -552,7 +560,74 @@ Each recipe is an ordered step list you build in the batch dialog (or a saved te
 
 ---
 
-## 11. Config & file locations
+## 11. Troubleshooting & known issues
+
+### "step N (filter) left '`<table>`' EMPTY — check the filter clause, reference_path/name_column, or the match gate"
+
+A step reduced a **non-empty** table to **zero rows**. It's a red console warning, not a crash — the
+pipeline keeps running but every later step (and the export) now has nothing to work on. The message is
+generic; for a **filter** step, only "check the filter clause" applies.
+
+**Most common cause — the firm-to-firm step-1 filter matches nothing in your file.** The bundled
+firm-to-firm / CPC templates open with a filter that **AND**s four conditions, so a row survives only
+if *all* hold:
+
+1. `conveyance_text` **contains** `ASSIGNORS INTEREST`
+2. `assignee_names` **not empty**
+3. `purge_indicator` **≠** `Y`
+4. `recorded_date` **not empty**
+
+The usual culprit is **condition 1**. Real USPTO sales read
+`ASSIGNMENT OF ASSIGNORS INTEREST (SEE DOCUMENT FOR DETAILS)` (which contains the phrase), but a file
+holding only **security interests, mergers, name changes, or government-interest** records contains no
+`ASSIGNORS INTEREST` text — so the AND drops everything.
+
+**How to diagnose (30 seconds):** open the same `.xml`/`.zip` normally (not batch), add a filter clause
+on **`conveyance_text`** — because it's low-cardinality the value box pre-fills the **distinct
+conveyance types actually in your file**. If none contain "ASSIGNORS INTEREST", your file has no
+firm-to-firm sale records under that phrasing. While there, check `recorded_date` isn't blank across the
+file (that would trip condition 4). You can also use **Batch ▸ Preview** — it runs the pipeline on a
+~1,000-row sample and shows each step's row delta, pinpointing which step zeroed the table.
+
+**Fixes:**
+- **Relax condition 1** — double-click the filter step and change the clause to a phrase your file
+  actually uses (e.g. just `ASSIGNORS`, or the specific conveyance type you want), or remove it.
+- Accept that the file genuinely has **no** firm-to-firm records — then a firm-to-firm template can't
+  produce output regardless.
+
+> The AND combine is strict: **every** clause must pass. If you meant "any of these", switch the step's
+> combine toggle to **OR** (*Match any*). See [Filters](#6-filters).
+
+### "reference file not found" — templates that use *Match against reference*
+
+The bundled buyer templates **01, 02, 03, 04, 05, 07** (and buyer_identification T1) include a
+[*Match against reference*](#match-against-reference) step pointed at **`reference/reference.parquet`**.
+That path is **git-ignored** and **not shipped**, so on a fresh clone (or a machine that only has the
+raw PatentsView `.tsv`) the step fails and its table empties.
+
+**Fixes — pick one:**
+- **Build the compact reference once.** Put the PatentsView `g_assignee_disambiguated.tsv` in a
+  `reference/` folder at the project root, open the *Match against reference* dialog, click
+  **Build compact…**, select the `.tsv`, and save `reference/reference.parquet`. All the templates
+  point at that file. See [Reference matching](#9-reference-matching-patentsview-disambiguated-assignees).
+- **Use the rules-only template `06`** (its reviewed-bundle twin is `reviewed.json` **T5**). It replaces
+  gazetteer matching with a rules-based *Transfer type* step, so it needs **no reference file at all** —
+  the fastest path when you don't need gazetteer-accurate entity resolution.
+
+> On Windows: create the `reference/` folder yourself (it's the only git-ignored input you must supply —
+> output folders like `out/`, `dictionary/` are auto-created). See the README's Windows section.
+
+### The exported `year` column is blank for some rows
+
+The bundled templates derive `year` from **`transaction_date`** (the true-event date — see the note
+below). `transaction_date` is `execution_date` when the filing recorded one, else `recorded_date`, so
+it's populated for almost every row; a blank `year` means the record had **neither** an execution date
+**nor** a recorded date. The exported **`date_source`** column tells you which basis each row used
+(`execution` vs `recorded`).
+
+---
+
+## 12. Config & file locations
 
 | What | Where |
 |---|---|
@@ -569,7 +644,7 @@ The OS app-config dir is `<config>/uspto-assignment-viewer/` (falls back to `~/.
 
 ---
 
-## 12. Develop & quality gate
+## 13. Develop & quality gate
 
 ```bash
 .venv/bin/ruff format . && .venv/bin/ruff check --fix .   # format + lint (line length 100)
