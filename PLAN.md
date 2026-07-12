@@ -307,3 +307,49 @@ explicitly-typed derived columns only inside DuckDB views:
 
 **STOP.** Awaiting your review of this plan (and your read of the segfault block-distribution data,
 delivered alongside) before any implementation.
+
+---
+
+# §CPC match + configurable data-fetch layer (implemented)
+
+**Goal.** Close the last mile: attach CPC codes to patents, match a **sales-package portfolio
+per patent** against buyers' CPC footprints, and rank same-domain buyers — with the CPC data coming
+from a **configurable source** (USPTO ODP API or a local bulk file), fetched once into a local cache
+the pipeline reads offline.
+
+**Audit (what already existed, reused).** `reconcile_cpc` (`ledger.py`) already joined a CPC file to
+the bridge and computed `cpc_hit_rate`; `normalize_patent_id`/`doc_type_for` (`propid.py`) already
+produce the bare-grant "PatentsView" key and route via `kind_code`. There was **no** config/HTTP/cache
+layer. Decision #5 above (CPC source key format) is resolved here: **bare grant number** (PatentsView
+`g_cpc_current` / ODP `patent_id`).
+
+**Decisions (locked with the user).** Config edited in the **UI (Settings ▸ CPC data source)** and
+saved in the **project** (`cpc_config.json`, JSON). Default source = **USPTO ODP / PatentSearch API**
+with the key referenced by env-var **name only** (never stored); a `local_file` source is the offline
+path. HTTP via **stdlib `urllib`**. **`offline_only` defaults on** — network only on an explicit
+per-run opt-in. Delivered as **batch step kinds + UI** (no CLI). Per-patent matching; portfolio as a
+patent list **or** a footprint file. Grain default **subclass**.
+
+**Verified external facts (as of 2026-07; re-verify).** Legacy PatentsView API `410 Gone` since
+2025-05-01; PatentsView → USPTO ODP (`data.uspto.gov`) on 2026-03-20. Live surface: PatentSearch/ODP
+`POST patent` by `patent_id`, nested `cpc_current.cpc_group_id`, `X-Api-Key` header, ~45 req/min.
+
+**Design (as built).**
+- Core (Qt-free): `cpcconfig.py` (config dataclasses + JSON load/save), `datasource.py`
+  (`CpcSource` protocol; `LocalFileCpcSource` via DuckDB + `UsptoOdpApiSource` via urllib with an
+  injectable transport; cache-first `CpcCache` Parquet with TTL; `CpcRunContext`), `cpcmatch.py`
+  (`attach_cpc`, `load_portfolio_footprint`, per-patent overlap → ranked buyers, aborting hit-rate
+  guard).
+- Two step kinds in `batch.py` (12 → 14): **`fetch_cpc`** (enrichment) and **`cpc_match`**
+  (portfolio → ranked buyers), wired through every extension point; a `CpcRunContext` is threaded
+  through `run_batch`/`run_preview`/workers. **Not** `reference_match` — exact grant-key joins.
+- UI: `CpcSettingsDialog` (persisted via `CpcConfigStore`), two step editors, a per-run *Allow
+  network* checkbox, and a *Settings ▸ CPC data source* menu entry.
+
+**Boundary.** CPC matching is intentionally **not expressible** with the pre-existing 12 kinds
+(`reference_match` is a fuzzy name matcher; there is no list-membership filter). The two new kinds are
+purpose-built and exact, preserving the "no hallucinated capability" guarantee.
+
+**Tests.** Mocked-API DataSource (no network in CI), offline/TTL cache behavior, format-mismatch
+hit-rate abort, step roundtrip/schema/validation, and an end-to-end fetch → match on the
+`buyer_sample` fixture. Quality gate (ruff + pyright strict + pytest) green.

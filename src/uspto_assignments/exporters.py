@@ -11,7 +11,7 @@ import json
 import logging
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import pyarrow as pa
 import pyarrow.csv as pa_csv
@@ -112,12 +112,32 @@ def export(
             with pa.OSFile(str(path), "wb") as sink, pa.ipc.new_file(sink, subset.schema) as writer:
                 writer.write_table(subset)
         case "csv":
-            pa_csv.write_csv(subset, str(path))
+            pa_csv.write_csv(_stringify_list_columns(subset), str(path))
         case "json":
             path.write_text(json.dumps(subset.to_pylist(), ensure_ascii=False), encoding="utf-8")
         case "xlsx":
-            return _write_xlsx(subset, path, sheet_name)
+            return _write_xlsx(_stringify_list_columns(subset), path, sheet_name)
     return subset.num_rows
+
+
+def _stringify_list_columns(table: pa.Table) -> pa.Table:
+    """Join any list-typed column into a ``"; "``-delimited string.
+
+    CSV and Excel cells cannot hold arrays, but the CPC steps produce list columns
+    (``cpc_codes``, ``cpc_subclasses``, ``shared_codes``). Parquet/Feather/JSON keep them as lists;
+    the text formats flatten each list to a readable string (``None`` → empty).
+    """
+    out = table
+    for name in table.column_names:
+        column = out.column(name)
+        if not (pa.types.is_list(column.type) or pa.types.is_large_list(column.type)):
+            continue
+        items: list[Any] = column.to_pylist()
+        joined = ["; ".join(str(v) for v in item) if item else "" for item in items]
+        out = out.set_column(
+            out.schema.get_field_index(name), name, pa.array(joined, type=pa.string())
+        )
+    return out
 
 
 def export_store(store: TableStore, out_dir: Path, fmt: ExportFormat) -> dict[str, int]:

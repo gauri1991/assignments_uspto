@@ -73,6 +73,8 @@ producing step can reference them:
 | `derive` from `source` with `op` | `<source>_<op>` |
 | `compare` with `action: "flag"` | `<left>_matches_<right>` (values `"true"` / `"false"`) |
 | `reference_match` on `column` | `<column>_disambiguated`, `<column>_matched` (`"true"`/`"false"`), and `<column>_assignee_id` (only if `id_column` set) |
+| `fetch_cpc` | `cpc_codes` (list), `cpc_subclasses` (list), `cpc_lookup_status` |
+| `cpc_match` | creates **two new tables**: `matched_buyers_by_portfolio_patent` and `matched_buyers_overall` |
 | `aggregate` | creates a **new table** named `<table>_by_<group_by joined by _>` with columns = the group-by columns + `count` (+ `<count_distinct>_distinct` if set) |
 
 Example: after `{"kind":"normalize","table":"flat","column":"assignor_names"}`, the column
@@ -171,11 +173,14 @@ Each step is an object with a `"kind"` discriminator. **The complete, closed set
 
 ```
 filter · normalize · classify · compare · transfer_type · reference_match ·
-dedupe · select · sort · derive · aggregate · export
+fetch_cpc · cpc_match · dedupe · select · sort · derive · aggregate · export
 ```
 
 Anything else (e.g. `resolve`, `ledger`, `join`, `dictionary`) is **not a template step** and will
-fail to import — those capabilities exist as CLI subcommands, not steps (see §9). Fields marked
+fail to import — those capabilities exist as CLI subcommands, not steps (see §9). Note that
+`fetch_cpc`/`cpc_match` are **purpose-built exact-join CPC steps** — do **not** try to attach CPC with
+`reference_match` (a fuzzy *name* matcher; pointed at patent numbers it would silently corrupt them).
+Fields marked
 *(optional)* may be omitted. A `target`/`matched_target`/`id_target`/`out_table` left as `""` (or
 omitted) **auto-derives** the name per §2a — prefer leaving it blank so names stay consistent.
 
@@ -247,6 +252,35 @@ omitted) **auto-derives** the name per §2a — prefer leaving it blank so names
   `assignee_id`); leave `""` to skip. `delimiter` *(optional)* — blank auto-detects (`.tsv`→tab,
   `.csv`→comma). Outputs `<column>_disambiguated`, `<column>_matched`, and (if `id_column`)
   `<column>_assignee_id`. `mode` `any`/`all`; `action` `flag`/`keep_matched`/`drop_matched`.
+
+### `fetch_cpc` — attach CPC codes to a patent-number column (exact grant join)
+```json
+{ "kind": "fetch_cpc", "table": "flat", "column": "doc_number", "kind_column": "doc_kind" }
+```
+- Adds `cpc_codes` (full CPC symbols), `cpc_subclasses` (4-char grain), and `cpc_lookup_status`
+  (`na` non-grant / `found` / `not_found` / `uncached`). Routes to **grants only** via `kind_column`;
+  patent numbers are normalized to the bare grant number before the join.
+- The data **source, cache, and network posture come from the project CPC config** (edited in
+  *Settings ▸ CPC data source*, saved to `cpc_config.json`), **not** from the step. **Offline by
+  default**: uncached numbers are only fetched when the run enables the network (the batch dialog's
+  *Allow network* checkbox). A low hit-rate is warned here and **aborts** in `cpc_match` — it means
+  the patent-number/CPC-key formats are misaligned, not "no data".
+
+### `cpc_match` — rank buyers per portfolio patent by CPC overlap
+```json
+{ "kind": "cpc_match", "table": "flat", "portfolio_mode": "patent_list",
+  "portfolio_path": "portfolio.txt", "buyer_column": "assignee_names_canonical",
+  "number_column": "doc_number", "kind_column": "doc_kind", "date_column": "transaction_date",
+  "out_table": "matched_buyers_by_portfolio_patent", "overall_table": "matched_buyers_overall" }
+```
+- Reads CPC already attached by a prior `fetch_cpc` step. `portfolio_mode` — `patent_list` (a file of
+  grant numbers, one per line; each footprint resolved via the same source/cache) or `footprint_file`
+  (a pre-built `patent,cpc` file; no network). Creates **two tables**: per-portfolio-patent ranked
+  buyers (`out_table`) and a cross-portfolio buyer summary (`overall_table`).
+- **All match knobs — grain (`subclass`/`main_group`/`full_symbol`), overlap metric
+  (`shared_count`/`jaccard`/`rarity_weighted`), threshold, ranking weights, min in-domain patents,
+  and hit-rate floor — come from the project CPC config**, so they stay consistent across templates.
+  Aborts if the CPC hit-rate is below the floor.
 
 ### `derive` — add a computed column
 ```json
@@ -448,9 +482,11 @@ template → how to verify with the tool**.
 > Using the spec in `templateInfo.md`, generate a JSON file (a top-level array) of batch templates
 > for the USPTO patent-assignment tool. For each template I describe, produce a template object with
 > `name`, an optional `load`, and an ordered `steps` array. Only use the listed table names, column
-> names, and enum values, and **only the 12 step kinds listed in §5** — the buyer-identification
+> names, and enum values, and **only the 14 step kinds listed in §5** — the buyer-identification
 > pipeline (`ingest`/`build-dictionary`/`resolve`/`ledger`/`report`) is a CLI, not a set of step
-> kinds, so never invent steps like `resolve` or `join`. Respect step ordering so later steps only
+> kinds, so never invent steps like `resolve` or `join`. For CPC work use the dedicated `fetch_cpc`
+> and `cpc_match` steps (never `reference_match` on patent numbers). Respect step ordering so later
+> steps only
 > reference columns that exist by then (base columns + columns earlier steps add). End each pipeline
 > with an `export` step. Output only valid JSON that will import via **Settings ▸ Batch processing ▸
 > Import…**.

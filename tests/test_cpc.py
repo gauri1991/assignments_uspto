@@ -20,6 +20,7 @@ from uspto_assignments import (
     FetchCpcStep,
     LoadConfig,
     columns_after,
+    export,
     run_preview,
     validate_template,
 )
@@ -467,6 +468,20 @@ def test_end_to_end_fetch_then_match(tmp_path: Path) -> None:
     assert "WIDGET CORP" in buyers  # bought H04L grant 10987654
     assert "ZORPTECH SYSTEMS INCORPORATED" not in buyers  # only A61K — off-domain, excluded
     assert all(row["rank"] >= 1 for row in ranked)
+
+
+def test_list_columns_export_to_csv(tmp_path: Path) -> None:
+    """CPC list columns (cpc_codes/shared_codes) must flatten to strings for CSV/Excel."""
+    table = pa.table(
+        {
+            "buyer": ["ACME"],
+            "shared_codes": pa.array([["H04L", "G06F"]], type=pa.list_(pa.string())),
+        }
+    )
+    out = tmp_path / "out.csv"
+    export(table, out, "csv")
+    text = out.read_text(encoding="utf-8")
+    assert "H04L; G06F" in text  # joined, not an array
 
 
 def test_fetch_cpc_offline_reports_uncached(tmp_path: Path) -> None:

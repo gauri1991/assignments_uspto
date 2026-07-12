@@ -223,7 +223,7 @@ Launch with a file, a dataset folder, or blank:
 - **File**: `Open XML/ZIP…` (Ctrl+O) · `Open dataset folder…` · `Save processed…` (Ctrl+S) ·
   `Export current table…` (Ctrl+E) · `Export all tables…` · `Close dataset` (Ctrl+W) · `Exit`.
 - **Queries**: `Save current query…` · `Manage queries…`.
-- **Settings**: `Batch processing…` (Ctrl+B) · `Entity memory…`.
+- **Settings**: `Batch processing…` (Ctrl+B) · `Entity memory…` · `CPC data source…`.
 - **Toolbar**: Open · Open dataset · Save · Export current · Export all · Manage queries · Batch · Close.
 
 **Load options** (shown when opening) — pick which tables/fields to load (a checkable
@@ -417,6 +417,48 @@ For the matched column it adds:
 **Action**: `flag` (add the columns), `keep_matched` (keep only known-company rows — drops presumed
 individuals), or `drop_matched`. **Mode**: `any` (matched if any party is a known company) or `all`.
 
+### 9.5 CPC matching (fetch → rank buyers)
+
+The final step of the strategy — matching a **sales package** (a portfolio of patents you're selling)
+to the buyers most likely to want it — is done with two dedicated batch steps: **Fetch CPC** and
+**CPC match**. These are *not* the fuzzy `reference_match` step: attaching CPC and computing overlap
+are **exact joins on the normalized grant number**, so they get their own step kinds (pointing
+`reference_match` at patent numbers would silently corrupt them).
+
+**Configure the source once — *Settings ▸ CPC data source*.** The dialog edits a project config file
+(`cpc_config.json`, saved in the working folder, shareable — it holds **no secret**) covering:
+
+- **Source**: **USPTO ODP / PatentSearch API** (`data.uspto.gov`, default) or a **local bulk file**
+  (e.g. PatentsView `g_cpc_current.tsv`, offline & scale-safe). Endpoint/auth are config, verified
+  "as of" a date — re-verify against live docs, since USPTO endpoints change.
+- **API key**: stored **only as an environment-variable name** (default `USPTO_ODP_API_KEY`); the key
+  itself is read from the environment at run time and never written to disk. The dialog shows whether
+  that variable is currently set.
+- **Network posture**: **offline by default**. A `fetch_cpc` step reads the cache only and lists
+  uncached numbers; it hits the network **only** when you tick *Allow network for CPC fetch this run*
+  in the batch dialog. After the first fetch populates the cache (`data/cpc/`, TTL-controlled), every
+  run is offline and reproducible.
+- **Match defaults**: overlap grain (`subclass` default / `main_group` / `full_symbol`), overlap
+  metric (`shared_count` / `jaccard` / `rarity_weighted`), threshold, ranking weights, minimum
+  in-domain patents, and the hit-rate floor. Keeping these in the config (not per-step) means every
+  CPC template stays consistent.
+
+**The two-template workflow** (matches how the front-half bridge is built):
+
+1. **Enrich**: run your firm-to-firm / recency / buyer-resolution template, add a **Fetch CPC** step
+   on the patent-number column, and export — you now have buyers × patents with CPC attached.
+2. **Match**: a separate template with a **CPC match** step that reads that enriched data plus your
+   sales-package portfolio (a **patent-number list** whose footprint is resolved via the same
+   source/cache, or a **pre-built `patent,cpc` footprint file** for hand-tuning). It emits
+   `matched_buyers_by_portfolio_patent` (per portfolio patent → ranked buyers: overlap strength,
+   in-domain patent count, last acquisition date, off-gazetteer flag) and `matched_buyers_overall`.
+
+**Number-format discipline (why hit-rate matters).** CPC is assigned at **grant**, so application and
+publication numbers resolve to nothing — both steps route to grants via `kind_column` and normalize to
+the bare grant number the CPC source uses. A **low `cpc_hit_rate`** means the number formats are
+misaligned, *not* that buyers have no CPC — so `cpc_match` **aborts** below the configured floor rather
+than returning a misleading empty result.
+
 ---
 
 ## 10. Batch processing
@@ -499,6 +541,26 @@ Fields: `table` (default `flat`), `column` (default `assignor_names`), `referenc
 `threshold`, `scorer`, `separator`, `mode` (`any`/`all`), `delimiter` (blank → auto), `action`
 (`flag`/`keep_matched`/`drop_matched`). Outputs `<col>_disambiguated`, `<col>_matched`, and
 `<col>_assignee_id` (when an id column is set).
+
+#### Fetch CPC
+Attach CPC classification codes to a patent-number column via the configured CPC source
+(see [CPC matching](#95-cpc-matching-fetch--rank-buyers)). Fields: `table` (default `flat`),
+`column` (patent-number column, default `doc_number`), `kind_column` (default `doc_kind`, used to
+route to grants — CPC is grant-only). Outputs `cpc_codes`, `cpc_subclasses`, `cpc_lookup_status`.
+Source/cache/offline behavior come from the project CPC config, **not** the step. This is an **exact**
+join on the normalized grant number — deliberately *not* the fuzzy `reference_match` step (which,
+pointed at patent numbers, would silently corrupt them). **Offline by default**: uncached numbers are
+fetched only when *Allow network* is checked for the run.
+
+#### CPC match
+Match a sales-package portfolio against buyers' CPC footprints and rank buyers per portfolio patent
+(run a Fetch CPC step first). Fields: `table`, `portfolio_mode` (`patent_list` | `footprint_file`),
+`portfolio_path`, `buyer_column` (default `assignee_names_canonical`), `number_column`, `kind_column`,
+`date_column` (default `transaction_date`). All match knobs (grain, overlap metric/threshold, ranking
+weights, hit-rate floor) come from the project CPC config. Produces two tables:
+`matched_buyers_by_portfolio_patent` (per patent → ranked buyers) and `matched_buyers_overall`
+(cross-portfolio summary). **Aborts** if the CPC hit-rate is below the floor (a patent-number-format
+mismatch, not "no data").
 
 #### Deduplicate
 Drop duplicate rows (keep first). Fields: `table`, `subset` (key columns; blank → whole row).
@@ -616,6 +678,22 @@ raw PatentsView `.tsv`) the step fails and its table empties.
 
 > On Windows: create the `reference/` folder yourself (it's the only git-ignored input you must supply —
 > output folders like `out/`, `dictionary/` are auto-created). See the README's Windows section.
+
+### `cpc_match` aborts with "CPC hit-rate … below the floor"
+
+The patent numbers and your CPC source's key format don't line up, so almost nothing joined — the
+guard stops rather than hand you a misleadingly empty result. The CPC source's patent id should be a
+**bare grant number** (e.g. `10987654` — no country prefix, no kind suffix, no leading zeros), which
+is what `fetch_cpc` normalizes to. Check the source's patent-id column/format (*Settings ▸ CPC data
+source ▸ File patent column*), and confirm you're pointing at a CPC table, not an application table.
+
+### "N grant patents are uncached — enable network to fetch"
+
+`fetch_cpc` is **offline by default**: it found grant patents with no cached CPC and didn't call the
+API. Tick ***Allow network for CPC fetch this run*** in the batch dialog (and make sure the API-key
+env var named in *Settings ▸ CPC data source* is exported) to fetch and cache them. Subsequent runs
+read from the cache offline. Or point the source at a local bulk CPC file, which never needs the
+network.
 
 ### The exported `year` column is blank for some rows
 
