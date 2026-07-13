@@ -453,6 +453,12 @@ are **exact joins on the normalized grant number**, so they get their own step k
    `matched_buyers_by_portfolio_patent` (per portfolio patent → ranked buyers: overlap strength,
    in-domain patent count, last acquisition date, off-gazetteer flag) and `matched_buyers_overall`.
 
+Two ready-to-import example templates ship for exactly this: **`08_cpc_enrich_firm_to_firm.json`**
+(rules-only firm-to-firm + Fetch CPC → Parquet export, no reference file needed) and
+**`09_cpc_match_to_portfolio.json`** (CPC match on 08's output → ranked-buyer CSVs). Import them via
+*Settings ▸ Batch processing*, run 08 on your XML/ZIP, then run 09 with its input pointed at 08's
+output folder and its `portfolio_path` set to your portfolio file.
+
 **Number-format discipline (why hit-rate matters).** CPC is assigned at **grant**, so application and
 publication numbers resolve to nothing — both steps route to grants via `kind_column` and normalize to
 the bare grant number the CPC source uses. A **low `cpc_hit_rate`** means the number formats are
