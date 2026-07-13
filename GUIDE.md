@@ -626,6 +626,36 @@ Each recipe is an ordered step list you build in the batch dialog (or a saved te
 - Normalize `assignees.name` → `name_canonical`; **Aggregate** `assignees` group by `name_canonical`
   → `assignees_by_name_canonical`; Export that table (Parquet/CSV).
 
+**E. CPC portfolio match — rank buyers for a sales package (two templates)**
+
+The end-to-end "who should I sell this patent to?" flow. It ships as two importable templates
+(`08_cpc_enrich_firm_to_firm.json` and `09_cpc_match_to_portfolio.json`); the steps below are what
+they contain, so you can also build them by hand. See [CPC matching](#95-cpc-matching-fetch--rank-buyers)
+for the config.
+
+*One-time setup:* open *Settings ▸ CPC data source*. Either set **Source = Local bulk file** and point
+it at a PatentsView `g_cpc_current.tsv` (fully offline), **or** keep **Source = USPTO ODP / PatentSearch
+API** and `export USPTO_ODP_API_KEY=…` in your shell. Import both templates via
+*Settings ▸ Batch processing*.
+
+1. **Template 08 — enrich (raw file → CPC-tagged buyers).** Steps: **Filter** the firm-to-firm
+   conveyance/date gate · **Transfer type** `company → company` · **Normalize** `assignor_names` and
+   `assignee_names` · **Compare** the two `*_canonical` columns, `drop_matches` (remove self-transfers)
+   · **Derive** `year` from `transaction_date` · **Fetch CPC** on `doc_number` (kind `doc_kind`) ·
+   **Export** `flat` as **Parquet**. Run it on your `.xml`/`.zip` — if you're using the API source,
+   tick **Allow network for CPC fetch this run** so uncached grants are fetched (and cached).
+2. **Template 09 — match (enriched data + portfolio → ranked buyers).** One **CPC match** step
+   (`buyer_column = assignee_names_canonical`, `number_column = doc_number`) plus an **Export** of
+   `matched_buyers_by_portfolio_patent` and `matched_buyers_overall` as CSV. Set the step's
+   `portfolio_path` to your sales-package file — a plain **`.txt` of grant numbers** (one per line;
+   footprints resolved via the same source/cache) or a pre-built **`patent,cpc` CSV**. Point the run's
+   **input at Template 08's output folder** (the enriched dataset) and run.
+
+Output: per portfolio patent, a ranked buyer shortlist (overlap strength, in-domain patent count, last
+acquisition date, off-gazetteer flag), plus a cross-portfolio buyer summary. Tune grain / metric /
+threshold / ranking weights in *Settings ▸ CPC data source*. A low `cpc_hit_rate` **aborts** the match
+(a patent-number-format mismatch — see [Troubleshooting](#11-troubleshooting--known-issues)).
+
 ---
 
 ## 11. Troubleshooting & known issues
