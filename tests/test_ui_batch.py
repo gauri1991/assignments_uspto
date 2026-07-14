@@ -12,10 +12,11 @@ pytest.importorskip("PyQt6")
 pytest.importorskip("pytestqt")
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QListWidget
+from PyQt6.QtWidgets import QListWidget, QMessageBox
 
 from uspto_assignments import (
     AggregateStep,
+    BatchEvent,
     BatchTemplate,
     ClassifyStep,
     CompareStep,
@@ -112,7 +113,7 @@ def test_batch_dialog_runs_and_writes_output(qtbot: Any, tmp_path: Path) -> None
     dialog._out_dir.setText(str(out))
     dialog._run()
 
-    qtbot.waitUntil(lambda: "Done." in dialog._console.toPlainText(), timeout=15000)
+    qtbot.waitUntil(lambda: "Done:" in dialog._console.toPlainText(), timeout=15000)
     result = out / "granted" / "sample_assignment" / "properties.parquet"
     assert result.is_file()
     reopened = pq.read_table(result)  # pyright: ignore[reportUnknownMemberType]
@@ -485,7 +486,7 @@ def test_batch_dialog_normalize_run_persists_memory(qtbot: Any, tmp_path: Path) 
     dialog._out_dir.setText(str(tmp_path / "out"))
     dialog._run()
 
-    qtbot.waitUntil(lambda: "Done." in dialog._console.toPlainText(), timeout=15000)
+    qtbot.waitUntil(lambda: "Done:" in dialog._console.toPlainText(), timeout=15000)
     assert (tmp_path / "entities.json").is_file()
     assert EntityMemory.load(tmp_path / "entities.json").counts()[0] >= 1
     assert "normalizing" in dialog._console.toPlainText()
@@ -547,3 +548,89 @@ def test_step_list_shows_warning_badge(qtbot: Any, tmp_path: Path) -> None:
     assert item is not None
     assert "⚠" in item.text()
     assert "nope_col" in item.toolTip()
+
+
+# -- run lifecycle: typed progress, cancel, close guard --------------------
+
+
+def test_progress_driven_by_event_kind_not_message_text(qtbot: Any, tmp_path: Path) -> None:
+    create_app([])
+    dialog = BatchDialog(BatchTemplateStore(tmp_path / "b.json"))
+    qtbot.addWidget(dialog)
+    dialog._progress.setRange(0, 2)
+    dialog._completed = 0
+
+    dialog._on_event(BatchEvent("success", "no marker here", kind="file_done"))
+    assert dialog._progress.value() == 1
+    # regression: a plain message that merely *looks* like a completion line must not count
+    dialog._on_event(BatchEvent("info", "✓ looks done but is only a message"))
+    assert dialog._progress.value() == 1
+
+
+def test_close_blocked_while_running_then_allowed(
+    qtbot: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    create_app([])
+    dialog = BatchDialog(BatchTemplateStore(tmp_path / "b.json"))
+    qtbot.addWidget(dialog)
+    dialog._template_name.setText("granted")
+    dialog._steps = list(_template().steps)
+    dialog._inputs.addItem(str(FIXTURE))
+    dialog._out_dir.setText(str(tmp_path / "out"))
+    dialog.show()
+    dialog._run()
+    assert dialog._thread is not None
+    assert dialog._cancel_btn.isVisible()
+
+    monkeypatch.setattr(
+        QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.StandardButton.No)
+    )
+    dialog.close()
+    assert dialog.isVisible()  # close refused while the run is active
+
+    qtbot.waitUntil(lambda: dialog._thread is None, timeout=15000)
+    assert not dialog._cancel_btn.isVisible()
+    assert dialog._run_btn.isEnabled() and dialog._preview_btn.isEnabled()
+    dialog.close()
+    assert not dialog.isVisible()
+
+
+def test_close_during_run_cancels_and_closes_after(
+    qtbot: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    create_app([])
+    dialog = BatchDialog(BatchTemplateStore(tmp_path / "b.json"))
+    qtbot.addWidget(dialog)
+    dialog._template_name.setText("granted")
+    dialog._steps = list(_template().steps)
+    dialog._inputs.addItem(str(FIXTURE))
+    dialog._out_dir.setText(str(tmp_path / "out"))
+    dialog.show()
+    dialog._run()
+
+    monkeypatch.setattr(
+        QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes)
+    )
+    dialog.reject()  # the Close button path
+    assert dialog._close_after_run is True
+    assert dialog.isVisible()  # still open until the thread stops
+
+    qtbot.waitUntil(lambda: dialog._thread is None and not dialog.isVisible(), timeout=15000)
+
+
+def test_cancel_slot_requests_worker_stop(qtbot: Any, tmp_path: Path) -> None:
+    create_app([])
+    dialog = BatchDialog(BatchTemplateStore(tmp_path / "b.json"))
+    qtbot.addWidget(dialog)
+    dialog._template_name.setText("granted")
+    dialog._steps = list(_template().steps)
+    dialog._inputs.addItem(str(FIXTURE))
+    dialog._out_dir.setText(str(tmp_path / "out"))
+    dialog._run()
+
+    dialog._cancel()
+    assert not dialog._cancel_btn.isEnabled()
+    assert "Cancelling" in dialog._console.toPlainText()
+    qtbot.waitUntil(lambda: dialog._thread is None, timeout=15000)
+    # with a single tiny input the run may already be past the stop check; either way it ends clean
+    assert "Done:" in dialog._console.toPlainText()

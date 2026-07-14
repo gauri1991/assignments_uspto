@@ -23,7 +23,7 @@ from concurrent.futures.process import BrokenProcessPool
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from queue import Empty
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import pyarrow as pa
@@ -827,6 +827,9 @@ class BatchEvent:
 
     level: str  # "info" | "error" | "success"
     message: str
+    # "file_done" marks a per-file completion line — the UI drives its determinate progress bar
+    # from this, not from the message text.
+    kind: Literal["message", "file_done"] = "message"
 
 
 @dataclass(slots=True)
@@ -1618,7 +1621,11 @@ def _run_parallel(  # noqa: PLR0913 - internal helper threading the run's collab
                     updated = True
                     emit(BatchEvent("info", f"[{name}] parsing… {payload:,} assignments"))
                 else:
-                    emit(BatchEvent(payload.level, f"[{name}] {payload.message.strip()}"))
+                    emit(
+                        BatchEvent(
+                            payload.level, f"[{name}] {payload.message.strip()}", kind=payload.kind
+                        )
+                    )
             now = time.monotonic()
             if per_source and (force or (updated and now - last_emit >= _COMBINED_EMIT_SECONDS)):
                 grand_total = sum(per_source.values())
@@ -1669,9 +1676,13 @@ def _run_parallel(  # noqa: PLR0913 - internal helper threading the run's collab
 def _emit_file_done(result: FileResult, emit: OnEvent) -> None:
     took = f" ({result.elapsed:.1f}s)"
     if result.ok:
-        emit(BatchEvent("success", f"✓ {Path(result.source).name} done{took}"))
+        emit(BatchEvent("success", f"✓ {Path(result.source).name} done{took}", kind="file_done"))
     else:
-        emit(BatchEvent("error", f"✗ {Path(result.source).name}: {result.error}{took}"))
+        emit(
+            BatchEvent(
+                "error", f"✗ {Path(result.source).name}: {result.error}{took}", kind="file_done"
+            )
+        )
 
 
 def _write_run_log(

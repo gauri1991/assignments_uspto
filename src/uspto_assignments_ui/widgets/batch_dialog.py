@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from PyQt6.QtCore import QObject, Qt, QThread
-from PyQt6.QtGui import QAction
+from PyQt6.QtGui import QAction, QCloseEvent
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -44,6 +44,7 @@ from uspto_assignments import (
     STORE_TABLES,
     AggregateStep,
     BatchEvent,
+    BatchResult,
     BatchStep,
     BatchTemplate,
     ClassifyStep,
@@ -1472,6 +1473,7 @@ class BatchDialog(QDialog):
         self._completed = 0  # files finished this run (drives the determinate progress bar)
         self._thread: QThread | None = None
         self._worker: QObject | None = None  # BatchWorker (run) or CallWorker (preview)
+        self._close_after_run = False  # close the dialog once the active run's thread stops
         self._log_emitter = LogEmitter()
         self._log_handler = QtLogHandler(self._log_emitter)
         self._log_emitter.message.connect(self._append_console)
@@ -1623,12 +1625,16 @@ class BatchDialog(QDialog):
         self._run_btn = QPushButton("Run batch")
         self._run_btn.setProperty("primary", "true")
         self._run_btn.clicked.connect(self._run)
+        self._cancel_btn = QPushButton("Cancel")
+        self._cancel_btn.setVisible(False)  # only shown while a batch run is active
+        self._cancel_btn.clicked.connect(self._cancel)
         close_btn = QPushButton("Close")
         close_btn.clicked.connect(self.reject)
         run_row = QHBoxLayout()
         run_row.addStretch(1)
         run_row.addWidget(self._preview_btn)
         run_row.addWidget(self._run_btn)
+        run_row.addWidget(self._cancel_btn)
         run_row.addWidget(close_btn)
         column.addLayout(run_row)
         return column
@@ -1873,6 +1879,9 @@ class BatchDialog(QDialog):
         self._progress.setValue(0)
         self._progress.setVisible(True)
         self._run_btn.setEnabled(False)
+        self._preview_btn.setEnabled(False)
+        self._cancel_btn.setEnabled(True)
+        self._cancel_btn.setVisible(True)
 
         self._memory = self._memory_store.load()
         thread = QThread(self)
@@ -1897,10 +1906,17 @@ class BatchDialog(QDialog):
         self._worker = worker
         thread.start()
 
+    def _cancel(self) -> None:
+        """Request cooperative cancellation of the running batch (takes effect between files)."""
+        if isinstance(self._worker, BatchWorker):
+            self._worker.cancel()
+            self._cancel_btn.setEnabled(False)
+            self._append_console("Cancelling — finishing the file(s) in flight…")
+
     def _on_event(self, event: object) -> None:
         if isinstance(event, BatchEvent):
             self._append_console(event.message, event.level)
-            if event.message.startswith(("✓", "✗")):  # a per-file completion line
+            if event.kind == "file_done":
                 self._completed += 1
                 self._progress.setValue(self._completed)
 
@@ -1910,7 +1926,14 @@ class BatchDialog(QDialog):
             self._memory_store.save(self._memory)
             canonicals, aliases = self._memory.counts()
             self._append_console(f"Entity memory: {canonicals:,} canonicals, {aliases:,} aliases")
-        self._append_console("Done.")
+        if isinstance(result, BatchResult):
+            note = " (cancelled)" if result.cancelled else ""
+            self._append_console(
+                f"Done: {result.succeeded} succeeded, {result.failed} failed{note}.",
+                "error" if result.failed else "success",
+            )
+        else:
+            self._append_console("Done.")
 
     # -- preview -----------------------------------------------------------
     def _preview(self) -> None:
@@ -1972,6 +1995,8 @@ class BatchDialog(QDialog):
     def _finish_run(self) -> None:
         self._progress.setVisible(False)
         self._run_btn.setEnabled(True)
+        self._preview_btn.setEnabled(True)
+        self._cancel_btn.setVisible(False)
         logging.getLogger(_CORE_LOGGER).removeHandler(self._log_handler)
 
     def _cleanup(self) -> None:
@@ -1979,6 +2004,44 @@ class BatchDialog(QDialog):
             self._thread.deleteLater()
         self._thread = None
         self._worker = None
+        if self._close_after_run:
+            self._close_after_run = False
+            self.close()
+
+    # -- lifetime ------------------------------------------------------------
+    def _confirm_close(self) -> bool:
+        """True when it is safe to close now; otherwise offer to cancel and close on finish.
+
+        The dialog must never be destroyed while a worker thread is alive (Qt aborts on a
+        running ``QThread``'s destruction), so a close during a run only *requests* it: the
+        run is cancelled and ``_cleanup`` closes the window once the thread stops.
+        """
+        if self._thread is None:
+            return True
+        answer = QMessageBox.question(
+            self,
+            "Batch running",
+            "A run is in progress. Cancel it and close this window when it stops?",
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self._cancel()
+            self._close_after_run = True
+        return False
+
+    def closeEvent(self, a0: QCloseEvent | None) -> None:
+        """Guard window-manager closes; drop the log handler on a real close."""
+        if not self._confirm_close():
+            if a0 is not None:
+                a0.ignore()
+            return
+        logging.getLogger(_CORE_LOGGER).removeHandler(self._log_handler)  # idempotent
+        super().closeEvent(a0)
+
+    def reject(self) -> None:
+        """Route the Close button and Esc through the same running-batch guard."""
+        if self._confirm_close():
+            logging.getLogger(_CORE_LOGGER).removeHandler(self._log_handler)  # idempotent
+            super().reject()
 
     def _append_console(self, text: str, level: str = "info") -> None:
         color = {"error": "#d9534f", "success": "#4a934a"}.get(level)
