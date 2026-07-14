@@ -39,6 +39,7 @@ from .cpcmatch import (
     PER_COLUMNS,
     assert_hit_rate,
     attach_cpc,
+    attach_cpc_from_file,
     load_portfolio_footprint,
     match_portfolio,
 )
@@ -470,6 +471,38 @@ class FetchCpcStep:
 
 
 @dataclass(slots=True)
+class AttachCpcFileStep:
+    """Attach CPC codes from an uploaded file (PatSeer/CSV/Parquet) instead of the API.
+
+    Same output columns as :class:`FetchCpcStep` (``cpc_codes``/``cpc_subclasses``/
+    ``cpc_lookup_status``) but the CPC comes from ``source_path`` joined on ``patent_column``, with
+    the symbols in ``code_column``. ``separator`` splits multi-code cells (blank = one code per
+    row). Fully offline — no network, no cache. Ideal after shortlisting records.
+    """
+
+    table: str = "flat"
+    column: str = "doc_number"  # the table's patent-number column
+    kind_column: str = "doc_kind"  # kind code, routes to grants (CPC is grant-only)
+    source_path: str = ""  # the uploaded PatSeer/CSV/Parquet export
+    patent_column: str = "Publication Number"  # the file's patent-number column
+    code_column: str = "CPC"  # the file's CPC-symbol column
+    separator: str = ";"  # split multi-code cells (blank = one code per row)
+    enabled: bool = True
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "kind": "attach_cpc_file",
+            "table": self.table,
+            "column": self.column,
+            "kind_column": self.kind_column,
+            "source_path": self.source_path,
+            "patent_column": self.patent_column,
+            "code_column": self.code_column,
+            "separator": self.separator,
+        }
+
+
+@dataclass(slots=True)
 class CpcMatchStep:
     """Match a sales-package portfolio against buyer CPC footprints; emit ranked buyers per patent.
 
@@ -520,6 +553,7 @@ BatchStep = (
     | TransferTypeStep
     | ReferenceMatchStep
     | FetchCpcStep
+    | AttachCpcFileStep
     | CpcMatchStep
 )
 
@@ -664,6 +698,16 @@ def _decode_step(data: dict[str, Any]) -> BatchStep:  # noqa: PLR0911, PLR0912 -
             column=str(data.get("column", "doc_number")),
             kind_column=str(data.get("kind_column", "doc_kind")),
         )
+    if kind == "attach_cpc_file":
+        return AttachCpcFileStep(
+            table=str(data.get("table", "flat")),
+            column=str(data.get("column", "doc_number")),
+            kind_column=str(data.get("kind_column", "doc_kind")),
+            source_path=str(data.get("source_path", "")),
+            patent_column=str(data.get("patent_column", "Publication Number")),
+            code_column=str(data.get("code_column", "CPC")),
+            separator=str(data.get("separator", ";")),
+        )
     if kind == "cpc_match":
         return CpcMatchStep(
             table=str(data.get("table", "flat")),
@@ -793,7 +837,7 @@ def columns_after(  # noqa: PLR0912 - one branch per step kind
             if step.count_distinct:
                 out.append(f"{step.count_distinct}_distinct")
             cols[step.resolved_out()] = out
-        elif isinstance(step, FetchCpcStep):
+        elif isinstance(step, FetchCpcStep | AttachCpcFileStep):
             for name in ("cpc_codes", "cpc_subclasses", "cpc_lookup_status"):
                 add(step.table, name)
         elif isinstance(step, CpcMatchStep):
@@ -825,7 +869,7 @@ def _referenced_columns(step: BatchStep) -> tuple[str, list[str]]:  # noqa: PLR0
         return step.table, [*step.group_by, *distinct]
     if isinstance(step, TransferTypeStep):
         return step.table, [step.assignor_column, step.assignee_column]
-    if isinstance(step, FetchCpcStep):
+    if isinstance(step, FetchCpcStep | AttachCpcFileStep):
         return step.table, [step.column]
     if isinstance(step, CpcMatchStep):
         return step.table, [step.buyer_column, step.number_column, "cpc_codes"]
@@ -891,6 +935,13 @@ def validate_template(  # noqa: PLR0912 - one validation branch per step kind
                 warnings.extend(
                     f"Step {index} (ReferenceMatch): {problem}"
                     for problem in _reference_column_problems(step)
+                )
+        if isinstance(step, AttachCpcFileStep):
+            if not step.source_path:
+                warnings.append(f"Step {index} (AttachCpcFile): no CPC file set.")
+            elif not Path(step.source_path).is_file():
+                warnings.append(
+                    f"Step {index} (AttachCpcFile): CPC file not found: {step.source_path}"
                 )
         if isinstance(step, CpcMatchStep) and step.portfolio_mode == "footprint_file":
             if not step.portfolio_path:
@@ -1018,6 +1069,7 @@ def _needed_tables(template: BatchTemplate) -> set[str] | None:
             | TransferTypeStep
             | ReferenceMatchStep
             | FetchCpcStep
+            | AttachCpcFileStep
             | CpcMatchStep,
         ):
             needed.add(step.table)  # every non-export step reads/writes a named source table
@@ -1481,6 +1533,42 @@ def _apply_fetch_cpc(
         )
 
 
+def _apply_attach_cpc_file(
+    tables: dict[str, pa.Table], step: AttachCpcFileStep, emit: OnEvent
+) -> None:
+    table = tables.get(step.table)
+    if table is None:
+        emit(BatchEvent("info", f"  skip attach_cpc_file: table '{step.table}' not present"))
+        return
+    if step.column not in table.column_names:
+        emit(
+            BatchEvent(
+                "info", f"  skip attach_cpc_file: column '{step.column}' not in '{step.table}'"
+            )
+        )
+        return
+    if not step.source_path or not Path(step.source_path).is_file():
+        emit(BatchEvent("info", f"  skip attach_cpc_file: CPC file '{step.source_path}' missing"))
+        return
+    out, stats = attach_cpc_from_file(
+        table,
+        number_column=step.column,
+        kind_column=step.kind_column,
+        source_path=Path(step.source_path),
+        patent_column=step.patent_column,
+        code_column=step.code_column,
+        separator=step.separator,
+    )
+    tables[step.table] = out
+    emit(
+        BatchEvent(
+            "info",
+            f"  attach_cpc_file {step.table}.{step.column}: {stats.found:,}/{stats.eligible:,} "
+            f"grants matched from {Path(step.source_path).name} (hit-rate {stats.hit_rate:.0%})",
+        )
+    )
+
+
 def _apply_cpc_match(
     tables: dict[str, pa.Table], step: CpcMatchStep, ctx: CpcRunContext, emit: OnEvent
 ) -> None:
@@ -1554,6 +1642,8 @@ def _apply_step(  # noqa: PLR0912, PLR0913 - one branch per step kind
         _apply_reference_match(tables, step, emit)
     elif isinstance(step, FetchCpcStep):
         _apply_fetch_cpc(tables, step, _resolve_cpc_ctx(cpc_ctx), emit)
+    elif isinstance(step, AttachCpcFileStep):
+        _apply_attach_cpc_file(tables, step, emit)
     elif isinstance(step, CpcMatchStep):
         _apply_cpc_match(tables, step, _resolve_cpc_ctx(cpc_ctx), emit)
     else:
@@ -2336,6 +2426,9 @@ def describe_step(step: BatchStep) -> str:  # noqa: PLR0911, PLR0912 - one line 
         )
     if isinstance(step, FetchCpcStep):
         return f"Fetch CPC · {step.table}.{step.column} → cpc_codes"
+    if isinstance(step, AttachCpcFileStep):
+        src = Path(step.source_path).name or "(no file)"
+        return f"Attach CPC file · {step.table}.{step.column} vs {src} → cpc_codes"
     if isinstance(step, CpcMatchStep):
         portfolio = Path(step.portfolio_path).name or "(no file)"
         return f"CPC match · {step.table} vs {portfolio} · {step.portfolio_mode} → {step.out_table}"

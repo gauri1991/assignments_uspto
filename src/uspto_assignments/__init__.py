@@ -15,6 +15,7 @@ from . import batch, exporters, filters, query
 from .batch import (
     LEGACY_NORMALIZE_TARGET,
     AggregateStep,
+    AttachCpcFileStep,
     BatchEvent,
     BatchResult,
     BatchStep,
@@ -54,7 +55,12 @@ from .cpcconfig import (
     load_config,
     save_config,
 )
-from .cpcmatch import attach_cpc, load_portfolio_footprint, match_portfolio
+from .cpcmatch import (
+    attach_cpc,
+    attach_cpc_from_file,
+    load_portfolio_footprint,
+    match_portfolio,
+)
 from .datasource import CpcCache, CpcRunContext, make_source
 from .dictionary import ResolutionDictionary, build_dictionary, load_dictionary
 from .exporters import FORMAT_SUFFIX, ExportFormat, export, export_store
@@ -113,6 +119,7 @@ __all__ = [
     "Assignee",
     "Assignment",
     "Assignor",
+    "AttachCpcFileStep",
     "BatchEvent",
     "BatchResult",
     "BatchStep",
@@ -154,6 +161,7 @@ __all__ = [
     "TransferTypeStep",
     "add_doc_columns",
     "attach_cpc",
+    "attach_cpc_from_file",
     "batch",
     "build_dictionary",
     "build_ledger",

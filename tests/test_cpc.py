@@ -15,6 +15,7 @@ import pyarrow as pa
 import pytest
 
 from uspto_assignments import (
+    AttachCpcFileStep,
     BatchTemplate,
     CpcMatchStep,
     CpcRunContext,
@@ -31,6 +32,7 @@ from uspto_assignments.cpcconfig import CpcConfig, load_config, save_config
 from uspto_assignments.cpcmatch import (
     HitRateError,
     attach_cpc,
+    attach_cpc_from_file,
     grain_of,
     load_portfolio_footprint,
     match_portfolio,
@@ -554,3 +556,63 @@ def test_fetch_cpc_offline_reports_uncached(tmp_path: Path) -> None:
         on_event=lambda e: events.append(e.message),
     )
     assert any("uncached" in m for m in events)
+
+
+# ------------------------------------------------------------------ attach CPC from file
+
+
+def test_attach_cpc_from_file_one_code_per_row(tmp_path: Path) -> None:
+    tsv = tmp_path / "cpc.tsv"
+    tsv.write_text(
+        "patent_id\tcpc_group\n10000001\tH04L9/32\n10000001\tG06F3/01\n10000002\tH01L21/02\n",
+        encoding="utf-8",
+    )
+    table = pa.table(
+        {"doc_number": ["10000001", "10000002", "99999999"], "doc_kind": ["B2", "B2", "B2"]}
+    )
+    out, stats = attach_cpc_from_file(
+        table,
+        number_column="doc_number",
+        kind_column="doc_kind",
+        source_path=tsv,
+        patent_column="patent_id",
+        code_column="cpc_group",
+        separator="",  # one code per row
+    )
+    codes = out.column("cpc_codes").to_pylist()
+    status = out.column("cpc_lookup_status").to_pylist()
+    assert sorted(codes[0] or []) == ["G06F3/01", "H04L9/32"]
+    assert codes[1] == ["H01L21/02"]
+    assert status == ["found", "found", "not_found"]
+    assert stats.found == 2
+
+
+def test_attach_cpc_from_file_patseer_multi_code_cell(tmp_path: Path) -> None:
+    csv = tmp_path / "patseer.csv"
+    csv.write_text(
+        "Publication Number,CPC\n10000001,H04L9/32; G06F3/01\n10000002,H01L21/02\n",
+        encoding="utf-8",
+    )
+    table = pa.table({"doc_number": ["10000001", "10000002"], "doc_kind": ["B2", "B2"]})
+    out, _stats = attach_cpc_from_file(
+        table,
+        number_column="doc_number",
+        kind_column="doc_kind",
+        source_path=csv,
+        patent_column="Publication Number",
+        code_column="CPC",
+        separator=";",  # one cell packs several CPCs
+    )
+    codes = out.column("cpc_codes").to_pylist()
+    assert sorted(codes[0] or []) == ["G06F3/01", "H04L9/32"]  # the cell was split
+    assert out.column("cpc_subclasses").to_pylist()[0] == ["H04L", "G06F"]
+
+
+def test_attach_cpc_file_step_roundtrip_schema_and_apply(tmp_path: Path) -> None:
+    step = AttachCpcFileStep(
+        table="flat", source_path="/x/patseer.csv", patent_column="Pub", code_column="CPCs"
+    )
+    assert _step_from_dict(step.to_dict()).to_dict() == step.to_dict()
+    cols = columns_after(LoadConfig(), [step], upto=1)["flat"]
+    for name in ("cpc_codes", "cpc_subclasses", "cpc_lookup_status"):
+        assert name in cols

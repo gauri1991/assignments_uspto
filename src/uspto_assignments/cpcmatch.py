@@ -25,7 +25,7 @@ import duckdb as _duckdb
 import pyarrow as pa
 
 from .cpcconfig import CpcGrain, CpcMatchConfig, OverlapMetric
-from .datasource import CpcCache
+from .datasource import CpcCache, LocalFileCpcSource
 from .propid import doc_type_for, normalize_patent_id
 
 duckdb: Any = _duckdb  # duckdb is under-typed; route through Any (matches ledger.py).
@@ -94,36 +94,31 @@ def assert_hit_rate(stats: CpcStats, floor: float, *, side: str) -> None:
         )
 
 
-def attach_cpc(
-    table: pa.Table,
-    *,
-    number_column: str,
-    kind_column: str,
-    cache: CpcCache,
-    allow_network: bool,
-) -> tuple[pa.Table, CpcStats]:
-    """Return ``table`` with ``cpc_codes``/``cpc_subclasses``/``cpc_lookup_status`` columns + stats.
-
-    Non-grant rows are ``na`` (never looked up). Grant rows are normalized to the bare grant number,
-    resolved through ``cache`` (which fetches misses only when the network is allowed), and get the
-    distinct full CPC symbols plus their 4-char subclasses.
-    """
+def _grant_ids(table: pa.Table, number_column: str, kind_column: str) -> list[str]:
+    """Per-row normalized grant id (``""`` for non-grant rows, which are never looked up)."""
     numbers = table.column(number_column).to_pylist()
     kinds = (
         table.column(kind_column).to_pylist()
         if kind_column and kind_column in table.column_names
         else [None] * len(numbers)
     )
-    grant_id: list[str] = []  # per-row normalized grant id ("" for non-grants)
-    for number, kind in zip(numbers, kinds, strict=True):
-        doc_type = doc_type_for(number, kind)
-        grant_id.append(normalize_patent_id(number, doc_type))
+    return [
+        normalize_patent_id(number, doc_type_for(number, kind))
+        for number, kind in zip(numbers, kinds, strict=True)
+    ]
 
-    wanted = [pid for pid in dict.fromkeys(grant_id) if pid]
-    result = cache.resolve(wanted, allow_network=allow_network)
-    codes_by_id = result.codes
-    offline_set = set(result.uncached_offline)
 
+def _attach_cpc_columns(
+    table: pa.Table,
+    grant_id: list[str],
+    codes_by_id: dict[str, list[str]],
+    offline_set: set[str],
+) -> tuple[pa.Table, CpcStats]:
+    """Add the ``cpc_codes``/``cpc_subclasses``/``cpc_lookup_status`` trio from a resolved lookup.
+
+    Shared by the cache-backed :func:`attach_cpc` and the file-backed :func:`attach_cpc_from_file`
+    so both produce byte-identical columns.
+    """
     codes_col: list[list[str]] = []
     subclass_col: list[list[str]] = []
     status_col: list[str] = []
@@ -168,6 +163,53 @@ def attach_cpc(
         col_type = pa.list_(pa.string()) if list_type else pa.string()
         out = out.append_column(name, pa.array(values, type=col_type))
     return out, stats
+
+
+def attach_cpc(
+    table: pa.Table,
+    *,
+    number_column: str,
+    kind_column: str,
+    cache: CpcCache,
+    allow_network: bool,
+) -> tuple[pa.Table, CpcStats]:
+    """Return ``table`` with ``cpc_codes``/``cpc_subclasses``/``cpc_lookup_status`` columns + stats.
+
+    Non-grant rows are ``na`` (never looked up). Grant rows are normalized to the bare grant number,
+    resolved through ``cache`` (which fetches misses only when the network is allowed), and get the
+    distinct full CPC symbols plus their 4-char subclasses.
+    """
+    grant_id = _grant_ids(table, number_column, kind_column)
+    wanted = [pid for pid in dict.fromkeys(grant_id) if pid]
+    result = cache.resolve(wanted, allow_network=allow_network)
+    return _attach_cpc_columns(table, grant_id, result.codes, set(result.uncached_offline))
+
+
+def attach_cpc_from_file(  # noqa: PLR0913 - a clear entry point with keyword-only file options
+    table: pa.Table,
+    *,
+    number_column: str,
+    kind_column: str,
+    source_path: Path,
+    patent_column: str,
+    code_column: str,
+    separator: str = "",
+) -> tuple[pa.Table, CpcStats]:
+    """Attach CPC columns by joining a local file (PatSeer/CSV/Parquet) — no network, no cache.
+
+    Same columns and semantics as :func:`attach_cpc`, but the CPC comes from ``source_path``
+    (joined on ``patent_column``/``code_column``); ``separator`` splits multi-code cells.
+    """
+    grant_id = _grant_ids(table, number_column, kind_column)
+    wanted = [pid for pid in dict.fromkeys(grant_id) if pid]
+    source = LocalFileCpcSource(
+        path=source_path,
+        patent_column=patent_column,
+        code_column=code_column,
+        code_separator=separator,
+    )
+    codes_by_id = source.fetch(wanted)
+    return _attach_cpc_columns(table, grant_id, codes_by_id, set())
 
 
 def load_portfolio_footprint(

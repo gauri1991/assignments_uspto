@@ -42,6 +42,7 @@ from uspto_assignments import (
     LEGACY_NORMALIZE_TARGET,
     STORE_TABLES,
     AggregateStep,
+    AttachCpcFileStep,
     BatchEvent,
     BatchResult,
     BatchStep,
@@ -1337,6 +1338,105 @@ class FetchCpcStepDialog(QDialog):
         )
 
 
+_CPC_FILE_FILTER = "CPC export (*.csv *.tsv *.xlsx *.parquet);;All files (*)"
+
+
+class AttachCpcFileStepDialog(QDialog):
+    """Configure an attach-CPC-from-file step: join CPC from a PatSeer/CSV/Parquet export."""
+
+    def __init__(
+        self, step: AttachCpcFileStep | None = None, parent: QWidget | None = None
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Attach CPC from file step")
+        self.setMinimumWidth(560)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(10)
+        layout.addWidget(SectionLabel("Attach CPC codes from a file (PatSeer / CSV / Parquet)"))
+
+        form = QFormLayout()
+        self._table = QComboBox()
+        self._table.addItems(list(STORE_TABLES))
+        self._table.setCurrentText("flat")
+        self._column = QComboBox()
+        self._kind_column = QComboBox()
+        self._source = QLineEdit()
+        self._source.setPlaceholderText("CPC export file (.csv / .tsv / .xlsx / .parquet)…")
+        browse = QPushButton("Browse…")
+        browse.clicked.connect(self._pick_source)
+        src_row = QHBoxLayout()
+        src_row.addWidget(self._source, 1)
+        src_row.addWidget(browse)
+        self._patent_column = QLineEdit("Publication Number")
+        self._code_column = QLineEdit("CPC")
+        self._separator = QLineEdit(";")
+        self._separator.setPlaceholderText("(blank = one CPC per row)")
+
+        form.addRow("Table", self._table)
+        form.addRow("Patent-number column", self._column)
+        form.addRow("Kind-code column", self._kind_column)
+        form.addRow("CPC file", src_row)
+        form.addRow("File patent column", self._patent_column)
+        form.addRow("File CPC column", self._code_column)
+        form.addRow("CPC separator", self._separator)
+        layout.addLayout(form)
+
+        note = QLabel(
+            "Fully offline — joins CPC from your file, no network. A PatSeer export packs several"
+            " CPCs in one cell; set the separator (e.g. ';') to split them. CPC is grant-only."
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self._table.currentIndexChanged.connect(self._rebuild_columns)
+        self._rebuild_columns()
+        if step is not None:
+            self._table.setCurrentText(step.table)
+            self._column.setCurrentText(step.column)
+            self._kind_column.setCurrentText(step.kind_column)
+            self._source.setText(step.source_path)
+            self._patent_column.setText(step.patent_column)
+            self._code_column.setText(step.code_column)
+            self._separator.setText(step.separator)
+
+    def _rebuild_columns(self) -> None:
+        cols = _cols(self._table.currentText())
+        for combo, default in ((self._column, "doc_number"), (self._kind_column, "doc_kind")):
+            combo.clear()
+            combo.addItems(cols)
+            if default in cols:
+                combo.setCurrentText(default)
+
+    def _pick_source(self) -> None:
+        state = UiStateStore()
+        path, _ = QFileDialog.getOpenFileName(
+            self, "CPC export file", state.last_dir("cpc_file"), _CPC_FILE_FILTER
+        )
+        if path:
+            self._source.setText(path)
+            state.set_last_dir("cpc_file", str(Path(path).parent))
+
+    def step(self) -> AttachCpcFileStep:
+        """Return the configured attach-CPC-from-file step."""
+        return AttachCpcFileStep(
+            table=self._table.currentText(),
+            column=self._column.currentText() or "doc_number",
+            kind_column=self._kind_column.currentText() or "doc_kind",
+            source_path=self._source.text().strip(),
+            patent_column=self._patent_column.text().strip() or "Publication Number",
+            code_column=self._code_column.text().strip() or "CPC",
+            separator=self._separator.text(),
+        )
+
+
 class CpcMatchStepDialog(QDialog):
     """Configure a CPC-match step: rank buyers per sales-package (portfolio) patent."""
 
@@ -1455,6 +1555,7 @@ _StepDialog = (
     | TransferTypeStepDialog
     | ReferenceMatchStepDialog
     | FetchCpcStepDialog
+    | AttachCpcFileStepDialog
     | CpcMatchStepDialog
     | ExportStepDialog
 )
@@ -1468,6 +1569,7 @@ _STEP_DIALOGS: list[tuple[str, type[_StepDialog]]] = [
     ("Transfer type (firm→firm…)…", TransferTypeStepDialog),
     ("Match against reference…", ReferenceMatchStepDialog),
     ("Fetch CPC codes…", FetchCpcStepDialog),
+    ("Attach CPC from file…", AttachCpcFileStepDialog),
     ("CPC match to portfolio…", CpcMatchStepDialog),
     ("Deduplicate…", DedupeStepDialog),
     ("Select columns…", SelectStepDialog),
@@ -1486,6 +1588,7 @@ _EDIT_DIALOGS: dict[type[BatchStep], type[_StepDialog]] = {
     TransferTypeStep: TransferTypeStepDialog,
     ReferenceMatchStep: ReferenceMatchStepDialog,
     FetchCpcStep: FetchCpcStepDialog,
+    AttachCpcFileStep: AttachCpcFileStepDialog,
     CpcMatchStep: CpcMatchStepDialog,
     DedupeStep: DedupeStepDialog,
     SelectStep: SelectStepDialog,
@@ -1634,7 +1737,7 @@ class BatchDialog(QDialog):
         return column
 
     # -- console column ----------------------------------------------------
-    def _build_console_column(self) -> QVBoxLayout:
+    def _build_console_column(self) -> QVBoxLayout:  # noqa: PLR0915 - linear widget assembly
         column = QVBoxLayout()
         column.setSpacing(10)
 

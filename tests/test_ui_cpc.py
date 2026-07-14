@@ -11,12 +11,13 @@ import pytest
 pytest.importorskip("PyQt6")
 pytest.importorskip("pytestqt")
 
-from uspto_assignments import CpcConfig, CpcMatchStep, FetchCpcStep
+from uspto_assignments import AttachCpcFileStep, CpcConfig, CpcMatchStep, FetchCpcStep
 from uspto_assignments.datasource import UsptoOdpApiSource
 from uspto_assignments_ui.app import create_app
 from uspto_assignments_ui.settings import CpcConfigStore
 from uspto_assignments_ui.widgets import cpc_settings_dialog as cpc_dialog
 from uspto_assignments_ui.widgets.batch_dialog import (
+    AttachCpcFileStepDialog,
     CpcMatchStepDialog,
     FetchCpcStepDialog,
 )
@@ -30,6 +31,23 @@ def test_fetch_cpc_dialog_roundtrip(qtbot: Any) -> None:
     qtbot.addWidget(dialog)
     step = dialog.step()
     assert step.column == "doc_number" and step.kind_column == "doc_kind"
+
+
+def test_attach_cpc_file_dialog_roundtrip(qtbot: Any) -> None:
+    create_app([])
+    original = AttachCpcFileStep(
+        table="flat",
+        source_path="/x/patseer.csv",
+        patent_column="Pub",
+        code_column="CPCs",
+        separator="|",
+    )
+    dialog = AttachCpcFileStepDialog(original)
+    qtbot.addWidget(dialog)
+    step = dialog.step()
+    assert step.source_path == "/x/patseer.csv"
+    assert step.patent_column == "Pub" and step.code_column == "CPCs"
+    assert step.separator == "|"
 
 
 def test_cpc_match_dialog_roundtrip(qtbot: Any) -> None:

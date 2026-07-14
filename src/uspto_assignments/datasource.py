@@ -79,11 +79,17 @@ _urllib_transport = _make_urllib_transport(30)
 
 @dataclass(slots=True)
 class LocalFileCpcSource:
-    """CPC from a bulk local file (TSV/CSV/Parquet), keyed by a bare grant number. Fully offline."""
+    """CPC from a bulk local file (TSV/CSV/Parquet), keyed by a bare grant number. Fully offline.
+
+    ``code_separator`` handles files (e.g. PatSeer exports) that pack several CPC symbols into one
+    cell: set it (``";"``, ``"|"``, …) to split each cell into individual codes. Blank means one
+    CPC per row (the USPTO ``g_cpc_current`` bulk layout).
+    """
 
     path: Path
     patent_column: str = "patent_id"
     code_column: str = "cpc_group"
+    code_separator: str = ""
 
     def fetch(self, grant_ids: list[str]) -> dict[str, list[str]]:
         """Look up ``grant_ids`` in the bulk file via DuckDB, returning distinct CPC symbols."""
@@ -92,21 +98,32 @@ class LocalFileCpcSource:
         if not self.path.is_file():
             raise FileNotFoundError(f"CPC source file not found: {self.path}")
         reader = "read_parquet" if self.path.suffix.lower() == ".parquet" else "read_csv_auto"
+        # Quote the column identifiers — PatSeer headers have spaces (e.g. "Publication Number").
+        patent = f'"{self.patent_column.replace(chr(34), "")}"'
+        code = f'"{self.code_column.replace(chr(34), "")}"'
         wanted = pa.table({"pid": pa.array(grant_ids, type=pa.string())})
         con = duckdb.connect()
         try:
             con.register("wanted", wanted)
             rows = con.execute(
-                f"SELECT CAST(s.{self.patent_column} AS VARCHAR) AS pid, "
-                f"       list(DISTINCT CAST(s.{self.code_column} AS VARCHAR)) AS codes "
+                f"SELECT CAST(s.{patent} AS VARCHAR) AS pid, "
+                f"       list(DISTINCT CAST(s.{code} AS VARCHAR)) AS codes "
                 f"FROM {reader}('{self.path.as_posix()}') s "
-                f"JOIN wanted w ON CAST(s.{self.patent_column} AS VARCHAR) = w.pid "
-                f"WHERE s.{self.code_column} IS NOT NULL AND s.{self.code_column} <> '' "
+                f"JOIN wanted w ON CAST(s.{patent} AS VARCHAR) = w.pid "
+                f"WHERE s.{code} IS NOT NULL AND s.{code} <> '' "
                 f"GROUP BY 1"
             ).fetchall()
         finally:
             con.close()
-        return {str(pid): [str(c) for c in codes] for pid, codes in rows}
+        return {str(pid): self._split(codes) for pid, codes in rows}
+
+    def _split(self, codes: list[Any]) -> list[str]:
+        """Cells → distinct codes, splitting on ``code_separator`` when a cell packs several."""
+        out: list[str] = []
+        for cell in codes:
+            parts = str(cell).split(self.code_separator) if self.code_separator else [str(cell)]
+            out.extend(part.strip() for part in parts if part.strip())
+        return list(dict.fromkeys(out))  # distinct, order-preserving
 
 
 class ApiAuthError(RuntimeError):
