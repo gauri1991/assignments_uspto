@@ -221,12 +221,21 @@ Launch with a file, a dataset folder, or blank:
 .venv/bin/python run_ui.py                           # blank start (landing page)
 ```
 
-**Landing page** — tiles to *Open XML / ZIP* or *Open dataset folder*, plus a **Recent** grid
-(hidden until you've opened something).
+**Landing page** — tiles to *Open XML / ZIP*, *Open dataset folder*, or
+*View Parquet / data file*, plus a **Recent** grid (hidden until you've opened something).
+
+**View / edit / convert any data file** — *View Parquet / data file…* (landing tile or the File
+menu) opens a single **`.parquet` / `.arrow` / `.feather` / `.csv`** file as a one-table view. All
+values are shown as text (list columns joined with `"; "`). From there the whole toolkit applies:
+**filter / sort / paginate**, **Edit columns…** (keep / reorder / rename / drop columns), and
+**Export current table…** to convert it to **CSV / JSON / Excel / Parquet / Feather**. This is how
+you inspect a batch run's per-step trace files (`steps/NN_<table>.parquet`) or any Parquet from
+another tool, and reshape or convert it without leaving the app.
 
 **Menus & toolbar** (exact labels):
 
-- **File**: `Open XML/ZIP…` (Ctrl+O) · `Open dataset folder…` · `Save processed…` (Ctrl+S) ·
+- **File**: `Open XML/ZIP…` (Ctrl+O) · `Open dataset folder…` · `View Parquet / data file…` ·
+  `Edit columns…` · `Save processed…` (Ctrl+S) ·
   `Export current table…` (Ctrl+E) · `Export all tables…` · `Close dataset` (Ctrl+W) · `Exit`.
 - **Queries**: `Save current query…` · `Manage queries…`.
 - **Settings**: `Batch processing…` (Ctrl+B) · `Entity memory…` · `CPC / USPTO API data source…`.
@@ -567,8 +576,9 @@ that step produced — filter → normalize → match, one file each:
 └── <table>.<ext>              ← the final Export outputs
 ```
 
-The files are **Parquet** (lossless, list columns like `cpc_codes` intact) — reopen any of them
-in the app via *Open dataset folder* (point at a folder holding one). Steps that create a new table
+The files are **Parquet** (lossless, list columns like `cpc_codes` intact) — open any of them in the
+app with *View Parquet / data file…* to inspect that step's output (filter/sort, or convert it to
+CSV/Excel). Steps that create a new table
 (Aggregate, CPC match) trace that table too; the Export step writes the real exports, not a trace.
 The manifest lists every trace file. Leave the box **off** for normal runs — tracing multiplies the
 files written, so it's meant for reviewing/validating on a **shortlisted** set, not bulk runs.

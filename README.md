@@ -86,8 +86,13 @@ steps summary + validation warnings for every bundled template.
 
 A native desktop viewer explores the parsed data interactively:
 
-- **Blank start** with a tiles landing (Open XML/ZIP, Open dataset folder, Recent) and a persistent
-  **toolbar** (Open · Save processed · Export · Manage queries · Close).
+- **Blank start** with a tiles landing (Open XML/ZIP, Open dataset folder, View Parquet/data file,
+  Recent) and a persistent **toolbar** (Open · Save processed · Export · Manage queries · Close).
+- **Parquet / data-file viewer** — *View Parquet / data file…* opens any single
+  **`.parquet`/`.arrow`/`.feather`/`.csv`** as a one-table view (values shown as text, list columns
+  joined). Then filter/sort/paginate, **Edit columns…** (keep / reorder / rename / drop), and
+  **Export** to convert it to CSV/JSON/Excel/Parquet/Feather — a standalone viewer/editor/converter
+  for arbitrary tabular files (e.g. a batch run's per-step trace outputs).
 - **Initial-load template** — pick which fields/tables to load, cap the record count, choose a page
   size.
 - **Filter/query builder** — per-field clauses with **categorical value dropdowns** (low-cardinality
