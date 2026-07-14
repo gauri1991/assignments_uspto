@@ -96,6 +96,7 @@ from .reference import (
 from .resolution import CappedBlockIndex, ResolvedMention, resolve_mentions
 from .tables import (
     STORE_TABLES,
+    TABLE_FILE_SUFFIXES,
     TableStore,
     flat_rows,
     open_dataset,
@@ -115,6 +116,7 @@ __all__ = [
     "FORMAT_SUFFIX",
     "LEGACY_NORMALIZE_TARGET",
     "STORE_TABLES",
+    "TABLE_FILE_SUFFIXES",
     "TABLE_TYPES",
     "AggregateStep",
     "Assignee",

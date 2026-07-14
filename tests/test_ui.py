@@ -14,6 +14,8 @@ import pytest
 pytest.importorskip("PyQt6")
 pytest.importorskip("pytestqt")
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 from PyQt6.QtCore import Qt
 
 from uspto_assignments import filters, parse_to_store
@@ -21,6 +23,8 @@ from uspto_assignments.filters import FilterClause
 from uspto_assignments_ui.app import create_app, load_stylesheet
 from uspto_assignments_ui.main_window import MainWindow
 from uspto_assignments_ui.models.arrow_table_model import ArrowTableModel
+from uspto_assignments_ui.settings import RecentStore, UiStateStore
+from uspto_assignments_ui.widgets.landing import LandingPage
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_assignment.xml"
 
@@ -82,3 +86,43 @@ def test_row_selection_updates_status_bar(qtbot: Any, tmp_path: Path) -> None:
     status = window.statusBar()
     assert status is not None
     assert "selected" in status.currentMessage()
+
+
+def test_open_parquet_file_loads_single_table(qtbot: Any, tmp_path: Path) -> None:
+    create_app([])
+    table = pa.table({"patent": ["10000000", "11000000"], "codes": [["H04L", "G06F"], ["A61F"]]})
+    path = tmp_path / "my_export.parquet"
+    pq.write_table(table, str(path))  # pyright: ignore[reportUnknownMemberType]
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window._recent_store = RecentStore(tmp_path / "recent.json")
+    window._ui_state = UiStateStore(tmp_path / "ui.json")
+    window._open_table_file(path)
+
+    assert window.tab_widget.count() == 1
+    assert "my_export" in window.tab_widget.tabText(0)  # tab named after the file
+    panel = window.current_panel()
+    assert panel is not None
+    assert panel._model.columns == ["patent", "codes"]
+    assert panel.table.column("codes").to_pylist() == ["H04L; G06F", "A61F"]  # list joined
+    assert window._recent_store.load()[0].kind == "table"  # recorded as a table file
+
+
+def test_open_recent_routes_data_file_to_viewer(qtbot: Any, tmp_path: Path) -> None:
+    create_app([])
+    path = tmp_path / "d.parquet"
+    pq.write_table(pa.table({"x": ["1"]}), str(path))  # pyright: ignore[reportUnknownMemberType]
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window._open_recent(str(path))  # a .parquet recent must open in the viewer, not the XML parser
+    assert window.tab_widget.count() == 1
+    assert window.current_panel() is not None
+
+
+def test_landing_page_emits_open_table_requested(qtbot: Any) -> None:
+    create_app([])
+    landing = LandingPage()
+    qtbot.addWidget(landing)
+    with qtbot.waitSignal(landing.open_table_requested, timeout=1000):
+        landing.open_table_requested.emit()

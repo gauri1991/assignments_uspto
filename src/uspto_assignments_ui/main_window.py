@@ -26,13 +26,17 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+import pyarrow as pa
+
 from uspto_assignments import (
     FORMAT_SUFFIX,
+    TABLE_FILE_SUFFIXES,
     ExportFormat,
     Query,
     TableStore,
     exporters,
     open_dataset,
+    read_table_file,
     scope_suffix,
     unique_path,
 )
@@ -58,6 +62,10 @@ from .widgets.table_panel import TablePanel
 from .workers import CallWorker, ParseWorker
 
 _OPEN_FILTER = "USPTO assignment (*.xml *.zip);;All files (*)"
+_TABLE_FILE_FILTER = (
+    "Data files (*.parquet *.arrow *.feather *.csv);;Parquet (*.parquet);;"
+    "Arrow/Feather (*.arrow *.feather);;CSV (*.csv);;All files (*)"
+)
 _SAVE_FILTERS: dict[ExportFormat, str] = {
     "parquet": "Parquet (*.parquet)",
     "xlsx": "Excel (*.xlsx)",
@@ -102,6 +110,7 @@ class MainWindow(QMainWindow):
         self._landing = LandingPage()
         self._landing.open_file_requested.connect(self._choose_file)
         self._landing.open_folder_requested.connect(self._choose_folder)
+        self._landing.open_table_requested.connect(self._choose_table_file)
         self._landing.open_recent_requested.connect(self._open_recent)
         self._landing.clear_recent_requested.connect(self._clear_recent)
         self._tabs = QTabWidget()
@@ -129,6 +138,9 @@ class MainWindow(QMainWindow):
     def _build_actions(self) -> None:
         self._act_open = self._make_action("&Open XML/ZIP…", self._choose_file, "Ctrl+O")
         self._act_open_ds = self._make_action("Open &dataset folder…", self._choose_folder)
+        self._act_open_table = self._make_action(
+            "View &Parquet / data file…", self._choose_table_file
+        )
         self._act_save = self._make_action("&Save processed…", self._save_processed, "Ctrl+S")
         self._act_export = self._make_action(
             "&Export current table…", self._export_current, "Ctrl+E"
@@ -167,6 +179,7 @@ class MainWindow(QMainWindow):
             return
         file_menu.addAction(self._act_open)
         file_menu.addAction(self._act_open_ds)
+        file_menu.addAction(self._act_open_table)
         file_menu.addSeparator()
         file_menu.addAction(self._act_save)
         file_menu.addAction(self._act_export)
@@ -240,6 +253,26 @@ class MainWindow(QMainWindow):
         self._source_stem = path.name
         self._record_recent(path, "dataset")
 
+    def _choose_table_file(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "View Parquet / data file", self._ui_state.last_dir("input"), _TABLE_FILE_FILTER
+        )
+        if not path:
+            return
+        self._ui_state.set_last_dir("input", str(Path(path).parent))
+        self._open_table_file(Path(path))
+
+    def _open_table_file(self, path: Path) -> None:
+        """Load a single Parquet/Arrow/Feather/CSV file into the viewer as a one-table dataset."""
+        try:
+            table = read_table_file(path)
+        except (FileNotFoundError, OSError, ValueError, pa.ArrowInvalid) as exc:
+            self._set_status(f"Could not open {path.name}: {exc}")
+            return
+        self.load_store(TableStore({path.stem: table}))
+        self._source_stem = path.stem
+        self._record_recent(path, "table")
+
     def _open_recent(self, raw_path: str) -> None:
         path = Path(raw_path)
         if not path.exists():
@@ -247,6 +280,8 @@ class MainWindow(QMainWindow):
             return
         if path.is_dir():
             self._open_dataset_folder(path, LoadTemplate())
+        elif path.suffix.lower() in TABLE_FILE_SUFFIXES:
+            self._open_table_file(path)
         else:
             self._start_parse(path, LoadTemplate())
 
