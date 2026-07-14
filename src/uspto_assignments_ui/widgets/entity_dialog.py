@@ -12,6 +12,7 @@ from pathlib import Path
 from PyQt6.QtCore import Qt, QThread, QTimer
 from PyQt6.QtGui import QCloseEvent
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
@@ -22,6 +23,7 @@ from PyQt6.QtWidgets import (
     QListWidget,
     QMessageBox,
     QPushButton,
+    QSpinBox,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -135,6 +137,19 @@ class EntityDialog(QDialog):
         self._alias_timer.timeout.connect(self._refresh_aliases)
         col.addWidget(self._alias_search)
 
+        # Review queue: narrow the table to aliases learned from marginal fuzzy matches.
+        self._review_only = QCheckBox("Only aliases learned below")
+        self._review_cap = QSpinBox()
+        self._review_cap.setRange(1, 100)
+        self._review_cap.setValue(95)
+        self._review_only.toggled.connect(self._apply_review_filter)
+        self._review_cap.valueChanged.connect(self._apply_review_filter)
+        review_row = QHBoxLayout()
+        review_row.addWidget(self._review_only)
+        review_row.addWidget(self._review_cap)
+        review_row.addStretch(1)
+        col.addLayout(review_row)
+
         self._alias_model = EntityAliasModel(self._memory)
         self._alias_table = DataTable()
         self._alias_table.setModel(self._alias_model)
@@ -197,6 +212,11 @@ class EntityDialog(QDialog):
 
     def _refresh_aliases(self) -> None:
         self._alias_model.set_filter(self._alias_search.text())
+        self._update_alias_note()
+
+    def _apply_review_filter(self) -> None:
+        cap = self._review_cap.value() if self._review_only.isChecked() else None
+        self._alias_model.set_review_filter(cap)
         self._update_alias_note()
 
     def _update_alias_note(self) -> None:

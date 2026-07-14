@@ -13,18 +13,24 @@ from PyQt6.QtCore import QAbstractTableModel, QModelIndex, QObject, Qt
 
 from uspto_assignments import EntityMemory
 
-_HEADERS = ("Alias (cleaned key)", "Canonical name")
+_HEADERS = ("Alias (cleaned key)", "Canonical name", "Score")
 _MAX_ROWS = 5000  # cap the visible slice so filtering a 75k-entry memory stays responsive
 
 
 class EntityAliasModel(QAbstractTableModel):
-    """Editable table of a memory's aliases; editing the canonical cell reassigns the alias."""
+    """Editable table of a memory's aliases; editing the canonical cell reassigns the alias.
+
+    The Score column shows the fuzzy confidence each alias was learned with (100 = exact or
+    curated). ``set_review_filter`` narrows the view to aliases learned below a score — the
+    review queue for marginal fuzzy matches.
+    """
 
     def __init__(self, memory: EntityMemory, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._memory = memory
         self._filter = ""
-        self._rows: list[tuple[str, str]] = []
+        self._max_score: int | None = None  # show only aliases learned below this score
+        self._rows: list[tuple[str, str, int]] = []
         self._truncated = False
         self._materialize()
 
@@ -32,9 +38,10 @@ class EntityAliasModel(QAbstractTableModel):
     def _materialize(self) -> None:
         needle = self._filter.lower()
         rows = sorted(
-            (a, c)
+            (a, c, self._memory.alias_score(a))
             for a, c in self._memory.aliases.items()
-            if not needle or needle in a.lower() or needle in c.lower()
+            if (not needle or needle in a.lower() or needle in c.lower())
+            and (self._max_score is None or self._memory.alias_score(a) < self._max_score)
         )
         self._truncated = len(rows) > _MAX_ROWS
         self._rows = rows[:_MAX_ROWS]
@@ -56,7 +63,8 @@ class EntityAliasModel(QAbstractTableModel):
         if not index.isValid():
             return None
         if role in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.EditRole):
-            return self._rows[index.row()][index.column()]
+            value = self._rows[index.row()][index.column()]
+            return str(value) if index.column() == 2 else value  # score renders as text
         return None
 
     def flags(self, index: QModelIndex) -> Qt.ItemFlag:
@@ -73,8 +81,8 @@ class EntityAliasModel(QAbstractTableModel):
             return False
         alias = self._rows[index.row()][0]
         self._memory.set_alias(alias, new_canonical)  # reassign (adds the canonical if new)
-        self._rows[index.row()] = (alias, new_canonical)
-        self.dataChanged.emit(index, index)
+        self._rows[index.row()] = (alias, new_canonical, 100)  # human-confirmed: score 100
+        self.dataChanged.emit(index, index.siblingAtColumn(2))
         return True
 
     # -- editing helpers ----------------------------------------------------
@@ -87,6 +95,13 @@ class EntityAliasModel(QAbstractTableModel):
         """Show only aliases/canonicals containing ``text`` (case-insensitive)."""
         self.beginResetModel()
         self._filter = text.strip()
+        self._materialize()
+        self.endResetModel()
+
+    def set_review_filter(self, max_score: int | None) -> None:
+        """Show only aliases learned below ``max_score`` (None = show all)."""
+        self.beginResetModel()
+        self._max_score = max_score
         self._materialize()
         self.endResetModel()
 

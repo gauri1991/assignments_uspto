@@ -193,7 +193,10 @@ class EntityMemory:
         # (e.g. the gazetteer's ~7k ``THE …`` orgs) degrades a fuzzy probe to a full scan.
         self._block_index: CappedBlockIndex[int] = CappedBlockIndex(cap=_BLOCK_CAP)
         self._aliases: dict[str, str] = {}
-        self._learned: list[tuple[str, str]] = []
+        # Fuzzy score at learn time, keyed like _aliases. Missing key = 100 (exact/curated), so
+        # only fuzzy-learned aliases carry an entry and the JSON stays compact.
+        self._alias_scores: dict[str, int] = {}
+        self._learned: list[tuple[str, str, int]] = []
         for name in canonicals or []:
             self._add_canonical(name)
         for alias_key, canonical in (aliases or {}).items():
@@ -209,9 +212,13 @@ class EntityMemory:
     def aliases(self) -> dict[str, str]:
         return dict(self._aliases)
 
+    def alias_score(self, alias_key: str) -> int:
+        """Confidence (0–100) recorded when ``alias_key`` was learned; 100 = exact or curated."""
+        return self._alias_scores.get(alias_key, 100)
+
     @property
-    def learned(self) -> list[tuple[str, str]]:
-        """Alias→canonical pairs recorded since construction (for merging back after a batch)."""
+    def learned(self) -> list[tuple[str, str, int]]:
+        """``(alias, canonical, score)`` recorded since construction (merged back after a batch)."""
         return list(self._learned)
 
     def counts(self) -> tuple[int, int]:
@@ -228,15 +235,17 @@ class EntityMemory:
             self._canon_set.add(name)
             self._block_index.add(key, index)
 
-    def _fuzzy_match(self, key: str, threshold: int, scorer: str) -> str | None:
-        """Best canonical for ``key`` within its block, or None if none clears ``threshold``."""
+    def _fuzzy_match(self, key: str, threshold: int, scorer: str) -> tuple[str, int] | None:
+        """Best ``(canonical, score)`` for ``key`` within its block; None below ``threshold``."""
         indices = self._block_index.candidates(key)
         if not indices:
             return None
         choices = [self._canon_keys[i] for i in indices]
         scorer_fn = _SCORERS.get(scorer, fuzz.WRatio)
         match = process.extractOne(key, choices, scorer=scorer_fn, score_cutoff=threshold)
-        return self._canonicals[indices[match[2]]] if match is not None else None
+        if match is None:
+            return None
+        return self._canonicals[indices[match[2]]], int(round(match[1]))
 
     def max_block(self) -> int:
         """Largest fuzzy block (diagnostics): bounded by the cap unless names are identical."""
@@ -249,61 +258,72 @@ class EntityMemory:
         threshold: int = DEFAULT_THRESHOLD,
         learn: bool = True,
         scorer: str = DEFAULT_SCORER,
-    ) -> tuple[str, bool]:
+    ) -> tuple[str, bool, int]:
         """Resolve ``name`` to a canonical form.
 
-        Returns ``(canonical, is_new)``. Exact alias hits are O(1); otherwise the cleaned key is
-        fuzzy-matched (rapidfuzz ``scorer``, ``score_cutoff=threshold``) against canonicals
-        **sharing its prefix block**. With ``learn=True`` an unmatched name becomes a new canonical;
-        with ``learn=False`` it is returned as its cleaned form without polluting a curated memory.
+        Returns ``(canonical, is_new, score)``. Exact alias hits are O(1) and report the score the
+        alias was originally learned with (100 for curated/exact ones), so a marginal fuzzy match
+        stays visible on later runs. Otherwise the cleaned key is fuzzy-matched (rapidfuzz
+        ``scorer``, ``score_cutoff=threshold``) against canonicals **sharing its prefix block**.
+        With ``learn=True`` an unmatched name becomes a new canonical (score 100 — identity); with
+        ``learn=False`` it is returned as its cleaned form with score 0 (no match).
         """
         key = clean(name)
         if not key:
-            return name, False
+            return name, False, 0
         existing = self._aliases.get(key)
         if existing is not None:
-            return existing, False
+            return existing, False, self.alias_score(key)
         match = self._fuzzy_match(key, threshold, scorer)
         if match is not None:
-            self._aliases[key] = match
-            self._learned.append((key, match))
-            return match, False
+            canonical, score = match
+            self._aliases[key] = canonical
+            if score < 100:
+                self._alias_scores[key] = score
+            self._learned.append((key, canonical, score))
+            return canonical, False, score
         if not learn:
-            return key, False  # match-only: leave unmatched as-is, add nothing
+            return key, False, 0  # match-only: leave unmatched as-is, add nothing
         self._add_canonical(key)  # new entity: the cleaned name is its canonical form
         self._aliases[key] = key
-        self._learned.append((key, key))
-        return key, True
+        self._learned.append((key, key, 100))
+        return key, True, 100
 
     def match(
         self, name: str, *, threshold: int = DEFAULT_THRESHOLD, scorer: str = DEFAULT_SCORER
-    ) -> str | None:
-        """Return the canonical for ``name`` if known/close, else ``None`` — pure (no mutation).
+    ) -> tuple[str, int] | None:
+        """Return ``(canonical, score)`` for ``name`` if known/close, else ``None`` — no mutation.
 
         Unlike :meth:`resolve`, this never learns and returns ``None`` on no match, so callers can
         distinguish "found in a curated reference" from "unmatched" (e.g. gazetteer matching).
+        Exact alias hits report the score the alias was learned with (100 for curated ones).
         """
         key = clean(name)
         if not key:
             return None
         existing = self._aliases.get(key)
         if existing is not None:
-            return existing
+            return existing, self.alias_score(key)
         return self._fuzzy_match(key, threshold, scorer)
 
-    def apply_learned(self, pairs: list[tuple[str, str]]) -> None:
-        """Merge ``(alias_key, canonical)`` pairs learned elsewhere (e.g. by a worker process)."""
-        for alias_key, canonical in pairs:
+    def apply_learned(self, pairs: list[tuple[str, str, int]]) -> None:
+        """Merge ``(alias, canonical, score)`` learned elsewhere (e.g. by a worker process)."""
+        for alias_key, canonical, score in pairs:
             self._add_canonical(canonical)
             self._aliases[alias_key] = canonical
+            if score < 100:
+                self._alias_scores[alias_key] = score
 
     def merge(self, other: EntityMemory) -> None:
-        """Absorb another memory's canonicals and aliases."""
+        """Absorb another memory's canonicals, aliases, and learn-time scores."""
         for name in other._canonicals:
             self._add_canonical(name)
         for alias_key, canonical in other._aliases.items():
             self._add_canonical(canonical)
             self._aliases[alias_key] = canonical
+            score = other._alias_scores.get(alias_key)
+            if score is not None:
+                self._alias_scores[alias_key] = score
 
     # -- editing ------------------------------------------------------------
     def _rebuild(self) -> None:
@@ -338,6 +358,7 @@ class EntityMemory:
             return
         self._canonicals = [c for c in self._canonicals if c != name]
         self._aliases = {k: v for k, v in self._aliases.items() if v != name}
+        self._alias_scores = {k: s for k, s in self._alias_scores.items() if k in self._aliases}
         self._rebuild()
 
     def merge_canonicals(self, source: str, target: str) -> None:
@@ -351,26 +372,49 @@ class EntityMemory:
         self._rebuild()
 
     def set_alias(self, alias_key: str, canonical: str) -> None:
-        """Point ``alias_key`` at ``canonical`` (added if new); the key is cleaned first."""
+        """Point ``alias_key`` at ``canonical`` (added if new) — a curated edit, so score 100."""
         key = clean(alias_key)
         if not key or not canonical:
             return
         self._add_canonical(canonical)
         self._aliases[key] = canonical
+        self._alias_scores.pop(key, None)  # human-confirmed: no longer a marginal fuzzy learn
 
     def delete_alias(self, alias_key: str) -> None:
         """Remove a single alias mapping (the canonical is left in place)."""
-        self._aliases.pop(clean(alias_key), None)
+        key = clean(alias_key)
+        self._aliases.pop(key, None)
+        self._alias_scores.pop(key, None)
 
     # -- persistence --------------------------------------------------------
     def to_dict(self) -> dict[str, Any]:
-        return {"canonicals": self._canonicals, "aliases": self._aliases}
+        # v2: alias values are [canonical, score]; a plain string (v1) means score 100.
+        aliases: dict[str, Any] = {}
+        for key, canonical in self._aliases.items():
+            score = self._alias_scores.get(key)
+            aliases[key] = canonical if score is None else [canonical, score]
+        return {"version": 2, "canonicals": self._canonicals, "aliases": aliases}
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> EntityMemory:
         canonicals = [str(c) for c in data.get("canonicals", [])]
-        aliases = {str(k): str(v) for k, v in data.get("aliases", {}).items()}
-        return cls(canonicals=canonicals, aliases=aliases)
+        aliases: dict[str, str] = {}
+        scores: dict[str, int] = {}
+        raw_aliases = cast("dict[str, Any]", data.get("aliases", {}))
+        for raw_key, value in raw_aliases.items():
+            key = str(raw_key)
+            if isinstance(value, (list, tuple)):  # v2: [canonical, score]
+                pair = list(cast("Iterable[Any]", value))
+                if len(pair) >= 2:
+                    aliases[key] = str(pair[0])
+                    score = int(pair[1])
+                    if score < 100:
+                        scores[key] = score
+            else:  # v1: bare canonical string (treated as curated: score 100)
+                aliases[key] = str(value)
+        memory = cls(canonicals=canonicals, aliases=aliases)
+        memory._alias_scores = scores
+        return memory
 
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -424,6 +468,9 @@ def normalize_column(  # noqa: PLR0913 - a clear public entry point with keyword
     separator: str = "",
     learn: bool = True,
     scorer: str = DEFAULT_SCORER,
+    score_target: str = "",
+    review_target: str = "",
+    review_threshold: int = 0,
     on_progress: OnProgress | None = None,
 ) -> pa.Table:
     """Return ``table`` with a ``target`` column of canonical values for ``column``.
@@ -434,15 +481,24 @@ def normalize_column(  # noqa: PLR0913 - a clear public entry point with keyword
     multi-party columns like ``assignor_names``). ``learn=False`` matches without adding new
     canonicals; ``scorer`` selects the rapidfuzz algorithm. Calls ``on_progress(done, total)`` as
     distinct names are resolved.
+
+    Confidence outputs (both optional): ``score_target`` adds an int column with the value's
+    weakest part-confidence (100 = exact/identity, 0 = a part had no match); ``review_target``
+    adds a "true"/"false" column flagging values accepted via a fuzzy match scoring below
+    ``review_threshold`` — the clerical-review band. ``review_threshold=0`` disables flagging.
     """
 
-    def resolve_value(value: str) -> str:
-        if not separator:
-            return memory.resolve(value, threshold=threshold, learn=learn, scorer=scorer)[0]
-        parts = [p.strip() for p in value.split(separator) if p.strip()]
-        return separator.join(
-            memory.resolve(p, threshold=threshold, learn=learn, scorer=scorer)[0] for p in parts
-        )
+    def resolve_value(value: str) -> tuple[str, int]:
+        parts = [p.strip() for p in value.split(separator) if p.strip()] if separator else [value]
+        canonicals: list[str] = []
+        min_score = 100
+        for part in parts:
+            canonical, _is_new, score = memory.resolve(
+                part, threshold=threshold, learn=learn, scorer=scorer
+            )
+            canonicals.append(canonical)
+            min_score = min(min_score, score)
+        return (separator.join(canonicals) if separator else canonicals[0]), min_score
 
     # Route the column through Any (pyarrow-stubs under-type dictionary_encode / take).
     source: Any = table.column(column).combine_chunks()
@@ -450,14 +506,34 @@ def normalize_column(  # noqa: PLR0913 - a clear public entry point with keyword
     distinct: list[Any] = encoded.dictionary.to_pylist()
     total = len(distinct)
     mapped: list[str | None] = []
+    scores: list[int | None] = []
     for index, value in enumerate(distinct):
-        mapped.append(None if value is None else resolve_value(value))
+        if value is None:
+            mapped.append(None)
+            scores.append(None)
+        else:
+            canonical, score = resolve_value(value)
+            mapped.append(canonical)
+            scores.append(score)
         if on_progress is not None and (index + 1) % _PROGRESS_EVERY == 0:
             on_progress(index + 1, total)
     if on_progress is not None:
         on_progress(total, total)
 
-    target_array: Any = pc.take(pa.array(mapped, type=pa.string()), encoded.indices)
-    if target in table.column_names:
-        table = table.drop_columns([target])
-    return table.append_column(target, target_array)
+    def put(result: pa.Table, name: str, values: Any) -> pa.Table:
+        if name in result.column_names:
+            result = result.drop_columns([name])
+        return result.append_column(name, pc.take(values, encoded.indices))
+
+    result = put(table, target, pa.array(mapped, type=pa.string()))
+    if score_target:
+        result = put(result, score_target, pa.array(scores, type=pa.int32()))
+    if review_target:
+        # In review: accepted via a fuzzy match below the bar. 0 (unmatched) and 100 (exact)
+        # never flag, whatever the threshold.
+        flags = [
+            None if s is None else ("true" if 0 < s < min(review_threshold, 100) else "false")
+            for s in scores
+        ]
+        result = put(result, review_target, pa.array(flags, type=pa.string()))
+    return result

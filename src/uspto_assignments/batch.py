@@ -147,11 +147,21 @@ class NormalizeStep:
     separator: str = ""  # set (e.g. "; ") to normalize each part of a concatenated column
     learn: bool = True  # False = match a curated memory without adding new canonicals
     scorer: str = DEFAULT_SCORER  # rapidfuzz algorithm (see normalize.scorer_names())
+    emit_score: bool = False  # add a {target}_score column (weakest part-confidence, 0–100)
+    review_threshold: int = 0  # >0: add {target}_review flagging fuzzy accepts scoring below it
     enabled: bool = True
 
     def resolved_target(self) -> str:
         """The output column name (derived from ``column`` when ``target`` is blank)."""
         return self.target or f"{self.column}_canonical"
+
+    def resolved_score(self) -> str:
+        """The confidence column name (added only when ``emit_score`` is set)."""
+        return f"{self.resolved_target()}_score"
+
+    def resolved_review(self) -> str:
+        """The review-flag column name (added only when ``review_threshold`` > 0)."""
+        return f"{self.resolved_target()}_review"
 
     def effective_separator(self) -> str:
         """The split separator, defaulting to ``"; "`` for concatenated ``*_names`` columns."""
@@ -169,6 +179,8 @@ class NormalizeStep:
             "separator": self.separator,
             "learn": self.learn,
             "scorer": self.scorer,
+            "emit_score": self.emit_score,
+            "review_threshold": self.review_threshold,
         }
 
 
@@ -370,6 +382,8 @@ class ReferenceMatchStep:
     mode: str = "any"  # any | all — how to combine multi-party (concatenated) match flags
     delimiter: str = ""  # explicit reference delimiter (else auto by extension)
     action: str = "flag"  # flag | keep_matched | drop_matched
+    emit_score: bool = False  # add a {column}_match_score column (weakest matched-part score)
+    review_threshold: int = 0  # >0: add {column}_match_review flagging accepts scoring below it
     enabled: bool = True
 
     def resolved_target(self) -> str:
@@ -380,6 +394,14 @@ class ReferenceMatchStep:
 
     def resolved_id(self) -> str:
         return self.id_target or f"{self.column}_assignee_id"
+
+    def resolved_score(self) -> str:
+        """The confidence column name (added only when ``emit_score`` is set)."""
+        return f"{self.column}_match_score"
+
+    def resolved_review(self) -> str:
+        """The review-flag column name (added only when ``review_threshold`` > 0)."""
+        return f"{self.column}_match_review"
 
     def effective_separator(self) -> str:
         if self.separator:
@@ -403,6 +425,8 @@ class ReferenceMatchStep:
             "mode": self.mode,
             "delimiter": self.delimiter,
             "action": self.action,
+            "emit_score": self.emit_score,
+            "review_threshold": self.review_threshold,
         }
 
 
@@ -535,6 +559,8 @@ def _decode_step(data: dict[str, Any]) -> BatchStep:  # noqa: PLR0911, PLR0912 -
             separator=str(data.get("separator", "")),
             learn=bool(data.get("learn", True)),
             scorer=str(data.get("scorer", DEFAULT_SCORER)),
+            emit_score=bool(data.get("emit_score", False)),
+            review_threshold=int(data.get("review_threshold", 0)),
         )
     if kind == "classify":
         return ClassifyStep(
@@ -581,6 +607,8 @@ def _decode_step(data: dict[str, Any]) -> BatchStep:  # noqa: PLR0911, PLR0912 -
             mode=str(data.get("mode", "any")),
             delimiter=str(data.get("delimiter", "")),
             action=str(data.get("action", "flag")),
+            emit_score=bool(data.get("emit_score", False)),
+            review_threshold=int(data.get("review_threshold", 0)),
         )
     if kind == "dedupe":
         subset = data.get("subset")
@@ -714,6 +742,11 @@ def columns_after(  # noqa: PLR0912 - one branch per step kind
             continue
         if isinstance(step, NormalizeStep | ClassifyStep | DeriveStep):
             add(step.table, step.resolved_target())
+            if isinstance(step, NormalizeStep):
+                if step.emit_score:
+                    add(step.table, step.resolved_score())
+                if step.review_threshold > 0:
+                    add(step.table, step.resolved_review())
         elif isinstance(step, CompareStep):
             if step.action == "flag":
                 add(step.table, step.resolved_target())
@@ -722,6 +755,10 @@ def columns_after(  # noqa: PLR0912 - one branch per step kind
             add(step.table, step.resolved_matched())
             if step.id_column:
                 add(step.table, step.resolved_id())
+            if step.emit_score:
+                add(step.table, step.resolved_score())
+            if step.review_threshold > 0:
+                add(step.table, step.resolved_review())
         elif isinstance(step, FilterStep):
             if step.columns:
                 project(step.table, step.columns)
@@ -842,7 +879,8 @@ class FileResult:
     rows: dict[str, int] = field(default_factory=dict[str, int])
     error: str | None = None
     elapsed: float = 0.0  # wall-clock seconds spent on this file
-    learned: list[tuple[str, str]] = field(default_factory=list[tuple[str, str]])  # normalization
+    # (alias, canonical, score) pairs the normalize steps learned while processing this file.
+    learned: list[tuple[str, str, int]] = field(default_factory=list[tuple[str, str, int]])
 
 
 @dataclass(slots=True)
@@ -980,6 +1018,9 @@ def _apply_normalize(
         separator=step.effective_separator(),
         learn=step.learn,
         scorer=step.scorer,
+        score_target=f"{target}_score" if step.emit_score else "",
+        review_target=f"{target}_review" if step.review_threshold > 0 else "",
+        review_threshold=step.review_threshold,
         on_progress=on_progress,
     )
 
@@ -1120,6 +1161,9 @@ def _apply_reference_match(
         scorer=step.scorer,
         separator=step.effective_separator(),
         mode=step.mode,
+        score_col=step.resolved_score() if step.emit_score else "",
+        review_col=step.resolved_review() if step.review_threshold > 0 else "",
+        review_threshold=step.review_threshold,
         on_progress=on_progress,
     )
     mask: Any = matched_mask(result, matched_col)

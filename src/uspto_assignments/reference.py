@@ -74,12 +74,13 @@ class ReferenceGazetteer:
 
     def match(
         self, name: str, *, threshold: int = DEFAULT_THRESHOLD, scorer: str = DEFAULT_SCORER
-    ) -> tuple[str | None, str | None]:
-        """Return ``(disambiguated_name, id)`` for ``name`` (either is ``None`` if not found)."""
-        canonical = self.memory.match(name, threshold=threshold, scorer=scorer)
-        if canonical is None:
-            return None, None
-        return canonical, self.ids.get(canonical)
+    ) -> tuple[str | None, str | None, int]:
+        """Return ``(disambiguated_name, id, score)`` for ``name`` (Nones + 0 if not found)."""
+        matched = self.memory.match(name, threshold=threshold, scorer=scorer)
+        if matched is None:
+            return None, None, 0
+        canonical, score = matched
+        return canonical, self.ids.get(canonical), score
 
     def size(self) -> int:
         return self.memory.counts()[0]
@@ -164,6 +165,9 @@ def match_column(  # noqa: PLR0913 - a clear public entry point with keyword-onl
     scorer: str = DEFAULT_SCORER,
     separator: str = "",
     mode: str = "any",
+    score_col: str = "",
+    review_col: str = "",
+    review_threshold: int = 0,
     on_progress: OnProgress | None = None,
 ) -> pa.Table:
     """Return ``table`` with reference-match columns for ``column``.
@@ -173,22 +177,29 @@ def match_column(  # noqa: PLR0913 - a clear public entry point with keyword-onl
     Multi-party values (``separator`` set) match each part; ``mode`` combines the parts' match flags
     (``"any"`` ⇒ matched if any party is a known company, ``"all"`` ⇒ every party). Matching runs
     once per **distinct** value (dictionary-encoded), then maps back over all rows.
+
+    Confidence outputs (both optional): ``score_col`` adds an int column with the weakest score
+    among the matched parts (0 when nothing matched); ``review_col`` adds "true"/"false" flagging
+    values whose weakest accepted match scored below ``review_threshold`` (0 disables flagging).
     """
 
-    def resolve_value(value: str) -> tuple[str, bool, str]:
+    def resolve_value(value: str) -> tuple[str, bool, str, int]:
         parts = [p.strip() for p in value.split(separator) if p.strip()] if separator else [value]
         disamb: list[str] = []
         flags: list[bool] = []
         first_id = ""
+        min_matched_score = 100
         for part in parts:
-            canonical, entity_id = gazetteer.match(part, threshold=threshold, scorer=scorer)
+            canonical, entity_id, score = gazetteer.match(part, threshold=threshold, scorer=scorer)
             disamb.append(canonical if canonical is not None else part)
             flags.append(canonical is not None)
+            if canonical is not None:
+                min_matched_score = min(min_matched_score, score)
             if entity_id and not first_id:
                 first_id = entity_id
         matched = all(flags) if mode == "all" else any(flags)
         joined = separator.join(disamb) if separator else disamb[0]
-        return joined, matched, first_id
+        return joined, matched, first_id, (min_matched_score if any(flags) else 0)
 
     source: Any = table.column(column).combine_chunks()
     encoded: Any = source.dictionary_encode()
@@ -197,31 +208,44 @@ def match_column(  # noqa: PLR0913 - a clear public entry point with keyword-onl
     disamb_vals: list[str | None] = []
     matched_vals: list[str | None] = []
     id_vals: list[str | None] = []
+    score_vals: list[int | None] = []
     for index, value in enumerate(distinct):
         if value is None:
             disamb_vals.append(None)
             matched_vals.append(None)
             id_vals.append(None)
+            score_vals.append(None)
         else:
-            joined, matched, entity_id = resolve_value(value)
+            joined, matched, entity_id, score = resolve_value(value)
             disamb_vals.append(joined)
             matched_vals.append("true" if matched else "false")
             id_vals.append(entity_id)
+            score_vals.append(score)
         if on_progress is not None and (index + 1) % _PROGRESS_EVERY == 0:
             on_progress(index + 1, total)
     if on_progress is not None:
         on_progress(total, total)
 
     indices: Any = encoded.indices
-    result = table
-    for name, values in ((target, disamb_vals), (matched_col, matched_vals)):
+
+    def put(result: pa.Table, name: str, values: Any) -> pa.Table:
         if name in result.column_names:
             result = result.drop_columns([name])
-        result = result.append_column(name, pc.take(pa.array(values, type=pa.string()), indices))
+        return result.append_column(name, pc.take(values, indices))
+
+    result = put(table, target, pa.array(disamb_vals, type=pa.string()))
+    result = put(result, matched_col, pa.array(matched_vals, type=pa.string()))
     if id_col:
-        if id_col in result.column_names:
-            result = result.drop_columns([id_col])
-        result = result.append_column(id_col, pc.take(pa.array(id_vals, type=pa.string()), indices))
+        result = put(result, id_col, pa.array(id_vals, type=pa.string()))
+    if score_col:
+        result = put(result, score_col, pa.array(score_vals, type=pa.int32()))
+    if review_col:
+        # 0 (unmatched) and 100 (exact) never flag, whatever the threshold.
+        flags_out = [
+            None if s is None else ("true" if 0 < s < min(review_threshold, 100) else "false")
+            for s in score_vals
+        ]
+        result = put(result, review_col, pa.array(flags_out, type=pa.string()))
     return result
 
 

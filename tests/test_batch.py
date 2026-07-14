@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 import zipfile
 from concurrent.futures import Future
@@ -831,3 +832,48 @@ def test_apply_export_empty_tables_writes_nothing(tmp_path: Path) -> None:
     out_dir = tmp_path / "out" / "nothing" / "sample_assignment"
     assert list(out_dir.glob("*.csv")) == []  # [] is "nothing", not "everything"
     assert any("no tables selected" in e.message for e in events)
+
+
+def test_normalize_step_score_review_roundtrip_and_schema(tmp_path: Path) -> None:
+    step = NormalizeStep(
+        table="flat", column="assignor_names", emit_score=True, review_threshold=95
+    )
+    template = BatchTemplate(name="conf", steps=[step])
+    path = tmp_path / "t.json"
+    dump_templates([template], path)
+    loaded = load_templates(path)[0].steps[0]
+    assert isinstance(loaded, NormalizeStep)
+    assert loaded.emit_score is True and loaded.review_threshold == 95
+
+    cols = columns_after(LoadConfig(), [step], upto=1)["flat"]
+    assert "assignor_names_canonical_score" in cols
+    assert "assignor_names_canonical_review" in cols
+    # legacy template without the new keys decodes with defaults
+    dump_templates([BatchTemplate(name="old", steps=[NormalizeStep(table="flat")])], path)
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    for key in ("emit_score", "review_threshold"):
+        raw[0]["steps"][0].pop(key, None)
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    old = load_templates(path)[0].steps[0]
+    assert isinstance(old, NormalizeStep)
+    assert old.emit_score is False and old.review_threshold == 0
+
+
+def test_run_batch_normalize_emits_score_and_review_columns(tmp_path: Path) -> None:
+    template = BatchTemplate(
+        name="conf",
+        steps=[
+            NormalizeStep(
+                table="assignees", column="name", emit_score=True, review_threshold=101
+            ),  # review_threshold 101: every fuzzy accept lands in the band (test determinism)
+            ExportStep(fmt="csv", tables=["assignees"]),
+        ],
+    )
+    run_batch(template, [FIXTURE], tmp_path / "out", timestamp="conf")
+    header = (
+        (tmp_path / "out" / "conf" / "sample_assignment" / "assignees.csv")
+        .read_text(encoding="utf-8")
+        .splitlines()[0]
+    )
+    assert "name_canonical_score" in header
+    assert "name_canonical_review" in header
