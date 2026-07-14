@@ -34,6 +34,53 @@ OnProgress = Callable[[int, int], None]
 _PROGRESS_EVERY = 500
 _READ_BLOCK_SIZE = 64 << 20  # 64 MiB CSV read blocks — streams multi-GB files with bounded memory
 
+# Known header names for the organization / id columns in USPTO / PatentsView disambiguated-assignee
+# files (and in a compact reference this tool already built), best match first. Used to auto-detect
+# columns so callers need not know that the raw bulk TSV calls its org column
+# ``disambig_assignee_organization`` while a compact extract calls it ``organization``.
+KNOWN_ORG_COLUMNS = (
+    "organization",  # a compact reference this tool built
+    "disambig_assignee_organization",  # PatentsView g_assignee_disambiguated bulk file
+    "assignee_organization",
+    "disambig_organization",
+    "org_name",
+)
+KNOWN_ID_COLUMNS = (
+    "assignee_id",
+    "disambig_assignee_id",
+    "id",
+)
+
+
+def _resolve_column(
+    available: list[str], requested: str, aliases: tuple[str, ...], kind: str
+) -> str:
+    """Resolve a column name against a file's real headers, forgiving a wrong or omitted name.
+
+    An explicit ``requested`` that the file actually has always wins. Otherwise — when it is blank,
+    or names a column the file lacks — the first known ``aliases`` entry present in the file is used
+    (so a caller need not know the raw TSV's exact org-column name). Raises ``ValueError`` naming
+    the available columns when nothing matches.
+    """
+    if requested and requested in available:
+        return requested
+    for alias in aliases:
+        if alias in available:
+            if requested and requested != alias:
+                logger.info(
+                    "reference has no %r column; auto-detected %r instead", requested, alias
+                )
+            return alias
+    if requested:
+        raise ValueError(
+            f"reference has no {requested!r} column and no recognisable {kind} column "
+            f"(available: {', '.join(available)})"
+        )
+    raise ValueError(
+        f"could not auto-detect the {kind} column (available: {', '.join(available)}); "
+        "pass the column name explicitly"
+    )
+
 
 def _delimiter_for(path: Path, override: str) -> str:
     """The column delimiter for ``path`` (explicit ``override`` wins; else by extension)."""
@@ -157,17 +204,39 @@ def build_reference(
 
 
 def extract_distinct_reference(
-    src: Path, dst: Path, *, name_column: str, id_column: str = "", delimiter: str = ""
+    src: Path,
+    dst: Path,
+    *,
+    name_column: str = "",
+    id_column: str | None = None,
+    delimiter: str = "",
 ) -> int:
     """Write a compact Parquet of distinct ``(organization[, assignee_id])`` from a big reference.
 
     A one-time pre-build so the huge TSV is scanned once; the step then reloads ``dst`` instantly.
+    Column names are **auto-detected** from the file's headers, so the common case needs no column
+    arguments::
+
+        extract_distinct_reference(Path("g_assignee_disambiguated.tsv"), Path("reference.parquet"))
+
+    ``name_column`` / ``id_column`` override detection when given (a name the file lacks still falls
+    back to auto-detection). ``id_column=None`` (the default) includes an id column when the file
+    has a recognisable one; pass ``id_column=""`` to force organization-only output. The output
+    always uses the canonical names ``organization`` and ``assignee_id`` whatever the input headers.
     Returns the number of distinct organizations written.
     """
-    gazetteer = build_reference(src, name_column, id_column=id_column, delimiter=delimiter)
+    available = reference_columns(src, delimiter)
+    resolved_name = _resolve_column(available, name_column, KNOWN_ORG_COLUMNS, "organization")
+    if id_column is None:  # auto: include an id column when the file has a recognisable one
+        resolved_id = next((c for c in KNOWN_ID_COLUMNS if c in available), "")
+    elif id_column:
+        resolved_id = _resolve_column(available, id_column, KNOWN_ID_COLUMNS, "id")
+    else:
+        resolved_id = ""  # explicit organization-only
+    gazetteer = build_reference(src, resolved_name, id_column=resolved_id, delimiter=delimiter)
     orgs = gazetteer.memory.canonicals
     arrays = {"organization": pa.array(orgs, type=pa.string())}
-    if id_column:
+    if resolved_id:
         arrays["assignee_id"] = pa.array([gazetteer.ids.get(o, "") for o in orgs], type=pa.string())
     dst.parent.mkdir(parents=True, exist_ok=True)
     pq.write_table(pa.table(arrays), dst)

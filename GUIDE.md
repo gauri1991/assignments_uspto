@@ -447,10 +447,25 @@ a **company-only** gazetteer automatically — no `assignee_type` filter needed.
 
 ### Build a compact reference (recommended)
 
-The raw TSV is multi-GB and gets re-scanned every run. In the reference-match dialog click **Build
-compact…**, pick the big `.tsv`, and save `reference/reference.parquet`. The dialog then points at that
-small file (columns `organization` + `assignee_id`), which reloads instantly. Within a single batch
-run the reference is also cached in memory (loaded once).
+The raw TSV is multi-GB and gets re-scanned every run, so extract it **once** into a small
+`reference/reference.parquet` (columns `organization` + `assignee_id`) that reloads instantly.
+The column names are **auto-detected** — you don't need to know or type them.
+
+**From the command line** (simplest):
+
+```
+.venv/bin/uspto-assign build-reference reference/g_assignee_disambiguated.tsv
+```
+
+That writes `reference/reference.parquet` by default. Override the destination with `--out`, or the
+columns with `--name-column` / `--id-column` if your file uses unusual headers (pass
+`--id-column ""` to omit ids). It prints e.g. `reference built: 516,032 distinct organizations`.
+
+**From the app:** in the reference-match dialog click **Build compact…**, pick the big `.tsv`, and
+save `reference/reference.parquet`. The dialog then points at that small file and fills in its
+`organization` / `assignee_id` columns for you. (You can leave the column fields blank — the build
+auto-detects them, and even forgives a wrong name.) Within a single batch run the reference is also
+cached in memory (loaded once).
 
 ### What the step outputs
 
