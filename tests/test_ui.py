@@ -17,6 +17,7 @@ pytest.importorskip("pytestqt")
 import pyarrow as pa
 import pyarrow.parquet as pq
 from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import QDialog
 
 from uspto_assignments import filters, parse_to_store
 from uspto_assignments.filters import FilterClause
@@ -24,6 +25,7 @@ from uspto_assignments_ui.app import create_app, load_stylesheet
 from uspto_assignments_ui.main_window import MainWindow
 from uspto_assignments_ui.models.arrow_table_model import ArrowTableModel
 from uspto_assignments_ui.settings import RecentStore, UiStateStore
+from uspto_assignments_ui.widgets.column_editor import ColumnEditorDialog
 from uspto_assignments_ui.widgets.landing import LandingPage
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_assignment.xml"
@@ -126,3 +128,42 @@ def test_landing_page_emits_open_table_requested(qtbot: Any) -> None:
     qtbot.addWidget(landing)
     with qtbot.waitSignal(landing.open_table_requested, timeout=1000):
         landing.open_table_requested.emit()
+
+
+def test_edit_columns_drops_and_renames(
+    qtbot: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    create_app([])
+    pq.write_table(  # pyright: ignore[reportUnknownMemberType]
+        pa.table({"patent": ["10000000"], "codes": [["H04L"]], "junk": ["x"]}),
+        str(tmp_path / "e.parquet"),
+    )
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window._open_table_file(tmp_path / "e.parquet")
+
+    # accept a plan: drop 'junk', rename 'patent' -> 'grant'
+    def fake_exec(self: ColumnEditorDialog) -> int:
+        junk, patent = self._grid.item(2, 0), self._grid.item(0, 1)
+        assert junk is not None and patent is not None
+        junk.setCheckState(Qt.CheckState.Unchecked)  # drop the junk column
+        patent.setText("grant")  # rename patent -> grant
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(ColumnEditorDialog, "exec", fake_exec)
+    window._edit_columns()
+
+    panel = window.current_panel()
+    assert panel is not None
+    assert panel._model.columns == ["grant", "codes"]  # junk dropped, patent renamed, order kept
+
+
+def test_column_editor_plan_reorders(qtbot: Any) -> None:
+    create_app([])
+    dialog = ColumnEditorDialog(["a", "b", "c"])
+    qtbot.addWidget(dialog)
+    dialog._grid.setCurrentCell(2, 0)  # select 'c'
+    dialog._move(-1)  # move it up -> a, c, b
+    kept, renames = dialog.column_plan()
+    assert kept == ["a", "c", "b"]
+    assert renames == {}

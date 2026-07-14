@@ -11,6 +11,7 @@ import tempfile
 from collections.abc import Callable
 from pathlib import Path
 
+import pyarrow as pa
 from PyQt6.QtCore import QObject, QThread
 from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import (
@@ -25,8 +26,6 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-
-import pyarrow as pa
 
 from uspto_assignments import (
     FORMAT_SUFFIX,
@@ -50,6 +49,7 @@ from .settings import (
     UiStateStore,
 )
 from .widgets.batch_dialog import BatchDialog
+from .widgets.column_editor import ColumnEditorDialog
 from .widgets.cpc_settings_dialog import CpcSettingsDialog
 from .widgets.entity_dialog import EntityDialog
 from .widgets.export_dialog import ExportDialog
@@ -146,6 +146,7 @@ class MainWindow(QMainWindow):
             "&Export current table…", self._export_current, "Ctrl+E"
         )
         self._act_export_all = self._make_action("Export &all tables…", self._export_all)
+        self._act_columns = self._make_action("Edit c&olumns…", self._edit_columns)
         self._act_close = self._make_action("&Close dataset", self._close_dataset, "Ctrl+W")
         self._act_exit = self._make_action("E&xit", self.close)
         self._act_save_query = self._make_action("&Save current query…", self._save_query)
@@ -158,6 +159,7 @@ class MainWindow(QMainWindow):
             self._act_save,
             self._act_export,
             self._act_export_all,
+            self._act_columns,
             self._act_close,
             self._act_save_query,
             self._act_manage_queries,
@@ -181,6 +183,7 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self._act_open_ds)
         file_menu.addAction(self._act_open_table)
         file_menu.addSeparator()
+        file_menu.addAction(self._act_columns)
         file_menu.addAction(self._act_save)
         file_menu.addAction(self._act_export)
         file_menu.addAction(self._act_export_all)
@@ -502,6 +505,27 @@ class MainWindow(QMainWindow):
         if self._store is not None and 0 <= index < len(self._store.names):
             return self._store.names[index]
         return "table"
+
+    # -- edit columns ------------------------------------------------------
+    def _edit_columns(self) -> None:
+        """Keep / reorder / rename / drop the current table's columns, then reload the view."""
+        panel = self.current_panel()
+        if panel is None or self._store is None:
+            return
+        name = self._current_table_name()
+        dialog = ColumnEditorDialog(list(panel.table.column_names), parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        kept, renames = dialog.column_plan()
+        if not kept:
+            self._set_status("Keep at least one column.")
+            return
+        reshaped = panel.table.select(kept)
+        reshaped = reshaped.rename_columns([renames.get(c, c) for c in reshaped.column_names])
+        tables = dict(self._store.tables)
+        tables[name] = reshaped
+        self.load_store(TableStore(tables))
+        self._set_status(f"'{name}': kept {len(kept)} column(s)")
 
     # -- saved queries -----------------------------------------------------
     def _save_query(self) -> None:
