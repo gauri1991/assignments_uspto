@@ -34,6 +34,7 @@ from uspto_assignments import (
     SortStep,
     TransferTypeStep,
     columns_after,
+    describe_step,
     dump_templates,
     load_templates,
     parse_to_store,
@@ -951,3 +952,28 @@ def test_validate_template_flags_reference_column_mismatch(tmp_path: Path) -> No
     # with the id column cleared the template validates clean
     step.id_column = ""
     assert not any("no column" in w for w in validate_template(LoadConfig(), [step]))
+
+
+def test_describe_step_one_line_per_kind() -> None:
+    clause = FilterClause("doc_kind", "equals", "B2")
+    described = describe_step(
+        FilterStep(table="flat", clauses=[clause, clause, clause], combine="and")
+    )
+    assert described == "Filter · flat · 3 clause(s) · AND"
+    assert "review<95" in describe_step(
+        NormalizeStep(table="flat", column="name", emit_score=True, review_threshold=95)
+    )
+    steps: list[BatchStep] = [
+        DedupeStep(table="flat"),
+        SelectStep(table="flat", columns=["a"]),
+        SortStep(table="flat", column="a"),
+        DeriveStep(table="flat", source="recorded_date", op="year"),
+        AggregateStep(table="flat", group_by=["a"]),
+        ClassifyStep(table="flat", column="name"),
+        CompareStep(table="flat", left="a", right="b"),
+        TransferTypeStep(),
+        ReferenceMatchStep(table="flat"),
+        ExportStep(fmt="csv"),
+    ]
+    for step in steps:
+        assert describe_step(step)  # every kind renders a non-empty one-liner

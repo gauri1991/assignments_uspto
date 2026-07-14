@@ -1935,8 +1935,61 @@ class StepStat:
 PREVIEW_LIMIT = 1000
 
 
-def _default_step_label(step: BatchStep) -> str:
-    return type(step).__name__
+def _confidence_suffix(step: NormalizeStep | ReferenceMatchStep | CompareStep) -> str:
+    """The steps-list marker for confidence options (e.g. " · score · review<95")."""
+    parts = ""
+    if step.emit_score:
+        parts += " · score"
+    if step.review_threshold > 0:
+        parts += f" · review<{step.review_threshold}"
+    return parts
+
+
+def describe_step(step: BatchStep) -> str:  # noqa: PLR0911, PLR0912 - one line per step kind
+    """A one-line human summary of ``step`` (used by the UI steps list, docs, and manifests)."""
+    if isinstance(step, FilterStep):
+        clause_count = len(step.clauses)
+        return f"Filter · {step.table} · {clause_count} clause(s) · {step.combine.upper()}"
+    if isinstance(step, NormalizeStep):
+        split = f" · split '{step.separator}'" if step.separator else ""
+        learn = "" if step.learn else " · match-only"
+        return (
+            f"Normalize · {step.table}.{step.column} → {step.resolved_target()} "
+            f"(≥{step.threshold}){split}{learn}{_confidence_suffix(step)}"
+        )
+    if isinstance(step, DedupeStep):
+        key = ", ".join(step.subset) if step.subset else "whole row"
+        return f"Deduplicate · {step.table} · key: {key}"
+    if isinstance(step, SelectStep):
+        return f"Select · {step.table} · keep {len(step.columns)} column(s)"
+    if isinstance(step, SortStep):
+        return f"Sort · {step.table} by {step.column} · {'asc' if step.ascending else 'desc'}"
+    if isinstance(step, DeriveStep):
+        return f"Derive · {step.table}.{step.resolved_target()} = {step.op}({step.source})"
+    if isinstance(step, AggregateStep):
+        return f"Aggregate · {step.table} by {', '.join(step.group_by)} → {step.resolved_out()}"
+    if isinstance(step, ClassifyStep):
+        return f"Classify · {step.table}.{step.column} → {step.resolved_target()} ({step.method})"
+    if isinstance(step, CompareStep):
+        return (
+            f"Compare · {step.table} · {step.left} vs {step.right} · {step.method} · "
+            f"{step.action}{_confidence_suffix(step)}"
+        )
+    if isinstance(step, TransferTypeStep):
+        return f"Transfer type · {step.table} · {step.assignor_type} → {step.assignee_type}"
+    if isinstance(step, ReferenceMatchStep):
+        ref = Path(step.reference_path).name or "(no file)"
+        return (
+            f"Reference match · {step.table}.{step.column} vs {ref} · "
+            f"{step.action}{_confidence_suffix(step)}"
+        )
+    if isinstance(step, FetchCpcStep):
+        return f"Fetch CPC · {step.table}.{step.column} → cpc_codes"
+    if isinstance(step, CpcMatchStep):
+        portfolio = Path(step.portfolio_path).name or "(no file)"
+        return f"CPC match · {step.table} vs {portfolio} · {step.portfolio_mode} → {step.out_table}"
+    tables = "all tables" if step.tables is None else ", ".join(step.tables)
+    return f"Export · {step.fmt}{FORMAT_SUFFIX[step.fmt]} · {tables}"
 
 
 def run_preview(  # noqa: PLR0913 - a clear public entry point with keyword-only options
@@ -1955,7 +2008,7 @@ def run_preview(  # noqa: PLR0913 - a clear public entry point with keyword-only
     caller can show "the data as of each step". Uses a fresh entity memory (not persisted).
     """
     emit = on_event or _noop_event
-    label_of = describe if describe is not None else _default_step_label
+    label_of = describe if describe is not None else describe_step
     preview = BatchTemplate(
         name=template.name,
         load=LoadConfig(
