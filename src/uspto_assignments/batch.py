@@ -39,6 +39,7 @@ from .cpcmatch import (
     PER_COLUMNS,
     assert_hit_rate,
     attach_cpc,
+    attach_cpc_from_file,
     load_portfolio_footprint,
     match_portfolio,
 )
@@ -470,6 +471,38 @@ class FetchCpcStep:
 
 
 @dataclass(slots=True)
+class AttachCpcFileStep:
+    """Attach CPC codes from an uploaded file (PatSeer/CSV/Parquet) instead of the API.
+
+    Same output columns as :class:`FetchCpcStep` (``cpc_codes``/``cpc_subclasses``/
+    ``cpc_lookup_status``) but the CPC comes from ``source_path`` joined on ``patent_column``, with
+    the symbols in ``code_column``. ``separator`` splits multi-code cells (blank = one code per
+    row). Fully offline — no network, no cache. Ideal after shortlisting records.
+    """
+
+    table: str = "flat"
+    column: str = "doc_number"  # the table's patent-number column
+    kind_column: str = "doc_kind"  # kind code, routes to grants (CPC is grant-only)
+    source_path: str = ""  # the uploaded PatSeer/CSV/Parquet export
+    patent_column: str = "Publication Number"  # the file's patent-number column
+    code_column: str = "CPC"  # the file's CPC-symbol column
+    separator: str = ";"  # split multi-code cells (blank = one code per row)
+    enabled: bool = True
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "kind": "attach_cpc_file",
+            "table": self.table,
+            "column": self.column,
+            "kind_column": self.kind_column,
+            "source_path": self.source_path,
+            "patent_column": self.patent_column,
+            "code_column": self.code_column,
+            "separator": self.separator,
+        }
+
+
+@dataclass(slots=True)
 class CpcMatchStep:
     """Match a sales-package portfolio against buyer CPC footprints; emit ranked buyers per patent.
 
@@ -520,6 +553,7 @@ BatchStep = (
     | TransferTypeStep
     | ReferenceMatchStep
     | FetchCpcStep
+    | AttachCpcFileStep
     | CpcMatchStep
 )
 
@@ -664,6 +698,16 @@ def _decode_step(data: dict[str, Any]) -> BatchStep:  # noqa: PLR0911, PLR0912 -
             column=str(data.get("column", "doc_number")),
             kind_column=str(data.get("kind_column", "doc_kind")),
         )
+    if kind == "attach_cpc_file":
+        return AttachCpcFileStep(
+            table=str(data.get("table", "flat")),
+            column=str(data.get("column", "doc_number")),
+            kind_column=str(data.get("kind_column", "doc_kind")),
+            source_path=str(data.get("source_path", "")),
+            patent_column=str(data.get("patent_column", "Publication Number")),
+            code_column=str(data.get("code_column", "CPC")),
+            separator=str(data.get("separator", ";")),
+        )
     if kind == "cpc_match":
         return CpcMatchStep(
             table=str(data.get("table", "flat")),
@@ -793,7 +837,7 @@ def columns_after(  # noqa: PLR0912 - one branch per step kind
             if step.count_distinct:
                 out.append(f"{step.count_distinct}_distinct")
             cols[step.resolved_out()] = out
-        elif isinstance(step, FetchCpcStep):
+        elif isinstance(step, FetchCpcStep | AttachCpcFileStep):
             for name in ("cpc_codes", "cpc_subclasses", "cpc_lookup_status"):
                 add(step.table, name)
         elif isinstance(step, CpcMatchStep):
@@ -825,7 +869,7 @@ def _referenced_columns(step: BatchStep) -> tuple[str, list[str]]:  # noqa: PLR0
         return step.table, [*step.group_by, *distinct]
     if isinstance(step, TransferTypeStep):
         return step.table, [step.assignor_column, step.assignee_column]
-    if isinstance(step, FetchCpcStep):
+    if isinstance(step, FetchCpcStep | AttachCpcFileStep):
         return step.table, [step.column]
     if isinstance(step, CpcMatchStep):
         return step.table, [step.buyer_column, step.number_column, "cpc_codes"]
@@ -892,6 +936,13 @@ def validate_template(  # noqa: PLR0912 - one validation branch per step kind
                     f"Step {index} (ReferenceMatch): {problem}"
                     for problem in _reference_column_problems(step)
                 )
+        if isinstance(step, AttachCpcFileStep):
+            if not step.source_path:
+                warnings.append(f"Step {index} (AttachCpcFile): no CPC file set.")
+            elif not Path(step.source_path).is_file():
+                warnings.append(
+                    f"Step {index} (AttachCpcFile): CPC file not found: {step.source_path}"
+                )
         if isinstance(step, CpcMatchStep) and step.portfolio_mode == "footprint_file":
             if not step.portfolio_path:
                 warnings.append(f"Step {index} (CpcMatch): no portfolio footprint file set.")
@@ -953,6 +1004,7 @@ class FileResult:
     # (alias, canonical, score) pairs the normalize steps learned while processing this file.
     learned: list[tuple[str, str, int]] = field(default_factory=list[tuple[str, str, int]])
     steps: list[StepStat] = field(default_factory=list[StepStat])  # per-step audit trail
+    step_outputs: list[str] = field(default_factory=list[str])  # per-step trace files (trace mode)
 
 
 @dataclass(slots=True)
@@ -1017,6 +1069,7 @@ def _needed_tables(template: BatchTemplate) -> set[str] | None:
             | TransferTypeStep
             | ReferenceMatchStep
             | FetchCpcStep
+            | AttachCpcFileStep
             | CpcMatchStep,
         ):
             needed.add(step.table)  # every non-export step reads/writes a named source table
@@ -1480,6 +1533,42 @@ def _apply_fetch_cpc(
         )
 
 
+def _apply_attach_cpc_file(
+    tables: dict[str, pa.Table], step: AttachCpcFileStep, emit: OnEvent
+) -> None:
+    table = tables.get(step.table)
+    if table is None:
+        emit(BatchEvent("info", f"  skip attach_cpc_file: table '{step.table}' not present"))
+        return
+    if step.column not in table.column_names:
+        emit(
+            BatchEvent(
+                "info", f"  skip attach_cpc_file: column '{step.column}' not in '{step.table}'"
+            )
+        )
+        return
+    if not step.source_path or not Path(step.source_path).is_file():
+        emit(BatchEvent("info", f"  skip attach_cpc_file: CPC file '{step.source_path}' missing"))
+        return
+    out, stats = attach_cpc_from_file(
+        table,
+        number_column=step.column,
+        kind_column=step.kind_column,
+        source_path=Path(step.source_path),
+        patent_column=step.patent_column,
+        code_column=step.code_column,
+        separator=step.separator,
+    )
+    tables[step.table] = out
+    emit(
+        BatchEvent(
+            "info",
+            f"  attach_cpc_file {step.table}.{step.column}: {stats.found:,}/{stats.eligible:,} "
+            f"grants matched from {Path(step.source_path).name} (hit-rate {stats.hit_rate:.0%})",
+        )
+    )
+
+
 def _apply_cpc_match(
     tables: dict[str, pa.Table], step: CpcMatchStep, ctx: CpcRunContext, emit: OnEvent
 ) -> None:
@@ -1553,6 +1642,8 @@ def _apply_step(  # noqa: PLR0912, PLR0913 - one branch per step kind
         _apply_reference_match(tables, step, emit)
     elif isinstance(step, FetchCpcStep):
         _apply_fetch_cpc(tables, step, _resolve_cpc_ctx(cpc_ctx), emit)
+    elif isinstance(step, AttachCpcFileStep):
+        _apply_attach_cpc_file(tables, step, emit)
     elif isinstance(step, CpcMatchStep):
         _apply_cpc_match(tables, step, _resolve_cpc_ctx(cpc_ctx), emit)
     else:
@@ -1600,7 +1691,24 @@ def _warn_if_emptied(  # noqa: PLR0913 - a small guard threading the loop's loca
     return ""
 
 
-def _process_input(  # noqa: PLR0913 - threads collaborators; one branch per step kind
+def _trace_step_outputs(
+    tables: dict[str, pa.Table], touched: list[str], index: int, source_dir: Path
+) -> list[str]:
+    """Write a step's resulting table(s) to ``<source>/steps/NN_<table>.parquet`` for review."""
+    steps_dir = source_dir / "steps"
+    steps_dir.mkdir(parents=True, exist_ok=True)
+    written: list[str] = []
+    for name in touched:
+        table = tables.get(name)
+        if table is None:
+            continue
+        path = steps_dir / f"{index:02d}_{_safe_name(name)}.parquet"
+        export(table, path, "parquet")
+        written.append(str(path))
+    return written
+
+
+def _process_input(  # noqa: PLR0913 - threads collaborators; one branch per kind
     template: BatchTemplate,
     source: Path,
     template_dir: Path,
@@ -1609,12 +1717,14 @@ def _process_input(  # noqa: PLR0913 - threads collaborators; one branch per ste
     on_parse: OnParse | None = None,
     memory: EntityMemory | None = None,
     cpc_ctx: CpcRunContext | None = None,
+    trace_steps: bool = False,
 ) -> FileResult:
     memory = memory if memory is not None else EntityMemory()
     learned_before = len(memory.learned)
     start = time.monotonic()
     work_dir: Path | None = None
     step_stats: list[StepStat] = []  # audit trail (partial stats survive a mid-run failure)
+    step_outputs: list[str] = []  # per-step trace files, when trace_steps is on
     try:
         if source.is_file():
             work_dir = Path(tempfile.mkdtemp(prefix="uspto_batch_"))
@@ -1633,6 +1743,7 @@ def _process_input(  # noqa: PLR0913 - threads collaborators; one branch per ste
             before_cols: set[str] = (
                 set(tables[table_name].column_names) if table_name in tables else set()
             )
+            before_tables = set(tables)
             outputs.extend(
                 _apply_step(tables, step, memory, used_targets, source_dir, emit, cpc_ctx)
             )
@@ -1653,6 +1764,11 @@ def _process_input(  # noqa: PLR0913 - threads collaborators; one branch per ste
                     note=note,
                 )
             )
+            if trace_steps:  # the mutated table plus any new tables the step created
+                touched = ([table_name] if table_name in tables else []) + sorted(
+                    set(tables) - before_tables
+                )
+                step_outputs.extend(_trace_step_outputs(tables, touched, index, source_dir))
         rows = {name: table.num_rows for name, table in tables.items()}
         result = FileResult(
             str(source),
@@ -1661,11 +1777,16 @@ def _process_input(  # noqa: PLR0913 - threads collaborators; one branch per ste
             rows=rows,
             learned=memory.learned[learned_before:],
             steps=step_stats,
+            step_outputs=step_outputs,
         )
     except Exception as exc:  # per-file isolation: log, record, and keep going
         logger.exception("batch: failed on %s", source)
         result = FileResult(
-            str(source), ok=False, error=f"{type(exc).__name__}: {exc}", steps=step_stats
+            str(source),
+            ok=False,
+            error=f"{type(exc).__name__}: {exc}",
+            steps=step_stats,
+            step_outputs=step_outputs,
         )
     finally:
         if work_dir is not None:
@@ -1682,6 +1803,7 @@ def _process_one(  # noqa: PLR0913 - picklable worker threading the run's collab
     event_queue: Any,
     memory: EntityMemory,
     cpc_ctx: CpcRunContext | None = None,
+    trace_steps: bool = False,
 ) -> FileResult:
     """Picklable process-pool worker: streams events/progress live via ``event_queue``.
 
@@ -1699,6 +1821,7 @@ def _process_one(  # noqa: PLR0913 - picklable worker threading the run's collab
         on_parse=lambda count: event_queue.put(("parse", str(source), count)),
         memory=memory,
         cpc_ctx=cpc_ctx,
+        trace_steps=trace_steps,
     )
 
 
@@ -1768,6 +1891,7 @@ def _run_parallel(  # noqa: PLR0913 - internal helper threading the run's collab
     memory: EntityMemory,
     cpc_ctx: CpcRunContext | None = None,
     should_stop: Callable[[], bool] = _never_stop,
+    trace_steps: bool = False,
 ) -> tuple[list[FileResult], bool]:
     """Process inputs across a worker pool, emitting each file's events plus a combined total.
 
@@ -1820,7 +1944,15 @@ def _run_parallel(  # noqa: PLR0913 - internal helper threading the run's collab
             # ever shows up in profiles.
             futures = {
                 pool.submit(
-                    _process_one, template, src, template_dir, src_dir, event_queue, memory, cpc_ctx
+                    _process_one,
+                    template,
+                    src,
+                    template_dir,
+                    src_dir,
+                    event_queue,
+                    memory,
+                    cpc_ctx,
+                    trace_steps,
                 ): src
                 for src, src_dir in zip(inputs, source_dirs, strict=True)
             }
@@ -1873,24 +2005,26 @@ def _write_run_log(run_dir: Path, template: BatchTemplate, results: list[FileRes
     log_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _run_relative(raw: str, run_dir: Path) -> str:
+    """A path relative to the run folder (defensive: absolute if somehow outside it)."""
+    path = Path(raw)
+    try:
+        return str(path.relative_to(run_dir))
+    except ValueError:
+        return str(path)
+
+
 def _output_entries(result: FileResult, run_dir: Path) -> list[dict[str, Any]]:
     """Manifest/summary rows for one file's written outputs (paths relative to the run folder)."""
-    entries: list[dict[str, Any]] = []
-    for raw in result.outputs:
-        path = Path(raw)
-        try:
-            rel = str(path.relative_to(run_dir))
-        except ValueError:  # defensive: outputs are always inside the run dir
-            rel = str(path)
-        entries.append(
-            {
-                "path": rel,
-                "table": path.stem,
-                "format": path.suffix.lstrip("."),
-                "rows": result.rows.get(path.stem),
-            }
-        )
-    return entries
+    return [
+        {
+            "path": _run_relative(raw, run_dir),
+            "table": Path(raw).stem,
+            "format": Path(raw).suffix.lstrip("."),
+            "rows": result.rows.get(Path(raw).stem),
+        }
+        for raw in result.outputs
+    ]
 
 
 def _write_manifest(  # noqa: PLR0913 - snapshotting the whole run takes the run's collaborators
@@ -1942,6 +2076,7 @@ def _write_manifest(  # noqa: PLR0913 - snapshotting the whole run takes the run
                 "rows": result.rows,
                 "outputs": _output_entries(result, run_dir),
                 "steps": [asdict(stat) for stat in result.steps],
+                "step_outputs": [_run_relative(p, run_dir) for p in result.step_outputs],
             }
             for result in results
         ],
@@ -2086,6 +2221,7 @@ def run_batch(  # noqa: PLR0913 - a clear public entry point with keyword-only o
     cpc_ctx: CpcRunContext | None = None,
     should_stop: Callable[[], bool] | None = None,
     strict: bool = False,
+    trace_steps: bool = False,
 ) -> BatchResult:
     """Run ``template`` over ``inputs``, writing outputs under ``out_root``.
 
@@ -2106,6 +2242,8 @@ def run_batch(  # noqa: PLR0913 - a clear public entry point with keyword-only o
         strict: When True, any ``validate_template`` warning aborts the run (before any output
             is written) by raising :class:`TemplateValidationError`. The default emits the
             warnings as error events and continues.
+        trace_steps: When True, each enabled step's resulting table(s) are written to
+            ``<source-stem>/steps/NN_<table>.parquet`` for manual review of every intermediate.
 
     Returns:
         A :class:`BatchResult` summarizing successes, failures, and per-file details;
@@ -2140,6 +2278,7 @@ def run_batch(  # noqa: PLR0913 - a clear public entry point with keyword-only o
             memory,
             cpc_ctx,
             should_stop=stop,
+            trace_steps=trace_steps,
         )
         # Workers mutate pickled copies of the memory; merge what they learned back in. (The
         # sequential path shares ``memory`` in-process, so its learned pairs are already there.)
@@ -2163,6 +2302,7 @@ def run_batch(  # noqa: PLR0913 - a clear public entry point with keyword-only o
                 ),
                 memory=memory,
                 cpc_ctx=cpc_ctx,
+                trace_steps=trace_steps,
             )
             _emit_file_done(result, emit)
             results.append(result)
@@ -2286,6 +2426,9 @@ def describe_step(step: BatchStep) -> str:  # noqa: PLR0911, PLR0912 - one line 
         )
     if isinstance(step, FetchCpcStep):
         return f"Fetch CPC · {step.table}.{step.column} → cpc_codes"
+    if isinstance(step, AttachCpcFileStep):
+        src = Path(step.source_path).name or "(no file)"
+        return f"Attach CPC file · {step.table}.{step.column} vs {src} → cpc_codes"
     if isinstance(step, CpcMatchStep):
         portfolio = Path(step.portfolio_path).name or "(no file)"
         return f"CPC match · {step.table} vs {portfolio} · {step.portfolio_mode} → {step.out_table}"

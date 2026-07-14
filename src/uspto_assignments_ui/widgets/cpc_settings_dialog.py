@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 
+from PyQt6.QtCore import QThread
 from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -24,11 +25,15 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from uspto_assignments import CpcConfig
+from uspto_assignments import CpcConfig, make_source
 from uspto_assignments.cpcconfig import CPC_ENDPOINT_AS_OF
 
 from ..settings import CpcConfigStore
+from ..workers import CallWorker
 from .page import SectionLabel
+
+# A known granted patent used to probe the live API (has CPC codes).
+_TEST_PATENT = "10000000"
 
 _SOURCE_LABELS = [
     ("USPTO ODP / PatentSearch API", "uspto_odp_api"),
@@ -47,12 +52,16 @@ class CpcSettingsDialog(QDialog):
         super().__init__(parent)
         self._store = store
         config = store.load()
-        self.setWindowTitle("CPC data source")
+        self._thread: QThread | None = None  # live Test-connection probe (off the GUI thread)
+        self._worker: CallWorker | None = None
+        self.setWindowTitle("CPC data source — USPTO Open Data Portal API")
         self.setMinimumWidth(560)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 16, 20, 16)
         layout.setSpacing(10)
-        layout.addWidget(SectionLabel("CPC data source"))
+        layout.addWidget(
+            SectionLabel("CPC data source (USPTO Open Data Portal / PatentSearch API)")
+        )
 
         form = QFormLayout()
         self._type = QComboBox()
@@ -91,9 +100,16 @@ class CpcSettingsDialog(QDialog):
         self._key_status.setWordWrap(True)
         test = QPushButton("Check API key")
         test.clicked.connect(self._refresh_key_status)
+        self._test_btn = QPushButton("Test connection")
+        self._test_btn.setToolTip(
+            f"Fetch CPC codes for patent {_TEST_PATENT} from the live API to confirm the key + "
+            "endpoint work (uses one API call)."
+        )
+        self._test_btn.clicked.connect(self._test_connection)
         key_row = QHBoxLayout()
         key_row.addWidget(self._key_status, 1)
         key_row.addWidget(test)
+        key_row.addWidget(self._test_btn)
         layout.addLayout(key_row)
         self._api_key_env.textChanged.connect(self._refresh_key_status)
         self._refresh_key_status()
@@ -125,8 +141,9 @@ class CpcSettingsDialog(QDialog):
         layout.addLayout(cache_form)
 
         location = QLabel(
-            f"Saved to <code>{store.path()}</code>. Endpoint/auth verified as of "
-            f"{CPC_ENDPOINT_AS_OF}; re-verify against data.uspto.gov."
+            f"Live endpoint: <code>api.uspto.gov</code> (X-API-KEY header). Saved to "
+            f"<code>{store.path()}</code>. Endpoint/auth verified as of {CPC_ENDPOINT_AS_OF}; "
+            f"re-verify against data.uspto.gov."
         )
         location.setWordWrap(True)
         layout.addWidget(location)
@@ -150,6 +167,53 @@ class CpcSettingsDialog(QDialog):
                 f"⚠ ${name} is not set — export it before enabling network fetch "
                 f"(the key is never stored in the project)."
             )
+
+    def _test_connection(self) -> None:
+        """Live-probe the API: fetch one known patent's CPC codes off the GUI thread."""
+        if self._thread is not None:
+            return
+        source_config = self.config().source
+        if source_config.type != "local_file":  # force the network on for the probe only
+            source_config.offline_only = False
+        self._test_btn.setEnabled(False)
+        self._key_status.setText(f"Testing… fetching CPC for patent {_TEST_PATENT}")
+        config = CpcConfig()
+        config.source = source_config
+        thread = QThread(self)
+        worker = CallWorker(lambda: make_source(config).fetch([_TEST_PATENT]))
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_test_ready)
+        worker.failed.connect(self._on_test_failed)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(self._cleanup_test)
+        self._thread = thread
+        self._worker = worker
+        thread.start()
+
+    def _on_test_ready(self, result: object) -> None:
+        codes = result.get(_TEST_PATENT, []) if isinstance(result, dict) else []
+        if codes:
+            preview = ", ".join(codes[:3]) + ("…" if len(codes) > 3 else "")
+            self._key_status.setText(
+                f"✓ Connected — patent {_TEST_PATENT}: {len(codes)} CPC ({preview})"
+            )
+        else:
+            self._key_status.setText(
+                f"⚠ Connected but patent {_TEST_PATENT} returned no CPC codes — check the endpoint "
+                "and the response field."
+            )
+
+    def _on_test_failed(self, message: str) -> None:
+        self._key_status.setText(f"✗ Test failed: {message}")
+
+    def _cleanup_test(self) -> None:
+        if self._thread is not None:
+            self._thread.deleteLater()
+        self._thread = None
+        self._worker = None
+        self._test_btn.setEnabled(True)
 
     def config(self) -> CpcConfig:
         """Return the :class:`CpcConfig` reflecting the current form state."""

@@ -229,7 +229,7 @@ Launch with a file, a dataset folder, or blank:
 - **File**: `Open XML/ZIP…` (Ctrl+O) · `Open dataset folder…` · `Save processed…` (Ctrl+S) ·
   `Export current table…` (Ctrl+E) · `Export all tables…` · `Close dataset` (Ctrl+W) · `Exit`.
 - **Queries**: `Save current query…` · `Manage queries…`.
-- **Settings**: `Batch processing…` (Ctrl+B) · `Entity memory…` · `CPC data source…`.
+- **Settings**: `Batch processing…` (Ctrl+B) · `Entity memory…` · `CPC / USPTO API data source…`.
 - **Toolbar**: Open · Open dataset · Save · Export current · Export all · Manage queries · Batch · Close.
 
 **Load options** (shown when opening) — pick which tables/fields to load (a checkable
@@ -468,16 +468,20 @@ are **exact joins on the normalized grant number**, so they get their own step k
 **Configure the source once — *Settings ▸ CPC data source*.** The dialog edits a project config file
 (`cpc_config.json`, saved in the working folder, shareable — it holds **no secret**) covering:
 
-- **Source**: **USPTO ODP / PatentSearch API** (`data.uspto.gov`, default) or a **local bulk file**
-  (e.g. PatentsView `g_cpc_current.tsv`, offline & scale-safe). Endpoint/auth are config, verified
-  "as of" a date — re-verify against live docs, since USPTO endpoints change.
+- **Source**: **USPTO ODP / PatentSearch API** (default) or a **local bulk file**
+  (e.g. PatentsView `g_cpc_current.tsv`, offline & scale-safe). The live API is the USPTO Open Data
+  Portal Patent Search endpoint `https://api.uspto.gov/api/v1/patent/applications/search`,
+  authenticated with an `X-API-KEY` header (PatentsView migrated to `data.uspto.gov` on
+  2026-03-20; the old `search.patentsview.org` endpoint is dead and auto-repaired on load).
 - **API key**: stored **only as an environment-variable name** (default `USPTO_ODP_API_KEY`); the key
   itself is read from the environment at run time and never written to disk. The dialog shows whether
-  that variable is currently set.
+  that variable is currently set, and a **Test connection** button fires one live call (patent
+  10000000) to confirm the key + endpoint actually work, reporting the CPC codes it got back.
 - **Network posture**: **offline by default**. A `fetch_cpc` step reads the cache only and lists
-  uncached numbers; it hits the network **only** when you tick *Allow network for CPC fetch this run*
-  in the batch dialog. After the first fetch populates the cache (`data/cpc/`, TTL-controlled), every
-  run is offline and reproducible.
+  uncached numbers; it hits the network **only** when all three switches are on: `export
+  USPTO_ODP_API_KEY=…` (add it to `~/.bashrc` to persist), set **Network posture = Allow network
+  fetch**, and tick *Allow network for CPC fetch this run* in the batch dialog. After the first
+  fetch populates the cache (`data/cpc/`, TTL-controlled), every run is offline and reproducible.
 - **Match defaults**: overlap grain (`subclass` default / `main_group` / `full_symbol`), overlap
   metric (`shared_count` / `jaccard` / `rarity_weighted`), threshold, ranking weights, minimum
   in-domain patents, and the hit-rate floor. Keeping these in the config (not per-step) means every
@@ -527,6 +531,8 @@ Each template is applied to **each input independently**. Inputs can be USPTO `.
    **double-click a step to edit** it; *Remove*.
 5. **Output** — defaults to your last-used folder (or `data/out`); **Workers** (1 = sequential;
    >1 processes files in parallel). File dialogs remember where you last picked.
+   **Save each step's output** (checkbox) writes every enabled step's resulting table to
+   `<source>/steps/NN_<table>.parquet` so you can open and check each intermediate — see below.
 6. **Run batch** — watch the live **console** and the per-file progress bar; a run log is written
    too. A **Cancel** button appears while a run is active (cancellation is per-file: the file in
    flight finishes, the rest are skipped, and the summary notes what was cancelled). Closing the
@@ -546,6 +552,26 @@ Each template is applied to **each input independently**. Inputs can be USPTO `.
 ```
 
 Re-running never mixes with earlier outputs (a duplicate timestamp gets a `` (1)`` suffix).
+
+**Save each step's output (step-by-step review).** Tick the checkbox to trace the pipeline: every
+enabled step's resulting table(s) are written under each source's `steps/` folder as
+`NN_<table>.parquet` (`NN` = step number), so you can open any intermediate and check exactly what
+that step produced — filter → normalize → match, one file each:
+
+```
+<source-stem>/
+├── steps/
+│   ├── 01_flat.parquet        ← after step 1 (e.g. Filter)
+│   ├── 02_flat.parquet        ← after step 2 (e.g. Normalize)
+│   └── 03_flat.parquet        ← after step 3 (e.g. Attach CPC)
+└── <table>.<ext>              ← the final Export outputs
+```
+
+The files are **Parquet** (lossless, list columns like `cpc_codes` intact) — reopen any of them
+in the app via *Open dataset folder* (point at a folder holding one). Steps that create a new table
+(Aggregate, CPC match) trace that table too; the Export step writes the real exports, not a trace.
+The manifest lists every trace file. Leave the box **off** for normal runs — tracing multiplies the
+files written, so it's meant for reviewing/validating on a **shortlisted** set, not bulk runs.
 
 **Parallel runs** — with *Workers > 1* and multiple inputs, files are processed in separate
 processes; the console shows distinct worker **PIDs**, interleaved per-file progress, and a combined
@@ -616,6 +642,17 @@ Source/cache/offline behavior come from the project CPC config, **not** the step
 join on the normalized grant number — deliberately *not* the fuzzy `reference_match` step (which,
 pointed at patent numbers, would silently corrupt them). **Offline by default**: uncached numbers are
 fetched only when *Allow network* is checked for the run.
+
+#### Attach CPC from file
+Same output as *Fetch CPC* (`cpc_codes`, `cpc_subclasses`, `cpc_lookup_status`), but the codes come
+from an **uploaded file** — a PatSeer export, or any CSV/TSV/Parquet of patent→CPC — instead of the
+API. **Fully offline, no cache, no key.** Fields: `table`, `column` (the table's patent-number
+column) + `kind_column`, `source_path` (browse to the file), `patent_column` (the file's
+patent-number column, default `Publication Number`), `code_column` (the file's CPC column, default
+`CPC`), and `separator` — set it (e.g. `;` or `|`) to split a cell that packs **several CPC codes**
+(typical PatSeer), or leave it blank for one code per row (USPTO `g_cpc_current` bulk layout). The
+join normalizes the same grant numbers as *Fetch CPC*, so it's exact and grant-only. Ideal after
+shortlisting records — attach CPC from a targeted export without touching the network.
 
 #### CPC match
 Match a sales-package portfolio against buyers' CPC footprints and rank buyers per portfolio patent
@@ -806,10 +843,21 @@ source ▸ File patent column*), and confirm you're pointing at a CPC table, not
 ### "N grant patents are uncached — enable network to fetch"
 
 `fetch_cpc` is **offline by default**: it found grant patents with no cached CPC and didn't call the
-API. Tick ***Allow network for CPC fetch this run*** in the batch dialog (and make sure the API-key
-env var named in *Settings ▸ CPC data source* is exported) to fetch and cache them. Subsequent runs
-read from the cache offline. Or point the source at a local bulk CPC file, which never needs the
-network.
+API. To fetch and cache them, turn on all three switches: `export USPTO_ODP_API_KEY=…`, set
+**Network posture = Allow network fetch** in *Settings ▸ CPC / USPTO API data source*, and tick
+***Allow network for CPC fetch this run*** in the batch dialog. Subsequent runs read from the cache
+offline. Or point the source at a local bulk CPC file, which never needs the network. Use the
+dialog's **Test connection** button first to confirm the key + endpoint work.
+
+### CPC fetch fails with a connection or HTTP 4xx error
+
+The live endpoint is `https://api.uspto.gov/api/v1/patent/applications/search` (PatentsView moved to
+the USPTO Open Data Portal on 2026-03-20; the old `search.patentsview.org` host is gone — a saved
+config still pointing there is auto-repaired on load). An **HTTP 401/403** means the key is
+missing or wrong: check that `USPTO_ODP_API_KEY` is exported and valid (the **Test connection**
+button reports the exact status). Get a key from <https://data.uspto.gov>. A **name-resolution /
+timeout** error means no network path to `api.uspto.gov` — fetch is skipped and rows stay
+`uncached`.
 
 ### The exported `year` column is blank for some rows
 

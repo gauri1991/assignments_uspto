@@ -73,7 +73,7 @@ producing step can reference them:
 | `derive` from `source` with `op` | `<source>_<op>` |
 | `compare` with `action: "flag"` | `<left>_matches_<right>` (values `"true"` / `"false"`); with `emit_score`: `<target>_score`; with `review_threshold>0`: `<target>_review` (added before any drop/keep filtering) |
 | `reference_match` on `column` | `<column>_disambiguated`, `<column>_matched` (`"true"`/`"false"`), `<column>_assignee_id` (only if `id_column` set); with `emit_score`: `<column>_match_score`; with `review_threshold>0`: `<column>_match_review` |
-| `fetch_cpc` | `cpc_codes` (list), `cpc_subclasses` (list), `cpc_lookup_status` |
+| `fetch_cpc` / `attach_cpc_file` | `cpc_codes` (list), `cpc_subclasses` (list), `cpc_lookup_status` |
 | `cpc_match` | creates **two new tables**: `matched_buyers_by_portfolio_patent` and `matched_buyers_overall` |
 | `aggregate` | creates a **new table** named `<table>_by_<group_by joined by _>` with columns = the group-by columns + `count` (+ `<count_distinct>_distinct` if set) |
 
@@ -277,6 +277,18 @@ omitted) **auto-derives** the name per §2a — prefer leaving it blank so names
   default**: uncached numbers are only fetched when the run enables the network (the batch dialog's
   *Allow network* checkbox). A low hit-rate is warned here and **aborts** in `cpc_match` — it means
   the patent-number/CPC-key formats are misaligned, not "no data".
+
+### `attach_cpc_file` — attach CPC from an uploaded file (PatSeer/CSV/Parquet), offline
+```json
+{ "kind": "attach_cpc_file", "table": "flat", "column": "doc_number", "kind_column": "doc_kind",
+  "source_path": "cpc/patseer_export.csv", "patent_column": "Publication Number",
+  "code_column": "CPC", "separator": ";" }
+```
+- Same output columns as `fetch_cpc` (`cpc_codes` / `cpc_subclasses` / `cpc_lookup_status`) and the
+  same grant-only exact join, but the codes come from `source_path` — **fully offline, no API, no
+  cache**. `patent_column`/`code_column` name the columns in the file; `separator` splits a cell
+  packing several CPC codes (typical PatSeer export), blank = one code per row (USPTO
+  `g_cpc_current` bulk). `source_path` must exist at run time.
 
 ### `cpc_match` — rank buyers per portfolio patent by CPC overlap
 ```json

@@ -6,6 +6,8 @@ No test touches the real network: the API source is exercised through an injecte
 from __future__ import annotations
 
 import json
+import re
+import urllib.error
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +15,7 @@ import pyarrow as pa
 import pytest
 
 from uspto_assignments import (
+    AttachCpcFileStep,
     BatchTemplate,
     CpcMatchStep,
     CpcRunContext,
@@ -29,12 +32,14 @@ from uspto_assignments.cpcconfig import CpcConfig, load_config, save_config
 from uspto_assignments.cpcmatch import (
     HitRateError,
     attach_cpc,
+    attach_cpc_from_file,
     grain_of,
     load_portfolio_footprint,
     match_portfolio,
     reduce_codes,
 )
 from uspto_assignments.datasource import (
+    ApiAuthError,
     ApiBudgetError,
     CpcCache,
     LocalFileCpcSource,
@@ -90,20 +95,25 @@ def test_grain_reduction() -> None:
 # ------------------------------------------------------------------ fake transport
 
 
+_QUERY_IDS = re.compile(r"patentNumber:\(([^)]*)\)")
+
+
 def _fake_transport(catalog: dict[str, list[str]]) -> Any:
-    """Return a transport that answers a POST body's ``q.patent_id`` list from ``catalog``."""
+    """Return a transport that answers an ODP query's OR-joined patent numbers from ``catalog``."""
     calls: list[int] = []
 
     def transport(_url: str, body: bytes, headers: dict[str, str]) -> bytes:
-        assert headers.get("X-Api-Key")  # key must be sent
-        ids = json.loads(body.decode("utf-8"))["q"]["patent_id"]
+        assert headers.get("X-API-KEY")  # key must be sent
+        query = json.loads(body.decode("utf-8"))["q"]
+        match = _QUERY_IDS.search(query)
+        ids = match.group(1).split(" OR ") if match and match.group(1) else []
         calls.append(len(ids))
-        patents = [
-            {"patent_id": pid, "cpc_current": [{"cpc_group_id": c} for c in catalog[pid]]}
+        records = [
+            {"applicationMetaData": {"patentNumber": pid, "cpcClassificationBag": catalog[pid]}}
             for pid in ids
             if pid in catalog
         ]
-        return json.dumps({"patents": patents}).encode("utf-8")
+        return json.dumps({"patentFileWrapperDataBag": records}).encode("utf-8")
 
     transport.calls = calls  # type: ignore[attr-defined]  # test introspection handle
     return transport
@@ -122,6 +132,50 @@ def test_api_source_parses_and_batches(monkeypatch: pytest.MonkeyPatch) -> None:
     result = source.fetch(["10000001", "10000002", "10000003"])
     assert result == catalog
     assert transport.calls == [2, 1]  # batched at size 2
+
+
+def test_api_source_preserves_padded_symbols(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("USPTO_ODP_API_KEY", "secret")
+
+    def padded_transport(_url: str, body: bytes, headers: dict[str, str]) -> bytes:
+        assert headers.get("X-API-KEY")
+        records = [
+            {
+                "applicationMetaData": {
+                    "patentNumber": "10000001",
+                    "cpcClassificationBag": ["G01S   7/4863", "G01S  17/894"],
+                }
+            }
+        ]
+        return json.dumps({"patentFileWrapperDataBag": records}).encode("utf-8")
+
+    source = UsptoOdpApiSource(config=CpcConfig().source, transport=padded_transport)
+    # fetch preserves the raw (space-padded) symbols; grain_of strips them downstream.
+    assert source.fetch(["10000001"]) == {"10000001": ["G01S   7/4863", "G01S  17/894"]}
+
+
+def test_api_source_raises_on_http_4xx(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("USPTO_ODP_API_KEY", "badkey")
+
+    def failing_transport(url: str, _body: bytes, _headers: dict[str, str]) -> bytes:
+        raise urllib.error.HTTPError(url, 403, "Forbidden", {}, None)  # type: ignore[arg-type]
+
+    config = CpcConfig()
+    config.source.retries = 2
+    source = UsptoOdpApiSource(config=config.source, transport=failing_transport)
+    with pytest.raises(ApiAuthError, match="HTTP 403"):  # 4xx is not retried
+        source.fetch(["10000001"])
+
+
+def test_api_source_treats_404_as_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("USPTO_ODP_API_KEY", "secret")
+
+    def not_found_transport(url: str, _body: bytes, _headers: dict[str, str]) -> bytes:
+        # ODP returns 404 for a query that matches no records — an empty result, not an error.
+        raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)  # type: ignore[arg-type]
+
+    source = UsptoOdpApiSource(config=CpcConfig().source, transport=not_found_transport)
+    assert source.fetch(["6534515", "99999999999"]) == {}  # no raise; all unresolved
 
 
 def test_api_source_requires_key(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -502,3 +556,63 @@ def test_fetch_cpc_offline_reports_uncached(tmp_path: Path) -> None:
         on_event=lambda e: events.append(e.message),
     )
     assert any("uncached" in m for m in events)
+
+
+# ------------------------------------------------------------------ attach CPC from file
+
+
+def test_attach_cpc_from_file_one_code_per_row(tmp_path: Path) -> None:
+    tsv = tmp_path / "cpc.tsv"
+    tsv.write_text(
+        "patent_id\tcpc_group\n10000001\tH04L9/32\n10000001\tG06F3/01\n10000002\tH01L21/02\n",
+        encoding="utf-8",
+    )
+    table = pa.table(
+        {"doc_number": ["10000001", "10000002", "99999999"], "doc_kind": ["B2", "B2", "B2"]}
+    )
+    out, stats = attach_cpc_from_file(
+        table,
+        number_column="doc_number",
+        kind_column="doc_kind",
+        source_path=tsv,
+        patent_column="patent_id",
+        code_column="cpc_group",
+        separator="",  # one code per row
+    )
+    codes = out.column("cpc_codes").to_pylist()
+    status = out.column("cpc_lookup_status").to_pylist()
+    assert sorted(codes[0] or []) == ["G06F3/01", "H04L9/32"]
+    assert codes[1] == ["H01L21/02"]
+    assert status == ["found", "found", "not_found"]
+    assert stats.found == 2
+
+
+def test_attach_cpc_from_file_patseer_multi_code_cell(tmp_path: Path) -> None:
+    csv = tmp_path / "patseer.csv"
+    csv.write_text(
+        "Publication Number,CPC\n10000001,H04L9/32; G06F3/01\n10000002,H01L21/02\n",
+        encoding="utf-8",
+    )
+    table = pa.table({"doc_number": ["10000001", "10000002"], "doc_kind": ["B2", "B2"]})
+    out, _stats = attach_cpc_from_file(
+        table,
+        number_column="doc_number",
+        kind_column="doc_kind",
+        source_path=csv,
+        patent_column="Publication Number",
+        code_column="CPC",
+        separator=";",  # one cell packs several CPCs
+    )
+    codes = out.column("cpc_codes").to_pylist()
+    assert sorted(codes[0] or []) == ["G06F3/01", "H04L9/32"]  # the cell was split
+    assert out.column("cpc_subclasses").to_pylist()[0] == ["H04L", "G06F"]
+
+
+def test_attach_cpc_file_step_roundtrip_schema_and_apply(tmp_path: Path) -> None:
+    step = AttachCpcFileStep(
+        table="flat", source_path="/x/patseer.csv", patent_column="Pub", code_column="CPCs"
+    )
+    assert _step_from_dict(step.to_dict()).to_dict() == step.to_dict()
+    cols = columns_after(LoadConfig(), [step], upto=1)["flat"]
+    for name in ("cpc_codes", "cpc_subclasses", "cpc_lookup_status"):
+        assert name in cols
