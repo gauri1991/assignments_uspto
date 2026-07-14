@@ -150,6 +150,17 @@ warnings for each template. Regenerate after any template change.
 - ⚠ Step 1 (CpcMatchStep): column 'cpc_codes' is not available on 'flat' yet.
 - ⚠ Step 1 (CpcMatch): portfolio file not found: portfolio.txt
 
+## 10_dropped_sellers_audit.json
+
+### 10 - Dropped sellers audit (off-gazetteer assignors)
+
+1. Filter · flat · 3 clause(s) · AND
+2. Reference match · flat.assignor_names vs reference.parquet · flag · score · review<95
+3. Filter · flat · 1 clause(s) · AND
+4. Export · csv · flat
+
+**Warnings:** none
+
 ## buyer_identification_templates.json
 
 ### Buyers - firm-to-firm transactions (clean, enriched)

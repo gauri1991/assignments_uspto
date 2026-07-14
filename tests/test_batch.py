@@ -1122,3 +1122,21 @@ def test_run_batch_appends_runs_index(tmp_path: Path) -> None:
     assert len(rows) == 3  # header + two runs
     assert rows[1][6] == str(Path(first.run_dir).relative_to(out))
     assert rows[2][6] == str(Path(second.run_dir).relative_to(out))
+
+
+def test_template_10_loads_and_validates(tmp_path: Path) -> None:
+    path = Path(__file__).resolve().parent.parent / "templates" / "10_dropped_sellers_audit.json"
+    template = load_templates(path)[0]
+    assert template.name == "10 - Dropped sellers audit (off-gazetteer assignors)"
+    assert len(template.steps) == 4
+
+    # Validate against a tmp reference so the test doesn't depend on the local gazetteer build;
+    # this also proves the matched-flag column flows to step 3 via columns_after.
+    reference = tmp_path / "reference.parquet"
+    pq.write_table(  # pyright: ignore[reportUnknownMemberType]
+        pa.table({"organization": ["ACME CORPORATION"], "assignee_id": ["A1"]}), reference
+    )
+    step = template.steps[1]
+    assert isinstance(step, ReferenceMatchStep)
+    step.reference_path = str(reference)
+    assert validate_template(template.load, template.steps) == []
