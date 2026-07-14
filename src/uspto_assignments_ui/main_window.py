@@ -430,6 +430,7 @@ class MainWindow(QMainWindow):
         for name in store.names:
             table = store.table(name)
             panel = TablePanel(table, page_size=self._page_size)
+            panel.selection_changed.connect(lambda p=panel: self._show_selection_count(p))
             self._tabs.addTab(panel, f"{name}  ({table.num_rows:,})")
         total = sum(store.row_counts().values())
         self._stack.setCurrentWidget(self._tabs)
@@ -518,6 +519,12 @@ class MainWindow(QMainWindow):
         return self._tabs
 
     # -- status / progress -------------------------------------------------
+    def _show_selection_count(self, panel: TablePanel) -> None:
+        """Mirror the panel's row selection in the status bar (Export offers a 'Selected' scope)."""
+        count = len(panel.selected_source_rows())
+        if count:
+            self._set_status(f"{count:,} row(s) selected — Export can target the selection")
+
     def _show_busy(self, message: str) -> None:
         self._progress.setRange(0, 0)  # indeterminate: totals are unknown mid-stream
         self._progress.setVisible(True)

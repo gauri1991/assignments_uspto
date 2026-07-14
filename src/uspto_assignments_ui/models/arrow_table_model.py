@@ -79,10 +79,6 @@ class ArrowTableModel(QAbstractTableModel):
         """Map a visible row index to its row index in the underlying table."""
         return int(self._view[view_row])
 
-    def source_rows(self, view_rows: list[int]) -> list[int]:
-        """Map visible row indices to underlying-table row indices."""
-        return [int(self._view[r]) for r in view_rows]
-
     # -- Accessors ----------------------------------------------------------
     @property
     def table(self) -> pa.Table:
@@ -93,8 +89,3 @@ class ArrowTableModel(QAbstractTableModel):
     def columns(self) -> list[str]:
         """Column names in order."""
         return list(self._columns)
-
-    @property
-    def visible_count(self) -> int:
-        """Number of rows currently visible (after filtering)."""
-        return int(self._view.shape[0])

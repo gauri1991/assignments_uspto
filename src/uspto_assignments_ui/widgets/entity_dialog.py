@@ -125,15 +125,16 @@ class EntityDialog(QDialog):
         self._alias_timer.setSingleShot(True)
         self._alias_timer.setInterval(_SEARCH_DEBOUNCE_MS)
         self._alias_search.textChanged.connect(lambda _t: self._alias_timer.start())
-        self._alias_timer.timeout.connect(
-            lambda: self._alias_model.set_filter(self._alias_search.text())
-        )
+        self._alias_timer.timeout.connect(self._refresh_aliases)
         col.addWidget(self._alias_search)
 
         self._alias_model = EntityAliasModel(self._memory)
         self._alias_table = DataTable()
         self._alias_table.setModel(self._alias_model)
         col.addWidget(self._alias_table, 1)
+        self._alias_note = QLabel()
+        self._alias_note.setProperty("role", "hint")
+        col.addWidget(self._alias_note)
         hint = QLabel("Double-click a canonical cell to reassign an alias.")
         hint.setProperty("role", "hint")
         col.addWidget(hint)
@@ -184,6 +185,19 @@ class EntityDialog(QDialog):
         self._path_label.setText(f"Stored at: {self._store.path}")
         self._refresh_canonicals()
         self._alias_model.refresh()
+        self._update_alias_note()
+
+    def _refresh_aliases(self) -> None:
+        self._alias_model.set_filter(self._alias_search.text())
+        self._update_alias_note()
+
+    def _update_alias_note(self) -> None:
+        count = self._alias_model.rowCount()
+        self._alias_note.setText(
+            f"showing the first {count:,} matches — refine the search to see the rest"
+            if self._alias_model.truncated
+            else f"{count:,} match(es)"
+        )
 
     def _refresh_canonicals(self) -> None:
         needle = self._canon_search.text().strip().lower()

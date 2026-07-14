@@ -69,3 +69,16 @@ def test_model_reset_view_restores_all_rows(qtbot: Any, tmp_path: Path) -> None:
     assert model.rowCount() == 1
     model.reset_view()
     assert model.rowCount() == 3
+
+
+def test_row_selection_updates_status_bar(qtbot: Any, tmp_path: Path) -> None:
+    create_app([])
+    store = parse_to_store(FIXTURE, tmp_path)
+    window = MainWindow(store)
+    qtbot.addWidget(window)
+    panel = window.current_panel()
+    assert panel is not None
+    panel._view.selectRow(0)
+    status = window.statusBar()
+    assert status is not None
+    assert "selected" in status.currentMessage()

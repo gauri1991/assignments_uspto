@@ -725,3 +725,19 @@ def test_build_reference_failure_does_not_pollute_path(
     dialog._build_reference()
     assert dialog._reference.text() == "/existing/ref.parquet"  # error never becomes the path
     assert warnings and "bad file" in warnings[0]
+
+
+def test_alias_tab_notes_truncation(qtbot: Any, tmp_path: Path) -> None:
+    create_app([])
+    memory = EntityMemory(aliases={f"alias {i:05d}": f"Canon {i % 7}" for i in range(5100)})
+    store = EntityMemoryStore(tmp_path / "entities.json")
+    store.save(memory)
+    dialog = EntityDialog(store)
+    qtbot.addWidget(dialog)
+    assert dialog._alias_model.truncated
+    assert "refine the search" in dialog._alias_note.text()
+
+    dialog._alias_search.setText("alias 00001")
+    dialog._refresh_aliases()  # what the debounce timer fires
+    assert not dialog._alias_model.truncated
+    assert "match(es)" in dialog._alias_note.text()
