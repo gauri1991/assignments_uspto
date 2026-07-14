@@ -42,6 +42,33 @@ def _delimiter_for(path: Path, override: str) -> str:
     return "," if path.suffix.lower() == ".csv" else "\t"
 
 
+def reference_columns(path: Path, delimiter: str = "") -> list[str]:
+    """The column names available in a reference file (cheap: parquet schema / CSV header only)."""
+    if path.suffix.lower() == ".parquet":
+        return list(pq.read_schema(path).names)
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        header = handle.readline().rstrip("\r\n")
+    return header.split(_delimiter_for(path, delimiter))
+
+
+def _check_reference_columns(path: Path, columns: list[str], delimiter: str) -> None:
+    """Raise a clear ValueError when the reference file lacks a requested column.
+
+    Without this, pyarrow surfaces an opaque ``Field "assignee_id" does not exist in schema`` —
+    typically because a compact reference was built without an id column (organization only)
+    while the step still names one.
+    """
+    available = reference_columns(path, delimiter)
+    missing = [c for c in columns if c not in available]
+    if missing:
+        raise ValueError(
+            f"reference '{path.name}' has no column(s) {', '.join(missing)!r} "
+            f"(available: {', '.join(available)}). A compact reference built without an id "
+            "column has only 'organization' — clear the step's id column, or rebuild the "
+            "compact file with an id column."
+        )
+
+
 def iter_reference_batches(path: Path, columns: list[str], delimiter: str) -> Any:
     """Yield record batches of ``columns`` from a delimited or Parquet file (streaming)."""
     if path.suffix.lower() == ".parquet":
@@ -93,8 +120,13 @@ def build_reference(
 
     ``id_column`` (optional) is captured as the org→id map. Memory stays bounded to the *distinct*
     organizations even on multi-GB input, because only distinct names are retained.
+
+    Raises:
+        ValueError: When the file lacks ``name_column`` or ``id_column`` (checked up front so the
+            error names the file and its available columns instead of an opaque pyarrow KeyError).
     """
     columns = [name_column] + ([id_column] if id_column else [])
+    _check_reference_columns(path, columns, delimiter)
     names: list[str] = []
     seen: set[str] = set()
     ids: dict[str, str] = {}

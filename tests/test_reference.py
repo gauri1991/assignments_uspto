@@ -6,12 +6,14 @@ from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 
 from uspto_assignments import (
     build_reference,
     extract_distinct_reference,
     load_reference,
     match_column,
+    reference_columns,
 )
 
 
@@ -136,3 +138,22 @@ def test_match_column_emits_score_and_review_columns(tmp_path: Path) -> None:
     assert review[1] == "true"
     assert scores[2] == 0 and review[2] == "false"  # unmatched: not a review case
     assert scores[3] is None and review[3] is None
+
+
+def test_build_reference_missing_column_raises_clear_error(tmp_path: Path) -> None:
+    noid = tmp_path / "reference.parquet"
+    pq.write_table(pa.table({"organization": ["ACME CORPORATION"]}), noid)  # pyright: ignore[reportUnknownMemberType]
+    with pytest.raises(ValueError, match=r"has no column.*assignee_id.*available: organization"):
+        build_reference(noid, "organization", id_column="assignee_id")
+    # the name column alone still works
+    gaz = build_reference(noid, "organization")
+    assert gaz.size() == 1
+
+
+def test_reference_columns_reads_parquet_and_tsv_headers(tmp_path: Path) -> None:
+    tsv = tmp_path / "ref.tsv"
+    _write_tsv(tsv)
+    assert "disambig_assignee_organization" in reference_columns(tsv)
+    parquet = tmp_path / "ref.parquet"
+    pq.write_table(pa.table({"organization": ["X"], "assignee_id": ["1"]}), parquet)  # pyright: ignore[reportUnknownMemberType]
+    assert reference_columns(parquet) == ["organization", "assignee_id"]

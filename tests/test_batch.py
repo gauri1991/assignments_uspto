@@ -934,3 +934,20 @@ def test_compare_step_score_review_roundtrip_and_schema(tmp_path: Path) -> None:
     cols = columns_after(LoadConfig(), [step], upto=1)["flat"]
     assert "x_matches_y_score" in cols and "x_matches_y_review" in cols
     assert "x_matches_y" not in cols  # non-flag action adds no boolean column
+
+
+def test_validate_template_flags_reference_column_mismatch(tmp_path: Path) -> None:
+    noid = tmp_path / "reference.parquet"
+    pq.write_table(pa.table({"organization": ["ACME CORPORATION"]}), noid)  # pyright: ignore[reportUnknownMemberType]
+    step = ReferenceMatchStep(
+        table="flat",
+        column="assignor_names",
+        reference_path=str(noid),
+        name_column="organization",
+        id_column="assignee_id",  # not in the file -> pre-run warning, not a runtime KeyError
+    )
+    warnings = validate_template(LoadConfig(), [step])
+    assert any("no column 'assignee_id'" in w and "organization" in w for w in warnings)
+    # with the id column cleared the template validates clean
+    step.id_column = ""
+    assert not any("no column" in w for w in validate_template(LoadConfig(), [step]))

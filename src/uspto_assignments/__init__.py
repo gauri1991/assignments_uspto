@@ -83,6 +83,7 @@ from .reference import (
     extract_distinct_reference,
     load_reference,
     match_column,
+    reference_columns,
 )
 from .resolution import CappedBlockIndex, ResolvedMention, resolve_mentions
 from .tables import (
@@ -191,6 +192,7 @@ __all__ = [
     "parse_to_store",
     "query",
     "reconcile_cpc",
+    "reference_columns",
     "resolve_mentions",
     "rows_to_table",
     "run_batch",

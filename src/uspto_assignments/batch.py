@@ -52,7 +52,7 @@ from .normalize import (
     get_scorer,
     normalize_column,
 )
-from .reference import load_reference, match_column, matched_mask
+from .reference import load_reference, match_column, matched_mask, reference_columns
 from .tables import STORE_TABLES, open_dataset, parse_to_store
 
 # pyarrow.compute is under-typed in pyarrow-stubs; route through Any (see filters.py for rationale).
@@ -830,6 +830,23 @@ def _referenced_columns(step: BatchStep) -> tuple[str, list[str]]:  # noqa: PLR0
     return "", []  # ExportStep validated separately
 
 
+def _reference_column_problems(step: ReferenceMatchStep) -> list[str]:
+    """Warnings for configured reference columns missing from the (existing) reference file.
+
+    Catches the classic mismatch — a compact reference built without an id column while the step
+    still names ``assignee_id`` — before the run fails on an opaque pyarrow schema error.
+    """
+    try:
+        file_columns = reference_columns(Path(step.reference_path), step.delimiter)
+    except OSError:
+        return []  # unreadable right now; the run itself will report it
+    return [
+        f"reference file has no column '{needed}' (has: {', '.join(file_columns)})."
+        for needed in (step.name_column, step.id_column)
+        if needed and needed not in file_columns
+    ]
+
+
 def validate_template(  # noqa: PLR0912 - one validation branch per step kind
     load: LoadConfig, steps: Sequence[BatchStep]
 ) -> list[str]:
@@ -859,6 +876,11 @@ def validate_template(  # noqa: PLR0912 - one validation branch per step kind
                 warnings.append(
                     f"Step {index} (ReferenceMatch): reference file not found: "
                     f"{step.reference_path}"
+                )
+            else:  # the file exists — cheaply check it has the configured columns
+                warnings.extend(
+                    f"Step {index} (ReferenceMatch): {problem}"
+                    for problem in _reference_column_problems(step)
                 )
         if isinstance(step, CpcMatchStep) and step.portfolio_mode == "footprint_file":
             if not step.portfolio_path:
