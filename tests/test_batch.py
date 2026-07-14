@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import json
 import shutil
 import zipfile
@@ -13,6 +14,7 @@ from typing import Any
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from openpyxl import load_workbook
 
 from uspto_assignments import (
     AggregateStep,
@@ -32,8 +34,10 @@ from uspto_assignments import (
     ReferenceMatchStep,
     SelectStep,
     SortStep,
+    TemplateValidationError,
     TransferTypeStep,
     columns_after,
+    describe_step,
     dump_templates,
     load_templates,
     parse_to_store,
@@ -133,7 +137,7 @@ def test_export_columns_order_and_rename_and_enabled(tmp_path: Path) -> None:
     )
     run_batch(template, [FIXTURE], tmp_path / "out", timestamp="v6")
     header = (
-        (tmp_path / "out" / "x" / "sample_assignment" / "assignees.csv")
+        (tmp_path / "out" / "x" / "run_v6" / "sample_assignment" / "assignees.csv")
         .read_text(encoding="utf-8")
         .splitlines()[0]
     )
@@ -148,7 +152,7 @@ def test_disabled_step_is_skipped_on_run(tmp_path: Path) -> None:
     )
     run_batch(template, [FIXTURE], tmp_path / "out", timestamp="v6d")
     header = (
-        (tmp_path / "out" / "d" / "sample_assignment" / "assignees.csv")
+        (tmp_path / "out" / "d" / "run_v6d" / "sample_assignment" / "assignees.csv")
         .read_text(encoding="utf-8")
         .splitlines()[0]
     )
@@ -266,11 +270,11 @@ def test_run_batch_sequential_writes_folder_per_source(tmp_path: Path) -> None:
     )
     assert (result.succeeded, result.failed) == (1, 0)
 
-    out = tmp_path / "out" / "granted" / "sample_assignment" / "properties.parquet"
+    out = tmp_path / "out" / "granted" / "run_t1" / "sample_assignment" / "properties.parquet"
     assert out.is_file()
     reopened = pq.read_table(out)  # pyright: ignore[reportUnknownMemberType]  # stub embeds Unknown
     assert reopened.num_rows == 1  # only the B2 (granted) row survives the filter
-    assert (tmp_path / "out" / "granted" / "run_t1.log").is_file()
+    assert (tmp_path / "out" / "granted" / "run_t1" / "run.log").is_file()
 
     messages = [e.message for e in events]
     assert any("filter properties" in m for m in messages)
@@ -296,7 +300,7 @@ def test_run_batch_accepts_dataset_folder_input(tmp_path: Path) -> None:
     template = BatchTemplate(name="copy", steps=[ExportStep(fmt="csv", tables=["assignors"])])
     result = run_batch(template, [tmp_path / "store"], tmp_path / "out", timestamp="t3")
     assert result.succeeded == 1
-    assert (tmp_path / "out" / "copy" / "store" / "assignors.csv").is_file()
+    assert (tmp_path / "out" / "copy" / "run_t3" / "store" / "assignors.csv").is_file()
 
 
 def test_run_batch_parallel_workers(tmp_path: Path) -> None:
@@ -314,8 +318,8 @@ def test_run_batch_parallel_workers(tmp_path: Path) -> None:
         on_event=events.append,
     )
     assert result.succeeded == 2
-    assert (tmp_path / "out" / "granted" / "a" / "properties.parquet").is_file()
-    assert (tmp_path / "out" / "granted" / "b" / "properties.parquet").is_file()
+    assert (tmp_path / "out" / "granted" / "run_t4" / "a" / "properties.parquet").is_file()
+    assert (tmp_path / "out" / "granted" / "run_t4" / "b" / "properties.parquet").is_file()
 
     messages = [e.message for e in events]
     # each worker's events are labelled with their file, and a combined total is shown
@@ -358,8 +362,8 @@ def test_run_batch_parallel_same_stem_inputs_get_distinct_dirs(tmp_path: Path) -
     shutil.copy(FIXTURE, b)
     result = run_batch(_granted_template(), [a, b], tmp_path / "out", workers=2, timestamp="t5")
     assert result.succeeded == 2
-    assert (tmp_path / "out" / "granted" / "x" / "properties.parquet").is_file()
-    assert (tmp_path / "out" / "granted" / "x (1)" / "properties.parquet").is_file()
+    assert (tmp_path / "out" / "granted" / "run_t5" / "x" / "properties.parquet").is_file()
+    assert (tmp_path / "out" / "granted" / "run_t5" / "x (1)" / "properties.parquet").is_file()
 
 
 def test_run_batch_parallel_results_in_input_order(tmp_path: Path) -> None:
@@ -396,7 +400,7 @@ def test_run_batch_should_stop_after_first_file(tmp_path: Path) -> None:
     )
     assert result.cancelled is True
     assert (result.succeeded, len(result.results)) == (1, 1)
-    assert (tmp_path / "out" / "granted" / "run_t7.log").is_file()  # log still written
+    assert (tmp_path / "out" / "granted" / "run_t7" / "run.log").is_file()  # log still written
     messages = [e.message for e in events]
     assert any(m.startswith("Batch cancelled:") for m in messages)
 
@@ -441,7 +445,7 @@ def test_run_batch_normalize_adds_canonical_and_learns(tmp_path: Path) -> None:
     )
     assert result.succeeded == 1
     header = (
-        (tmp_path / "out" / "norm" / "sample_assignment" / "assignees.csv")
+        (tmp_path / "out" / "norm" / "run_n1" / "sample_assignment" / "assignees.csv")
         .read_text(encoding="utf-8")
         .splitlines()[0]
     )
@@ -871,7 +875,7 @@ def test_run_batch_normalize_emits_score_and_review_columns(tmp_path: Path) -> N
     )
     run_batch(template, [FIXTURE], tmp_path / "out", timestamp="conf")
     header = (
-        (tmp_path / "out" / "conf" / "sample_assignment" / "assignees.csv")
+        (tmp_path / "out" / "conf" / "run_conf" / "sample_assignment" / "assignees.csv")
         .read_text(encoding="utf-8")
         .splitlines()[0]
     )
@@ -951,3 +955,188 @@ def test_validate_template_flags_reference_column_mismatch(tmp_path: Path) -> No
     # with the id column cleared the template validates clean
     step.id_column = ""
     assert not any("no column" in w for w in validate_template(LoadConfig(), [step]))
+
+
+def test_describe_step_one_line_per_kind() -> None:
+    clause = FilterClause("doc_kind", "equals", "B2")
+    described = describe_step(
+        FilterStep(table="flat", clauses=[clause, clause, clause], combine="and")
+    )
+    assert described == "Filter · flat · 3 clause(s) · AND"
+    assert "review<95" in describe_step(
+        NormalizeStep(table="flat", column="name", emit_score=True, review_threshold=95)
+    )
+    steps: list[BatchStep] = [
+        DedupeStep(table="flat"),
+        SelectStep(table="flat", columns=["a"]),
+        SortStep(table="flat", column="a"),
+        DeriveStep(table="flat", source="recorded_date", op="year"),
+        AggregateStep(table="flat", group_by=["a"]),
+        ClassifyStep(table="flat", column="name"),
+        CompareStep(table="flat", left="a", right="b"),
+        TransferTypeStep(),
+        ReferenceMatchStep(table="flat"),
+        ExportStep(fmt="csv"),
+    ]
+    for step in steps:
+        assert describe_step(step)  # every kind renders a non-empty one-liner
+
+
+def test_run_batch_records_step_stats(tmp_path: Path) -> None:
+    template = BatchTemplate(
+        name="stats",
+        steps=[
+            FilterStep(table="properties", clauses=[FilterClause("doc_kind", "equals", "B2")]),
+            NormalizeStep(table="assignees", column="name"),
+            ExportStep(fmt="csv", tables=["properties"]),
+        ],
+    )
+    result = run_batch(template, [FIXTURE], tmp_path / "out", timestamp="ss")
+    stats = result.results[0].steps
+    assert [s.index for s in stats] == [1, 2, 3]
+    assert stats[0].label.startswith("Filter · properties")
+    assert stats[0].rows_before > stats[0].rows_after  # the filter dropped rows
+    assert stats[1].columns_added == ["name_canonical"]
+    assert stats[2].table == ""  # export has no working table
+
+
+def test_run_batch_disabled_step_recorded_in_stats(tmp_path: Path) -> None:
+    disabled = NormalizeStep(table="assignees", column="name")
+    disabled.enabled = False
+    template = BatchTemplate(
+        name="dis", steps=[disabled, ExportStep(fmt="csv", tables=["assignees"])]
+    )
+    result = run_batch(template, [FIXTURE], tmp_path / "out", timestamp="dd")
+    assert result.results[0].steps[0].note == "disabled"
+
+
+def test_run_batch_parallel_step_stats_cross_process(tmp_path: Path) -> None:
+    a = tmp_path / "a.xml"
+    b = tmp_path / "b.xml"
+    shutil.copy(FIXTURE, a)
+    shutil.copy(FIXTURE, b)
+    result = run_batch(_granted_template(), [a, b], tmp_path / "out", workers=2, timestamp="pp")
+    for file_result in result.results:  # StepStats must pickle back from worker processes
+        assert len(file_result.steps) == len(_granted_template().steps)
+        assert all(s.label for s in file_result.steps)
+
+
+def test_run_batch_emits_and_records_validation_warnings(tmp_path: Path) -> None:
+    template = BatchTemplate(
+        name="warned",
+        steps=[
+            ReferenceMatchStep(table="flat", column="assignor_names", reference_path="/no/ref.tsv"),
+            ExportStep(fmt="csv", tables=["flat"]),
+        ],
+    )
+    events: list[BatchEvent] = []
+    result = run_batch(template, [FIXTURE], tmp_path / "out", timestamp="w", on_event=events.append)
+    assert any("reference file not found" in w for w in result.warnings)
+    assert any(e.level == "error" and "reference file not found" in e.message for e in events)
+    assert result.succeeded == 1  # warn-and-continue by default (the step skips gracefully)
+
+
+def test_run_batch_strict_aborts_before_output(tmp_path: Path) -> None:
+    template = BatchTemplate(
+        name="strictfail",
+        steps=[FilterStep(table="flat", clauses=[FilterClause("nope_col", "contains", "x")])],
+    )
+    with pytest.raises(TemplateValidationError) as excinfo:
+        run_batch(template, [FIXTURE], tmp_path / "out", timestamp="s", strict=True)
+    assert any("nope_col" in w for w in excinfo.value.warnings)
+    assert not (tmp_path / "out").exists()  # aborted before any output was written
+
+
+def test_run_batch_writes_manifest(tmp_path: Path) -> None:
+    result = run_batch(_granted_template(), [FIXTURE], tmp_path / "out", timestamp="mf")
+    run_dir = Path(result.run_dir)
+    assert run_dir == tmp_path / "out" / "granted" / "run_mf"
+    manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["schema"] == 1
+    assert manifest["template"]["name"] == "granted"
+    assert [s["index"] for s in manifest["template"]["steps"]] == [1, 2]
+    assert manifest["template"]["steps"][0]["summary"].startswith("Filter ·")
+    assert manifest["summary"] == {"succeeded": 1, "failed": 0}
+    file_entry = manifest["files"][0]
+    assert len(file_entry["steps"]) == 2  # the per-step audit trail travels into the manifest
+    for output in file_entry["outputs"]:
+        assert (run_dir / output["path"]).is_file()  # relative paths resolve inside the run dir
+        assert output["rows"] == file_entry["rows"][output["table"]]
+
+
+def test_run_batch_defaults_timestamp_when_blank(tmp_path: Path) -> None:
+    result = run_batch(_granted_template(), [FIXTURE], tmp_path / "out")
+    run_dir = Path(result.run_dir)
+    assert run_dir.name.startswith("run_") and len(run_dir.name) > len("run_")
+    assert (run_dir / "manifest.json").is_file()
+
+
+def test_run_batch_same_timestamp_gets_distinct_run_dirs(tmp_path: Path) -> None:
+    first = run_batch(_granted_template(), [FIXTURE], tmp_path / "out", timestamp="dup")
+    second = run_batch(_granted_template(), [FIXTURE], tmp_path / "out", timestamp="dup")
+    assert Path(first.run_dir).name == "run_dup"
+    assert Path(second.run_dir).name == "run_dup (1)"  # unique_path keeps runs separate
+
+
+def test_run_batch_writes_summary_xlsx(tmp_path: Path) -> None:
+    result = run_batch(_granted_template(), [FIXTURE], tmp_path / "out", timestamp="sx")
+    workbook = load_workbook(Path(result.run_dir) / "summary.xlsx", read_only=True)
+    try:
+        assert workbook.sheetnames == ["run", "steps", "outputs"]
+        steps = list(workbook["steps"].values)
+        assert steps[0] == (
+            "file",
+            "step",
+            "description",
+            "rows_before",
+            "rows_after",
+            "delta",
+            "note",
+        )
+        assert len(steps) - 1 == len(_granted_template().steps)  # one row per step
+        for row in steps[1:]:
+            before, after, delta = int(str(row[3])), int(str(row[4])), int(str(row[5]))
+            assert delta == after - before  # delta arithmetic holds
+        outputs = list(workbook["outputs"].values)
+        assert outputs[0] == ("file", "path", "table", "rows", "format")
+        assert len(outputs) == 2  # header + the one exported table
+    finally:
+        workbook.close()
+
+
+def test_run_batch_appends_runs_index(tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    first = run_batch(_granted_template(), [FIXTURE], out, timestamp="i1")
+    second = run_batch(_granted_template(), [FIXTURE], out, timestamp="i2")
+    with (out / "runs_index.csv").open(newline="", encoding="utf-8") as handle:
+        rows = list(csv.reader(handle))
+    assert rows[0] == [
+        "timestamp",
+        "template",
+        "inputs",
+        "succeeded",
+        "failed",
+        "cancelled",
+        "run_dir",
+    ]
+    assert len(rows) == 3  # header + two runs
+    assert rows[1][6] == str(Path(first.run_dir).relative_to(out))
+    assert rows[2][6] == str(Path(second.run_dir).relative_to(out))
+
+
+def test_template_10_loads_and_validates(tmp_path: Path) -> None:
+    path = Path(__file__).resolve().parent.parent / "templates" / "10_dropped_sellers_audit.json"
+    template = load_templates(path)[0]
+    assert template.name == "10 - Dropped sellers audit (off-gazetteer assignors)"
+    assert len(template.steps) == 4
+
+    # Validate against a tmp reference so the test doesn't depend on the local gazetteer build;
+    # this also proves the matched-flag column flows to step 3 via columns_after.
+    reference = tmp_path / "reference.parquet"
+    pq.write_table(  # pyright: ignore[reportUnknownMemberType]
+        pa.table({"organization": ["ACME CORPORATION"], "assignee_id": ["A1"]}), reference
+    )
+    step = template.steps[1]
+    assert isinstance(step, ReferenceMatchStep)
+    step.reference_path = str(reference)
+    assert validate_template(template.load, template.steps) == []

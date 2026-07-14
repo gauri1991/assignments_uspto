@@ -43,6 +43,7 @@ from .settings import (
     EntityMemoryStore,
     QueryStore,
     RecentStore,
+    UiStateStore,
 )
 from .widgets.batch_dialog import BatchDialog
 from .widgets.cpc_settings_dialog import CpcSettingsDialog
@@ -82,6 +83,7 @@ class MainWindow(QMainWindow):
         self._thread: QThread | None = None
         self._worker: QObject | None = None
         self._recent_store = RecentStore()
+        self._ui_state = UiStateStore()
         self._query_store = QueryStore()
         self._batch_store = BatchTemplateStore()
         self._entity_store = EntityMemoryStore()
@@ -206,18 +208,24 @@ class MainWindow(QMainWindow):
 
     # -- open / close ------------------------------------------------------
     def _choose_file(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Open USPTO assignment", "", _OPEN_FILTER)
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open USPTO assignment", self._ui_state.last_dir("input"), _OPEN_FILTER
+        )
         if not path:
             return
+        self._ui_state.set_last_dir("input", str(Path(path).parent))
         dialog = LoadDialog(allow_record_limit=True, parent=self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         self._start_parse(Path(path), dialog.template())
 
     def _choose_folder(self) -> None:
-        path = QFileDialog.getExistingDirectory(self, "Open dataset folder (Arrow or Parquet)")
+        path = QFileDialog.getExistingDirectory(
+            self, "Open dataset folder (Arrow or Parquet)", self._ui_state.last_dir("input")
+        )
         if not path:
             return
+        self._ui_state.set_last_dir("input", path)
         dialog = LoadDialog(allow_record_limit=False, parent=self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
@@ -267,9 +275,12 @@ class MainWindow(QMainWindow):
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         fmt = dialog.selected_format()
-        directory = QFileDialog.getExistingDirectory(self, "Save processed dataset to folder")
+        directory = QFileDialog.getExistingDirectory(
+            self, "Save processed dataset to folder", self._ui_state.last_dir("output")
+        )
         if not directory:
             return
+        self._ui_state.set_last_dir("output", directory)
         store = self._store
         out_dir = unique_path(Path(directory) / self._source_stem)  # named after the source
         kind = "Parquet" if fmt == "parquet" else "Arrow"
@@ -359,9 +370,12 @@ class MainWindow(QMainWindow):
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         fmt = dialog.selected_format()
-        directory = QFileDialog.getExistingDirectory(self, "Export all tables to folder")
+        directory = QFileDialog.getExistingDirectory(
+            self, "Export all tables to folder", self._ui_state.last_dir("output")
+        )
         if not directory:
             return
+        self._ui_state.set_last_dir("output", directory)
         store = self._store
         out_dir = unique_path(Path(directory) / self._source_stem)  # folder named after the source
 

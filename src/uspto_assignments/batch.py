@@ -10,6 +10,7 @@ so a UI can mirror it to a console. Templates serialize to JSON like :mod:`uspto
 
 from __future__ import annotations
 
+import csv
 import json
 import logging
 import multiprocessing as mp
@@ -21,6 +22,7 @@ from collections.abc import Callable, Sequence
 from concurrent.futures import Future, ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from queue import Empty
 from typing import Any, Literal
@@ -41,7 +43,7 @@ from .cpcmatch import (
     match_portfolio,
 )
 from .datasource import CpcCache, CpcRunContext, make_source
-from .exporters import FORMAT_SUFFIX, ExportFormat, export
+from .exporters import FORMAT_SUFFIX, ExportFormat, export, write_workbook
 from .filters import CombineMode, FilterClause, SortSpec, filter_sort, sort_indices
 from .model import columns_for
 from .naming import unique_path
@@ -830,6 +832,14 @@ def _referenced_columns(step: BatchStep) -> tuple[str, list[str]]:  # noqa: PLR0
     return "", []  # ExportStep validated separately
 
 
+class TemplateValidationError(ValueError):
+    """Raised by ``run_batch(strict=True)`` when the template has validation warnings."""
+
+    def __init__(self, warnings: list[str]) -> None:
+        super().__init__(f"{len(warnings)} validation warning(s): " + "; ".join(warnings[:3]))
+        self.warnings = warnings
+
+
 def _reference_column_problems(step: ReferenceMatchStep) -> list[str]:
     """Warnings for configured reference columns missing from the (existing) reference file.
 
@@ -914,6 +924,23 @@ class BatchEvent:
 
 
 @dataclass(slots=True)
+class StepStat:
+    """Per-step audit stats: how the working table changed when the step ran.
+
+    Captured for every step of every file in a real run (``FileResult.steps``) and for
+    previews. Fields stay picklable primitives — they cross the worker-process boundary.
+    """
+
+    index: int  # 1-based position in the template
+    label: str  # human-readable step summary
+    table: str
+    rows_before: int
+    rows_after: int
+    columns_added: list[str] = field(default_factory=list[str])
+    note: str = ""
+
+
+@dataclass(slots=True)
 class FileResult:
     """The outcome of processing one input file."""
 
@@ -925,6 +952,7 @@ class FileResult:
     elapsed: float = 0.0  # wall-clock seconds spent on this file
     # (alias, canonical, score) pairs the normalize steps learned while processing this file.
     learned: list[tuple[str, str, int]] = field(default_factory=list[tuple[str, str, int]])
+    steps: list[StepStat] = field(default_factory=list[StepStat])  # per-step audit trail
 
 
 @dataclass(slots=True)
@@ -935,6 +963,8 @@ class BatchResult:
     failed: int
     results: list[FileResult]
     cancelled: bool = False  # True when the run stopped early via ``should_stop``
+    warnings: list[str] = field(default_factory=list[str])  # pre-run validation warnings
+    run_dir: str = ""  # the per-run output folder (holds manifest.json, run.log, sources)
 
 
 OnEvent = Callable[[BatchEvent], None]
@@ -1540,10 +1570,13 @@ def _warn_if_emptied(  # noqa: PLR0913 - a small guard threading the loop's loca
     table_name: str,
     before: int | None,
     emit: OnEvent,
-) -> None:
-    """Surface the #1 silent failure: a step that drops a non-empty table to 0 (or nearly)."""
+) -> str:
+    """Surface the #1 silent failure: a step that drops a non-empty table to 0 (or nearly).
+
+    Returns the note recorded in the step audit trail ("" when nothing noteworthy).
+    """
     if not before or not table_name:
-        return
+        return ""
     after = tables[table_name].num_rows if table_name in tables else 0
     kind = type(step).__name__.removesuffix("Step")
     if after == 0:
@@ -1554,7 +1587,8 @@ def _warn_if_emptied(  # noqa: PLR0913 - a small guard threading the loop's loca
                 f"filter clause, reference_path/name_column, or the match gate",
             )
         )
-    elif after <= before * (1 - _LARGE_DROP_FRACTION):
+        return "⚠ dropped all rows"
+    if after <= before * (1 - _LARGE_DROP_FRACTION):
         emit(
             BatchEvent(
                 "info",
@@ -1562,6 +1596,8 @@ def _warn_if_emptied(  # noqa: PLR0913 - a small guard threading the loop's loca
                 f"from '{table_name}'",
             )
         )
+        return f"dropped {before - after:,} of {before:,} rows"
+    return ""
 
 
 def _process_input(  # noqa: PLR0913 - threads collaborators; one branch per step kind
@@ -1578,6 +1614,7 @@ def _process_input(  # noqa: PLR0913 - threads collaborators; one branch per ste
     learned_before = len(memory.learned)
     start = time.monotonic()
     work_dir: Path | None = None
+    step_stats: list[StepStat] = []  # audit trail (partial stats survive a mid-run failure)
     try:
         if source.is_file():
             work_dir = Path(tempfile.mkdtemp(prefix="uspto_batch_"))
@@ -1586,14 +1623,36 @@ def _process_input(  # noqa: PLR0913 - threads collaborators; one branch per ste
         outputs: list[str] = []
         used_targets: set[tuple[str, str]] = set()  # (table, target) claimed (collision guard)
         for index, step in enumerate(template.steps, start=1):
-            if not step.enabled:
-                continue  # UI-disabled step: skip without deleting
             table_name: str = getattr(step, "table", "")
+            if not step.enabled:  # UI-disabled step: skip without deleting
+                step_stats.append(
+                    StepStat(index, describe_step(step), table_name, 0, 0, note="disabled")
+                )
+                continue
             before = tables[table_name].num_rows if table_name in tables else None
+            before_cols: set[str] = (
+                set(tables[table_name].column_names) if table_name in tables else set()
+            )
             outputs.extend(
                 _apply_step(tables, step, memory, used_targets, source_dir, emit, cpc_ctx)
             )
-            _warn_if_emptied(tables, step, index, table_name, before, emit)
+            note = _warn_if_emptied(tables, step, index, table_name, before, emit)
+            after_table = tables.get(table_name)
+            step_stats.append(
+                StepStat(
+                    index,
+                    describe_step(step),
+                    table_name,
+                    rows_before=before or 0,
+                    rows_after=after_table.num_rows if after_table is not None else 0,
+                    columns_added=(
+                        sorted(set(after_table.column_names) - before_cols)
+                        if after_table is not None
+                        else []
+                    ),
+                    note=note,
+                )
+            )
         rows = {name: table.num_rows for name, table in tables.items()}
         result = FileResult(
             str(source),
@@ -1601,10 +1660,13 @@ def _process_input(  # noqa: PLR0913 - threads collaborators; one branch per ste
             outputs=outputs,
             rows=rows,
             learned=memory.learned[learned_before:],
+            steps=step_stats,
         )
     except Exception as exc:  # per-file isolation: log, record, and keep going
         logger.exception("batch: failed on %s", source)
-        result = FileResult(str(source), ok=False, error=f"{type(exc).__name__}: {exc}")
+        result = FileResult(
+            str(source), ok=False, error=f"{type(exc).__name__}: {exc}", steps=step_stats
+        )
     finally:
         if work_dir is not None:
             shutil.rmtree(work_dir, ignore_errors=True)
@@ -1799,11 +1861,9 @@ def _emit_file_done(result: FileResult, emit: OnEvent) -> None:
         )
 
 
-def _write_run_log(
-    template_dir: Path, timestamp: str, template: BatchTemplate, results: list[FileResult]
-) -> None:
-    log_path = template_dir / f"run_{timestamp or 'batch'}.log"
-    lines = [f"Batch template: {template.name}", f"Timestamp: {timestamp}", ""]
+def _write_run_log(run_dir: Path, template: BatchTemplate, results: list[FileResult]) -> None:
+    log_path = run_dir / "run.log"
+    lines = [f"Batch template: {template.name}", f"Run folder: {run_dir.name}", ""]
     for result in results:
         status = "OK" if result.ok else f"FAILED: {result.error}"
         lines.append(
@@ -1811,6 +1871,207 @@ def _write_run_log(
             f"rows={result.rows} outputs={len(result.outputs)}"
         )
     log_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _output_entries(result: FileResult, run_dir: Path) -> list[dict[str, Any]]:
+    """Manifest/summary rows for one file's written outputs (paths relative to the run folder)."""
+    entries: list[dict[str, Any]] = []
+    for raw in result.outputs:
+        path = Path(raw)
+        try:
+            rel = str(path.relative_to(run_dir))
+        except ValueError:  # defensive: outputs are always inside the run dir
+            rel = str(path)
+        entries.append(
+            {
+                "path": rel,
+                "table": path.stem,
+                "format": path.suffix.lstrip("."),
+                "rows": result.rows.get(path.stem),
+            }
+        )
+    return entries
+
+
+def _write_manifest(  # noqa: PLR0913 - snapshotting the whole run takes the run's collaborators
+    run_dir: Path,
+    template: BatchTemplate,
+    warnings: list[str],
+    results: list[FileResult],
+    *,
+    timestamp: str,
+    workers: int,
+    cancelled: bool,
+    strict: bool,
+    elapsed: float,
+    inputs: list[Path],
+) -> None:
+    """Write ``manifest.json``: the full audit record of one batch run."""
+    payload: dict[str, Any] = {
+        "schema": 1,
+        "template": {
+            "name": template.name,
+            "steps": [
+                {
+                    "index": index,
+                    "kind": type(step).__name__,
+                    "enabled": step.enabled,
+                    "summary": describe_step(step),
+                }
+                for index, step in enumerate(template.steps, start=1)
+            ],
+        },
+        "timestamp": timestamp,
+        "generated": datetime.now(UTC).isoformat(timespec="seconds"),
+        "duration_seconds": round(elapsed, 1),
+        "workers": workers,
+        "cancelled": cancelled,
+        "strict": strict,
+        "warnings": warnings,
+        "inputs": [str(path) for path in inputs],
+        "summary": {
+            "succeeded": sum(1 for r in results if r.ok),
+            "failed": sum(1 for r in results if not r.ok),
+        },
+        "files": [
+            {
+                "source": result.source,
+                "ok": result.ok,
+                "error": result.error,
+                "elapsed": round(result.elapsed, 1),
+                "rows": result.rows,
+                "outputs": _output_entries(result, run_dir),
+                "steps": [asdict(stat) for stat in result.steps],
+            }
+            for result in results
+        ],
+    }
+    (run_dir / "manifest.json").write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+
+
+def _write_summary_xlsx(  # noqa: PLR0913 - snapshotting the whole run takes the run's collaborators
+    run_dir: Path,
+    template: BatchTemplate,
+    warnings: list[str],
+    results: list[FileResult],
+    *,
+    timestamp: str,
+    workers: int,
+    cancelled: bool,
+    elapsed: float,
+    inputs: list[Path],
+) -> None:
+    """Write ``summary.xlsx``: the manifest's audit record as a human-readable workbook."""
+    run_rows = [
+        ("template", template.name),
+        ("timestamp", timestamp),
+        ("duration_seconds", f"{elapsed:.1f}"),
+        ("workers", str(workers)),
+        ("cancelled", str(cancelled).lower()),
+        ("succeeded", str(sum(1 for r in results if r.ok))),
+        ("failed", str(sum(1 for r in results if not r.ok))),
+        *((f"input {i}", str(path)) for i, path in enumerate(inputs, start=1)),
+        *((f"warning {i}", w) for i, w in enumerate(warnings, start=1)),
+    ]
+    run_sheet = pa.table(
+        {
+            "key": pa.array([k for k, _ in run_rows], type=pa.string()),
+            "value": pa.array([v for _, v in run_rows], type=pa.string()),
+        }
+    )
+
+    step_cols: dict[str, list[Any]] = {
+        "file": [],
+        "step": [],
+        "description": [],
+        "rows_before": [],
+        "rows_after": [],
+        "delta": [],
+        "note": [],
+    }
+    for result in results:
+        name = Path(result.source).name
+        for stat in result.steps:
+            step_cols["file"].append(name)
+            step_cols["step"].append(stat.index)
+            step_cols["description"].append(stat.label)
+            step_cols["rows_before"].append(stat.rows_before)
+            step_cols["rows_after"].append(stat.rows_after)
+            step_cols["delta"].append(stat.rows_after - stat.rows_before)
+            step_cols["note"].append(stat.note)
+    steps_sheet = (
+        pa.table(step_cols)
+        if step_cols["file"]
+        else pa.table({name: pa.array([], type=pa.string()) for name in step_cols})
+    )
+
+    out_cols: dict[str, list[Any]] = {"file": [], "path": [], "table": [], "rows": [], "format": []}
+    for result in results:
+        name = Path(result.source).name
+        for entry in _output_entries(result, run_dir):
+            out_cols["file"].append(name)
+            out_cols["path"].append(entry["path"])
+            out_cols["table"].append(entry["table"])
+            out_cols["rows"].append(entry["rows"])
+            out_cols["format"].append(entry["format"])
+    outputs_sheet = (
+        pa.table(out_cols)
+        if out_cols["file"]
+        else pa.table({name: pa.array([], type=pa.string()) for name in out_cols})
+    )
+
+    write_workbook(
+        run_dir / "summary.xlsx",
+        {"run": run_sheet, "steps": steps_sheet, "outputs": outputs_sheet},
+    )
+
+
+_RUNS_INDEX_HEADER = [
+    "timestamp",
+    "template",
+    "inputs",
+    "succeeded",
+    "failed",
+    "cancelled",
+    "run_dir",
+]
+
+
+def _append_runs_index(  # noqa: PLR0913 - one ledger line per run
+    out_root: Path,
+    *,
+    timestamp: str,
+    template_name: str,
+    inputs: int,
+    succeeded: int,
+    failed: int,
+    cancelled: bool,
+    run_dir: Path,
+) -> None:
+    """Append one line per run to ``<out_root>/runs_index.csv`` (the cross-run ledger).
+
+    Single-line appends only (no read-modify-write), so concurrent runs into the same
+    ``out_root`` interleave rows but never corrupt each other.
+    """
+    index_path = out_root / "runs_index.csv"
+    new_file = not index_path.exists()
+    with index_path.open("a", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        if new_file:
+            writer.writerow(_RUNS_INDEX_HEADER)
+        writer.writerow(
+            [
+                timestamp,
+                template_name,
+                inputs,
+                succeeded,
+                failed,
+                str(cancelled).lower(),
+                str(run_dir.relative_to(out_root)),
+            ]
+        )
 
 
 def run_batch(  # noqa: PLR0913 - a clear public entry point with keyword-only options
@@ -1824,21 +2085,27 @@ def run_batch(  # noqa: PLR0913 - a clear public entry point with keyword-only o
     on_event: OnEvent | None = None,
     cpc_ctx: CpcRunContext | None = None,
     should_stop: Callable[[], bool] | None = None,
+    strict: bool = False,
 ) -> BatchResult:
     """Run ``template`` over ``inputs``, writing outputs under ``out_root``.
 
     Args:
         template: The pipeline to apply to each input.
         inputs: Files (``.xml``/``.zip``) and/or dataset folders to process.
-        out_root: Root output directory; a ``<template-name>/`` subfolder is created inside it.
+        out_root: Root output directory. Each run gets its own self-contained folder:
+            ``<out_root>/<template-name>/run_<timestamp>/`` holding ``manifest.json``,
+            ``run.log``, and one subfolder per source.
         workers: Number of parallel worker processes (``1`` = sequential with live per-step events).
-        timestamp: Stamp used in the run-log filename (the caller supplies it).
+        timestamp: Stamp naming the run folder (defaults to the current local time).
         memory: Entity memory for any normalize steps; new aliases learned during the run are
             merged back into it (persist it afterwards to keep learning). A fresh one is used if
             ``None``.
         on_event: Optional callback receiving :class:`BatchEvent`s as processing proceeds.
         should_stop: Optional cancellation probe, polled between files (cancellation is per-file:
             the file in flight finishes, remaining inputs are skipped). Must be thread-safe.
+        strict: When True, any ``validate_template`` warning aborts the run (before any output
+            is written) by raising :class:`TemplateValidationError`. The default emits the
+            warnings as error events and continues.
 
     Returns:
         A :class:`BatchResult` summarizing successes, failures, and per-file details;
@@ -1846,11 +2113,18 @@ def run_batch(  # noqa: PLR0913 - a clear public entry point with keyword-only o
     """
     emit = on_event or _noop_event
     stop = should_stop or _never_stop
+    validation_warnings = validate_template(template.load, template.steps)
+    for warning in validation_warnings:
+        emit(BatchEvent("error", f"⚠ {warning}"))
+    if strict and validation_warnings:
+        raise TemplateValidationError(validation_warnings)
     memory = memory if memory is not None else EntityMemory()
     run_start = time.monotonic()
+    timestamp = timestamp or datetime.now().strftime("%Y%m%d_%H%M%S")
     template_dir = out_root / _safe_name(template.name)
-    template_dir.mkdir(parents=True, exist_ok=True)
-    source_dirs = _assign_source_dirs(inputs, template_dir)
+    run_dir = unique_path(template_dir / f"run_{timestamp}")  # same stamp twice -> " (1)"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    source_dirs = _assign_source_dirs(inputs, run_dir)
     results: list[FileResult] = []
     cancelled = False
 
@@ -1860,7 +2134,7 @@ def run_batch(  # noqa: PLR0913 - a clear public entry point with keyword-only o
             template,
             inputs,
             source_dirs,
-            template_dir,
+            run_dir,
             workers,
             emit,
             memory,
@@ -1881,7 +2155,7 @@ def run_batch(  # noqa: PLR0913 - a clear public entry point with keyword-only o
             result = _process_input(
                 template,
                 source,
-                template_dir,
+                run_dir,
                 source_dir,
                 emit,
                 on_parse=lambda count: emit(
@@ -1893,7 +2167,7 @@ def run_batch(  # noqa: PLR0913 - a clear public entry point with keyword-only o
             _emit_file_done(result, emit)
             results.append(result)
 
-    _write_run_log(template_dir, timestamp, template, results)
+    _write_run_log(run_dir, template, results)
     succeeded = sum(1 for r in results if r.ok)
     failed = len(results) - succeeded
     elapsed = time.monotonic() - run_start
@@ -1913,30 +2187,110 @@ def run_batch(  # noqa: PLR0913 - a clear public entry point with keyword-only o
                 f"Batch complete: {succeeded} succeeded, {failed} failed in {elapsed:.1f}s",
             )
         )
-    return BatchResult(succeeded=succeeded, failed=failed, results=results, cancelled=cancelled)
+    _write_manifest(
+        run_dir,
+        template,
+        validation_warnings,
+        results,
+        timestamp=timestamp,
+        workers=workers,
+        cancelled=cancelled,
+        strict=strict,
+        elapsed=elapsed,
+        inputs=inputs,
+    )
+    _write_summary_xlsx(
+        run_dir,
+        template,
+        validation_warnings,
+        results,
+        timestamp=timestamp,
+        workers=workers,
+        cancelled=cancelled,
+        elapsed=elapsed,
+        inputs=inputs,
+    )
+    _append_runs_index(
+        out_root,
+        timestamp=timestamp,
+        template_name=template.name,
+        inputs=len(inputs),
+        succeeded=succeeded,
+        failed=failed,
+        cancelled=cancelled,
+        run_dir=run_dir,
+    )
+    return BatchResult(
+        succeeded=succeeded,
+        failed=failed,
+        results=results,
+        cancelled=cancelled,
+        warnings=validation_warnings,
+        run_dir=str(run_dir),
+    )
 
 
 # --------------------------------------------------------------------------------------
 # Preview (dry-run on a small sample)
 # --------------------------------------------------------------------------------------
-@dataclass(slots=True)
-class StepStat:
-    """Per-step preview stats: how the working table changed when the step ran."""
-
-    index: int  # 1-based position in the template
-    label: str  # human-readable step summary
-    table: str
-    rows_before: int
-    rows_after: int
-    columns_added: list[str] = field(default_factory=list[str])
-    note: str = ""
-
-
 PREVIEW_LIMIT = 1000
 
 
-def _default_step_label(step: BatchStep) -> str:
-    return type(step).__name__
+def _confidence_suffix(step: NormalizeStep | ReferenceMatchStep | CompareStep) -> str:
+    """The steps-list marker for confidence options (e.g. " · score · review<95")."""
+    parts = ""
+    if step.emit_score:
+        parts += " · score"
+    if step.review_threshold > 0:
+        parts += f" · review<{step.review_threshold}"
+    return parts
+
+
+def describe_step(step: BatchStep) -> str:  # noqa: PLR0911, PLR0912 - one line per step kind
+    """A one-line human summary of ``step`` (used by the UI steps list, docs, and manifests)."""
+    if isinstance(step, FilterStep):
+        clause_count = len(step.clauses)
+        return f"Filter · {step.table} · {clause_count} clause(s) · {step.combine.upper()}"
+    if isinstance(step, NormalizeStep):
+        split = f" · split '{step.separator}'" if step.separator else ""
+        learn = "" if step.learn else " · match-only"
+        return (
+            f"Normalize · {step.table}.{step.column} → {step.resolved_target()} "
+            f"(≥{step.threshold}){split}{learn}{_confidence_suffix(step)}"
+        )
+    if isinstance(step, DedupeStep):
+        key = ", ".join(step.subset) if step.subset else "whole row"
+        return f"Deduplicate · {step.table} · key: {key}"
+    if isinstance(step, SelectStep):
+        return f"Select · {step.table} · keep {len(step.columns)} column(s)"
+    if isinstance(step, SortStep):
+        return f"Sort · {step.table} by {step.column} · {'asc' if step.ascending else 'desc'}"
+    if isinstance(step, DeriveStep):
+        return f"Derive · {step.table}.{step.resolved_target()} = {step.op}({step.source})"
+    if isinstance(step, AggregateStep):
+        return f"Aggregate · {step.table} by {', '.join(step.group_by)} → {step.resolved_out()}"
+    if isinstance(step, ClassifyStep):
+        return f"Classify · {step.table}.{step.column} → {step.resolved_target()} ({step.method})"
+    if isinstance(step, CompareStep):
+        return (
+            f"Compare · {step.table} · {step.left} vs {step.right} · {step.method} · "
+            f"{step.action}{_confidence_suffix(step)}"
+        )
+    if isinstance(step, TransferTypeStep):
+        return f"Transfer type · {step.table} · {step.assignor_type} → {step.assignee_type}"
+    if isinstance(step, ReferenceMatchStep):
+        ref = Path(step.reference_path).name or "(no file)"
+        return (
+            f"Reference match · {step.table}.{step.column} vs {ref} · "
+            f"{step.action}{_confidence_suffix(step)}"
+        )
+    if isinstance(step, FetchCpcStep):
+        return f"Fetch CPC · {step.table}.{step.column} → cpc_codes"
+    if isinstance(step, CpcMatchStep):
+        portfolio = Path(step.portfolio_path).name or "(no file)"
+        return f"CPC match · {step.table} vs {portfolio} · {step.portfolio_mode} → {step.out_table}"
+    tables = "all tables" if step.tables is None else ", ".join(step.tables)
+    return f"Export · {step.fmt} · {tables}"
 
 
 def run_preview(  # noqa: PLR0913 - a clear public entry point with keyword-only options
@@ -1955,7 +2309,7 @@ def run_preview(  # noqa: PLR0913 - a clear public entry point with keyword-only
     caller can show "the data as of each step". Uses a fresh entity memory (not persisted).
     """
     emit = on_event or _noop_event
-    label_of = describe if describe is not None else _default_step_label
+    label_of = describe if describe is not None else describe_step
     preview = BatchTemplate(
         name=template.name,
         load=LoadConfig(

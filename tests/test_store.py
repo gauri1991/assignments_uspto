@@ -15,6 +15,7 @@ from uspto_assignments import (
     open_store,
     parse_to_store,
 )
+from uspto_assignments_ui.settings import UiStateStore
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_assignment.xml"
 
@@ -122,3 +123,17 @@ def test_open_dataset_detects_arrow_then_parquet(tmp_path: Path) -> None:
 def test_open_dataset_missing_raises(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError, match=r"no Arrow .* or Parquet"):
         open_dataset(tmp_path)
+
+
+def test_ui_state_store_roundtrip_and_corrupt_file(tmp_path: Path) -> None:
+    store = UiStateStore(tmp_path / "ui_state.json")
+    assert store.last_dir("input") == ""  # unset
+    store.set_last_dir("input", str(tmp_path))
+    assert store.last_dir("input") == str(tmp_path)
+    assert store.last_dir("output") == ""  # other keys unaffected
+
+    store.set_last_dir("output", str(tmp_path / "gone"))  # not a directory -> reads as ""
+    assert store.last_dir("output") == ""
+
+    (tmp_path / "ui_state.json").write_text("{not json", encoding="utf-8")
+    assert UiStateStore(tmp_path / "ui_state.json").last_dir("input") == ""  # corrupt -> ""

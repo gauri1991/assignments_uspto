@@ -93,7 +93,13 @@ The CLI now has **subcommands**; a bare input path still works as the legacy `pa
 ```bash
 .venv/bin/uspto-assign parse INPUT [--outdir DIR] [--formats LIST] [--basename STEM] [--batch-size N]
 .venv/bin/python main.py INPUT …                    # legacy invocation, identical behaviour
+.venv/bin/uspto-assign templates-summary            # regenerate templates/TEMPLATES.md
 ```
+
+`parse` and `ingest` write a `manifest.json` audit record into the output directory (command,
+input, duration, every output file with rows). `templates-summary` renders every template as
+numbered step one-liners plus its validation warnings into `templates/TEMPLATES.md` — regenerate
+it after any template change (run from the project root so relative reference paths validate).
 
 ### 3b. Buyer-identification pipeline (entity resolution + transaction ledger)
 
@@ -519,17 +525,27 @@ Each template is applied to **each input independently**. Inputs can be USPTO `.
 3. **Load** — an optional max-record cap and a field/table selection tree (loads only what you need).
 4. **Steps** — *Add step ▾* (menu below), reorder isn't needed (they run top-to-bottom);
    **double-click a step to edit** it; *Remove*.
-5. **Output** — choose an output folder; **Workers** (1 = sequential; >1 processes files in parallel).
+5. **Output** — defaults to your last-used folder (or `data/out`); **Workers** (1 = sequential;
+   >1 processes files in parallel). File dialogs remember where you last picked.
 6. **Run batch** — watch the live **console** and the per-file progress bar; a run log is written
    too. A **Cancel** button appears while a run is active (cancellation is per-file: the file in
    flight finishes, the rest are skipped, and the summary notes what was cancelled). Closing the
    window mid-run prompts to cancel first — the window closes itself once the run stops.
 
-**Output layout** — folder-per-source:
+**Output layout** — every run gets its own self-contained, audit-ready folder:
 
 ```
-<output>/<template-name>/<source-stem>/<table>.<ext>
+<output>/
+├── runs_index.csv    ← one appended line per run, across all templates
+└── <template-name>/run_<timestamp>/
+    ├── manifest.json     ← full audit record: template + step summaries, warnings,
+    │                        per-file & per-step row counts, output paths
+    ├── summary.xlsx      ← the same record as a workbook (run / steps / outputs sheets)
+    ├── run.log           ← plain-text per-file results
+    └── <source-stem>/<table>.<ext>
 ```
+
+Re-running never mixes with earlier outputs (a duplicate timestamp gets a `` (1)`` suffix).
 
 **Parallel runs** — with *Workers > 1* and multiple inputs, files are processed in separate
 processes; the console shows distinct worker **PIDs**, interleaved per-file progress, and a combined

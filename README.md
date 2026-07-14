@@ -108,7 +108,7 @@ A native desktop viewer explores the parsed data interactively:
   row/column deltas; templates **duplicate / import / export** and ship with **example presets**.
   Point them at many `.xml`/`.zip` files or dataset folders and run in the background with a
   **colour-coded live console** and a **determinate progress bar**, per-file error isolation, a run
-  log, and **folder-per-source** outputs (`<out>/<template>/<source>/<table>.<ext>`). Sequential by
+  log, and **folder-per-source** outputs (`<out>/<template>/run_<timestamp>/<source>/<table>.<ext>`, with `manifest.json` + `run.log` per run). Sequential by
   default; *Workers > 1*
   processes files in parallel (the console shows distinct worker PIDs + interleaved per-file
   progress + a combined total). The parser **skips building unused tables** (notably the wide

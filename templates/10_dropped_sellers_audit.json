@@ -1,0 +1,91 @@
+[
+  {
+    "name": "10 - Dropped sellers audit (off-gazetteer assignors)",
+    "load": {
+      "limit": null
+    },
+    "steps": [
+      {
+        "kind": "filter",
+        "table": "flat",
+        "clauses": [
+          {
+            "column": "conveyance_text",
+            "op": "contains",
+            "value": "ASSIGNORS INTEREST",
+            "value2": "",
+            "case_sensitive": false
+          },
+          {
+            "column": "assignee_names",
+            "op": "not_empty",
+            "value": "",
+            "value2": "",
+            "case_sensitive": false
+          },
+          {
+            "column": "purge_indicator",
+            "op": "not_equals",
+            "value": "Y",
+            "value2": "",
+            "case_sensitive": false
+          }
+        ],
+        "combine": "and"
+      },
+      {
+        "kind": "reference_match",
+        "table": "flat",
+        "column": "assignor_names",
+        "reference_path": "reference/reference.parquet",
+        "name_column": "organization",
+        "id_column": "assignee_id",
+        "threshold": 90,
+        "scorer": "token_set",
+        "mode": "all",
+        "action": "flag",
+        "emit_score": true,
+        "review_threshold": 95
+      },
+      {
+        "kind": "filter",
+        "table": "flat",
+        "clauses": [
+          {
+            "column": "assignor_names_matched",
+            "op": "equals",
+            "value": "false",
+            "value2": "",
+            "case_sensitive": false
+          }
+        ],
+        "combine": "and"
+      },
+      {
+        "kind": "export",
+        "fmt": "csv",
+        "tables": [
+          "flat"
+        ],
+        "columns": {
+          "flat": [
+            "assignor_names",
+            "assignor_names_match_score",
+            "assignee_names",
+            "conveyance_text",
+            "transaction_date",
+            "doc_number",
+            "reel_no",
+            "frame_no"
+          ]
+        },
+        "renames": {
+          "flat": {
+            "assignor_names": "dropped_seller",
+            "assignor_names_match_score": "best_gazetteer_score"
+          }
+        }
+      }
+    ]
+  }
+]
