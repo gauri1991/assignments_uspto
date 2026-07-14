@@ -43,7 +43,9 @@
         "threshold": 90,
         "scorer": "token_set",
         "mode": "all",
-        "action": "keep_matched"
+        "action": "keep_matched",
+        "emit_score": true,
+        "review_threshold": 95
       },
       {
         "kind": "classify",
@@ -83,7 +85,9 @@
         "threshold": 90,
         "scorer": "token_set",
         "mode": "any",
-        "action": "flag"
+        "action": "flag",
+        "emit_score": true,
+        "review_threshold": 95
       },
       {
         "kind": "filter",
@@ -140,9 +144,13 @@
             "transaction_date",
             "date_source",
             "assignor_names_canonical",
+            "assignor_names_match_score",
+            "assignor_names_match_review",
             "assignee_names",
             "assignee_names_canonical",
             "assignee_names_type",
+            "assignee_names_match_score",
+            "assignee_names_match_review",
             "invention_title",
             "doc_number"
           ]
@@ -150,9 +158,13 @@
         "renames": {
           "flat": {
             "assignor_names_canonical": "seller_clean",
+            "assignor_names_match_score": "seller_match_score",
+            "assignor_names_match_review": "seller_match_review",
             "assignee_names": "buyer_raw",
             "assignee_names_canonical": "buyer_clean",
-            "assignee_names_type": "buyer_rule_type"
+            "assignee_names_type": "buyer_rule_type",
+            "assignee_names_match_score": "buyer_match_score",
+            "assignee_names_match_review": "buyer_match_review"
           }
         }
       }
