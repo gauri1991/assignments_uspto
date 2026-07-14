@@ -3,8 +3,18 @@
 from __future__ import annotations
 
 import pyarrow as pa
+import pytest
 
-from uspto_assignments import classify_column, classify_name, classify_value
+from uspto_assignments import (
+    BatchEvent,
+    ClassifyStep,
+    classify_column,
+    classify_name,
+    classify_value,
+    probablepeople_available,
+)
+from uspto_assignments import batch as batch_mod
+from uspto_assignments.batch import _apply_classify
 
 
 def test_company_names_by_legal_suffix() -> None:
@@ -56,9 +66,36 @@ def test_classify_column_adds_type_and_maps_distinct() -> None:
 
 
 def test_probablepeople_method_falls_back_to_rules_when_absent() -> None:
-    # probablepeople is an optional dependency; without it, classification must not crash.
+    # Whether or not probablepeople is installed, the ML method must never crash.
     assert classify_name("MACROMEDIA, INC.", method="probablepeople") in {
         "company",
         "individual",
         "unknown",
     }
+
+
+def test_probablepeople_available_returns_bool() -> None:
+    assert isinstance(probablepeople_available(), bool)
+
+
+def test_probablepeople_tags_real_names_when_installed() -> None:
+    pytest.importorskip("probablepeople")
+    # With the CRF model present, unambiguous corporation/person names classify correctly.
+    assert classify_name("QUALCOMM INCORPORATED", method="probablepeople") == "company"
+    assert classify_name("SMITH, JOHN A", method="probablepeople") == "individual"
+
+
+def test_apply_classify_warns_once_when_ml_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Simulate probablepeople being absent: _apply_classify must emit exactly one visible warning
+    # and still produce output (via the rules fallback), not fail or spam per name.
+    monkeypatch.setattr(batch_mod, "probablepeople_available", lambda: False)
+    table = pa.table({"assignor_names": ["MACROMEDIA, INC.", "SMITH, JOHN", "ACME LLC"]})
+    tables = {"flat": table}
+    events: list[BatchEvent] = []
+    step = ClassifyStep(table="flat", column="assignor_names", method="probablepeople")
+    _apply_classify(tables, step, events.append)
+    warnings = [
+        e for e in events if e.level == "warning" and "probablepeople not installed" in e.message
+    ]
+    assert len(warnings) == 1
+    assert "assignor_names_type" in tables["flat"].column_names  # rules fallback still ran

@@ -45,7 +45,7 @@ from .batch import (
     run_preview,
     validate_template,
 )
-from .classify import classify_column, classify_name, classify_value
+from .classify import classify_column, classify_name, classify_value, probablepeople_available
 from .conveyance import classify_conveyance, conveyance_type_column
 from .cpcconfig import (
     CpcCacheConfig,
@@ -205,6 +205,7 @@ __all__ = [
     "open_parquet_store",
     "open_store",
     "parse_to_store",
+    "probablepeople_available",
     "query",
     "read_table_file",
     "reconcile_cpc",

@@ -31,7 +31,7 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.compute as _pc_module
 
-from .classify import ClassifyMethod, classify_column, classify_value
+from .classify import ClassifyMethod, classify_column, classify_value, probablepeople_available
 from .classify import CombineMode as ClassifyCombineMode
 from .cpcconfig import CPC_CONFIG_FILENAME, load_config
 from .cpcmatch import (
@@ -967,7 +967,7 @@ def validate_template(  # noqa: PLR0912 - one validation branch per step kind
 class BatchEvent:
     """A progress/log event surfaced to the caller (mirrored to the UI console)."""
 
-    level: str  # "info" | "error" | "success"
+    level: str  # "info" | "warning" | "error" | "success"
     message: str
     # "file_done" marks a per-file completion line — the UI drives its determinate progress bar
     # from this, not from the message text.
@@ -1157,6 +1157,14 @@ def _apply_classify(tables: dict[str, pa.Table], step: ClassifyStep, emit: OnEve
     if table is None or step.column not in table.column_names:
         emit(BatchEvent("info", f"  skip classify: {step.table}.{step.column} not present"))
         return
+    if step.method == "probablepeople" and not probablepeople_available():
+        emit(
+            BatchEvent(
+                "warning",
+                f"  probablepeople not installed — classify used rules for "
+                f"{step.table}.{step.column} (pip install probablepeople to enable ML)",
+            )
+        )
 
     def on_progress(done: int, total: int) -> None:
         emit(

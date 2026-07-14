@@ -12,8 +12,10 @@ encoding) so cost scales with unique names, not row count — the same pattern a
 
 from __future__ import annotations
 
+import importlib.util
 import logging
 from collections.abc import Callable
+from functools import cache
 from typing import Any, Literal
 
 import pyarrow as pa
@@ -171,14 +173,35 @@ def _classify_rules(name: str) -> EntityType:
     return "unknown"
 
 
-def _probablepeople_classify(name: str) -> EntityType:
-    """Classify via the optional ``probablepeople`` CRF model, falling back to rules if absent."""
+@cache
+def _load_probablepeople() -> Any | None:
+    """Import the optional ``probablepeople`` backend once (cached); ``None`` when not installed."""
     try:
         import probablepeople  # type: ignore[import-untyped]  # noqa: PLC0415 - optional backend
     except ImportError:
-        logger.warning("probablepeople not installed; falling back to rule-based classification")
+        return None
+    return probablepeople
+
+
+def probablepeople_available() -> bool:
+    """Whether the optional ``probablepeople`` ML backend is importable.
+
+    A cheap :func:`importlib.util.find_spec` check with no side effects — safe to call from the UI
+    to label the ML method, and from the batch layer to decide whether to warn about the fallback.
+    """
+    return importlib.util.find_spec("probablepeople") is not None
+
+
+def _probablepeople_classify(name: str) -> EntityType:
+    """Classify via the optional ``probablepeople`` CRF model, falling back to rules if absent.
+
+    The import is resolved once (:func:`_load_probablepeople`), so a batch of thousands of distinct
+    names neither re-attempts a missing import nor logs per name — the user-facing "used rules"
+    notice is emitted once by the batch layer instead.
+    """
+    pp = _load_probablepeople()
+    if pp is None:
         return _classify_rules(name)
-    pp: Any = probablepeople  # under-typed third-party module
     try:
         _tagged, name_type = pp.tag(name)
     except Exception:  # probablepeople raises on unparseable input — treat as ambiguous
