@@ -8,6 +8,7 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from openpyxl import load_workbook
 
 from uspto_assignments import TableStore, exporters, parse_to_store
 
@@ -97,3 +98,17 @@ def test_export_store_xlsx_is_single_multisheet_workbook(tmp_path: Path) -> None
     wb = openpyxl.load_workbook(book)
     assert set(wb.sheetnames) == {"assignments", "assignors", "assignees", "properties", "flat"}
     assert counts["properties"] == 4
+
+
+def test_write_workbook_multi_sheet(tmp_path: Path) -> None:
+    sheets = {
+        "alpha": pa.table({"x": ["1", "2"]}),
+        "beta": pa.table({"y": ["a"]}),
+    }
+    counts = exporters.write_workbook(tmp_path / "wb.xlsx", sheets)
+    assert counts == {"alpha": 2, "beta": 1}
+    workbook = load_workbook(tmp_path / "wb.xlsx", read_only=True)
+    try:
+        assert workbook.sheetnames == ["alpha", "beta"]
+    finally:
+        workbook.close()

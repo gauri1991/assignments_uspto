@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Literal
 
@@ -140,6 +140,22 @@ def _stringify_list_columns(table: pa.Table) -> pa.Table:
     return out
 
 
+def write_workbook(path: Path, sheets: Mapping[str, pa.Table]) -> dict[str, int]:
+    """Write a multi-sheet xlsx workbook (one sheet per entry, streamed).
+
+    Sheet titles are truncated to Excel's 31-character limit. Returns rows written per sheet.
+    """
+    from openpyxl import Workbook  # noqa: PLC0415 - lazy; xlsx-only cost
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    wb = Workbook(write_only=True)
+    counts = {
+        name: _fill_sheet(wb.create_sheet(title=name[:31]), table) for name, table in sheets.items()
+    }
+    wb.save(str(path))
+    return counts
+
+
 def export_store(store: TableStore, out_dir: Path, fmt: ExportFormat) -> dict[str, int]:
     """Export every table in ``store`` into ``out_dir`` in ``fmt``.
 
@@ -162,15 +178,9 @@ def export_store(store: TableStore, out_dir: Path, fmt: ExportFormat) -> dict[st
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if fmt == "xlsx":
-        from openpyxl import Workbook  # noqa: PLC0415 - lazy; xlsx-only cost
-
-        wb = Workbook(write_only=True)
-        counts = {
-            name: _fill_sheet(wb.create_sheet(title=name[:31]), store.table(name))
-            for name in store.names
-        }
-        wb.save(str(out_dir / "assignments.xlsx"))
-        return counts
+        return write_workbook(
+            out_dir / "assignments.xlsx", {name: store.table(name) for name in store.names}
+        )
 
     return {
         name: export(store.table(name), out_dir / f"{name}{FORMAT_SUFFIX[fmt]}", fmt)

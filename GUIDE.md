@@ -528,11 +528,14 @@ Each template is applied to **each input independently**. Inputs can be USPTO `.
 **Output layout** — every run gets its own self-contained, audit-ready folder:
 
 ```
-<output>/<template-name>/run_<timestamp>/
-├── manifest.json     ← full audit record: template + step summaries, warnings,
-│                        per-file & per-step row counts, output paths
-├── run.log           ← plain-text per-file results
-└── <source-stem>/<table>.<ext>
+<output>/
+├── runs_index.csv    ← one appended line per run, across all templates
+└── <template-name>/run_<timestamp>/
+    ├── manifest.json     ← full audit record: template + step summaries, warnings,
+    │                        per-file & per-step row counts, output paths
+    ├── summary.xlsx      ← the same record as a workbook (run / steps / outputs sheets)
+    ├── run.log           ← plain-text per-file results
+    └── <source-stem>/<table>.<ext>
 ```
 
 Re-running never mixes with earlier outputs (a duplicate timestamp gets a `` (1)`` suffix).

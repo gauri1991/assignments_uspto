@@ -10,6 +10,7 @@ so a UI can mirror it to a console. Templates serialize to JSON like :mod:`uspto
 
 from __future__ import annotations
 
+import csv
 import json
 import logging
 import multiprocessing as mp
@@ -42,7 +43,7 @@ from .cpcmatch import (
     match_portfolio,
 )
 from .datasource import CpcCache, CpcRunContext, make_source
-from .exporters import FORMAT_SUFFIX, ExportFormat, export
+from .exporters import FORMAT_SUFFIX, ExportFormat, export, write_workbook
 from .filters import CombineMode, FilterClause, SortSpec, filter_sort, sort_indices
 from .model import columns_for
 from .naming import unique_path
@@ -1950,6 +1951,129 @@ def _write_manifest(  # noqa: PLR0913 - snapshotting the whole run takes the run
     )
 
 
+def _write_summary_xlsx(  # noqa: PLR0913 - snapshotting the whole run takes the run's collaborators
+    run_dir: Path,
+    template: BatchTemplate,
+    warnings: list[str],
+    results: list[FileResult],
+    *,
+    timestamp: str,
+    workers: int,
+    cancelled: bool,
+    elapsed: float,
+    inputs: list[Path],
+) -> None:
+    """Write ``summary.xlsx``: the manifest's audit record as a human-readable workbook."""
+    run_rows = [
+        ("template", template.name),
+        ("timestamp", timestamp),
+        ("duration_seconds", f"{elapsed:.1f}"),
+        ("workers", str(workers)),
+        ("cancelled", str(cancelled).lower()),
+        ("succeeded", str(sum(1 for r in results if r.ok))),
+        ("failed", str(sum(1 for r in results if not r.ok))),
+        *((f"input {i}", str(path)) for i, path in enumerate(inputs, start=1)),
+        *((f"warning {i}", w) for i, w in enumerate(warnings, start=1)),
+    ]
+    run_sheet = pa.table(
+        {
+            "key": pa.array([k for k, _ in run_rows], type=pa.string()),
+            "value": pa.array([v for _, v in run_rows], type=pa.string()),
+        }
+    )
+
+    step_cols: dict[str, list[Any]] = {
+        "file": [],
+        "step": [],
+        "description": [],
+        "rows_before": [],
+        "rows_after": [],
+        "delta": [],
+        "note": [],
+    }
+    for result in results:
+        name = Path(result.source).name
+        for stat in result.steps:
+            step_cols["file"].append(name)
+            step_cols["step"].append(stat.index)
+            step_cols["description"].append(stat.label)
+            step_cols["rows_before"].append(stat.rows_before)
+            step_cols["rows_after"].append(stat.rows_after)
+            step_cols["delta"].append(stat.rows_after - stat.rows_before)
+            step_cols["note"].append(stat.note)
+    steps_sheet = (
+        pa.table(step_cols)
+        if step_cols["file"]
+        else pa.table({name: pa.array([], type=pa.string()) for name in step_cols})
+    )
+
+    out_cols: dict[str, list[Any]] = {"file": [], "path": [], "table": [], "rows": [], "format": []}
+    for result in results:
+        name = Path(result.source).name
+        for entry in _output_entries(result, run_dir):
+            out_cols["file"].append(name)
+            out_cols["path"].append(entry["path"])
+            out_cols["table"].append(entry["table"])
+            out_cols["rows"].append(entry["rows"])
+            out_cols["format"].append(entry["format"])
+    outputs_sheet = (
+        pa.table(out_cols)
+        if out_cols["file"]
+        else pa.table({name: pa.array([], type=pa.string()) for name in out_cols})
+    )
+
+    write_workbook(
+        run_dir / "summary.xlsx",
+        {"run": run_sheet, "steps": steps_sheet, "outputs": outputs_sheet},
+    )
+
+
+_RUNS_INDEX_HEADER = [
+    "timestamp",
+    "template",
+    "inputs",
+    "succeeded",
+    "failed",
+    "cancelled",
+    "run_dir",
+]
+
+
+def _append_runs_index(  # noqa: PLR0913 - one ledger line per run
+    out_root: Path,
+    *,
+    timestamp: str,
+    template_name: str,
+    inputs: int,
+    succeeded: int,
+    failed: int,
+    cancelled: bool,
+    run_dir: Path,
+) -> None:
+    """Append one line per run to ``<out_root>/runs_index.csv`` (the cross-run ledger).
+
+    Single-line appends only (no read-modify-write), so concurrent runs into the same
+    ``out_root`` interleave rows but never corrupt each other.
+    """
+    index_path = out_root / "runs_index.csv"
+    new_file = not index_path.exists()
+    with index_path.open("a", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        if new_file:
+            writer.writerow(_RUNS_INDEX_HEADER)
+        writer.writerow(
+            [
+                timestamp,
+                template_name,
+                inputs,
+                succeeded,
+                failed,
+                str(cancelled).lower(),
+                str(run_dir.relative_to(out_root)),
+            ]
+        )
+
+
 def run_batch(  # noqa: PLR0913 - a clear public entry point with keyword-only options
     template: BatchTemplate,
     inputs: list[Path],
@@ -2074,6 +2198,27 @@ def run_batch(  # noqa: PLR0913 - a clear public entry point with keyword-only o
         strict=strict,
         elapsed=elapsed,
         inputs=inputs,
+    )
+    _write_summary_xlsx(
+        run_dir,
+        template,
+        validation_warnings,
+        results,
+        timestamp=timestamp,
+        workers=workers,
+        cancelled=cancelled,
+        elapsed=elapsed,
+        inputs=inputs,
+    )
+    _append_runs_index(
+        out_root,
+        timestamp=timestamp,
+        template_name=template.name,
+        inputs=len(inputs),
+        succeeded=succeeded,
+        failed=failed,
+        cancelled=cancelled,
+        run_dir=run_dir,
     )
     return BatchResult(
         succeeded=succeeded,

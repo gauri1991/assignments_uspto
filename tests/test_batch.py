@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import json
 import shutil
 import zipfile
@@ -13,6 +14,7 @@ from typing import Any
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from openpyxl import load_workbook
 
 from uspto_assignments import (
     AggregateStep,
@@ -1074,3 +1076,49 @@ def test_run_batch_same_timestamp_gets_distinct_run_dirs(tmp_path: Path) -> None
     second = run_batch(_granted_template(), [FIXTURE], tmp_path / "out", timestamp="dup")
     assert Path(first.run_dir).name == "run_dup"
     assert Path(second.run_dir).name == "run_dup (1)"  # unique_path keeps runs separate
+
+
+def test_run_batch_writes_summary_xlsx(tmp_path: Path) -> None:
+    result = run_batch(_granted_template(), [FIXTURE], tmp_path / "out", timestamp="sx")
+    workbook = load_workbook(Path(result.run_dir) / "summary.xlsx", read_only=True)
+    try:
+        assert workbook.sheetnames == ["run", "steps", "outputs"]
+        steps = list(workbook["steps"].values)
+        assert steps[0] == (
+            "file",
+            "step",
+            "description",
+            "rows_before",
+            "rows_after",
+            "delta",
+            "note",
+        )
+        assert len(steps) - 1 == len(_granted_template().steps)  # one row per step
+        for row in steps[1:]:
+            before, after, delta = int(str(row[3])), int(str(row[4])), int(str(row[5]))
+            assert delta == after - before  # delta arithmetic holds
+        outputs = list(workbook["outputs"].values)
+        assert outputs[0] == ("file", "path", "table", "rows", "format")
+        assert len(outputs) == 2  # header + the one exported table
+    finally:
+        workbook.close()
+
+
+def test_run_batch_appends_runs_index(tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    first = run_batch(_granted_template(), [FIXTURE], out, timestamp="i1")
+    second = run_batch(_granted_template(), [FIXTURE], out, timestamp="i2")
+    with (out / "runs_index.csv").open(newline="", encoding="utf-8") as handle:
+        rows = list(csv.reader(handle))
+    assert rows[0] == [
+        "timestamp",
+        "template",
+        "inputs",
+        "succeeded",
+        "failed",
+        "cancelled",
+        "run_dir",
+    ]
+    assert len(rows) == 3  # header + two runs
+    assert rows[1][6] == str(Path(first.run_dir).relative_to(out))
+    assert rows[2][6] == str(Path(second.run_dir).relative_to(out))
