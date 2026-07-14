@@ -43,12 +43,17 @@ def _delimiter_for(path: Path, override: str) -> str:
 
 
 def reference_columns(path: Path, delimiter: str = "") -> list[str]:
-    """The column names available in a reference file (cheap: parquet schema / CSV header only)."""
+    """The column names available in a reference file (cheap: parquet schema / CSV header only).
+
+    Delimited headers may be quoted (the PatentsView bulk TSV quotes every field) and may carry a
+    UTF-8 BOM — both are stripped so names compare equal to what pyarrow's CSV reader yields.
+    """
     if path.suffix.lower() == ".parquet":
         return list(pq.read_schema(path).names)
-    with path.open("r", encoding="utf-8", errors="replace") as handle:
+    with path.open("r", encoding="utf-8-sig", errors="replace") as handle:
         header = handle.readline().rstrip("\r\n")
-    return header.split(_delimiter_for(path, delimiter))
+    sep = _delimiter_for(path, delimiter)
+    return [field.strip().strip('"') for field in header.split(sep)]
 
 
 def _check_reference_columns(path: Path, columns: list[str], delimiter: str) -> None:

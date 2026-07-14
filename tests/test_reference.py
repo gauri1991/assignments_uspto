@@ -157,3 +157,18 @@ def test_reference_columns_reads_parquet_and_tsv_headers(tmp_path: Path) -> None
     parquet = tmp_path / "ref.parquet"
     pq.write_table(pa.table({"organization": ["X"], "assignee_id": ["1"]}), parquet)  # pyright: ignore[reportUnknownMemberType]
     assert reference_columns(parquet) == ["organization", "assignee_id"]
+
+
+def test_reference_columns_strips_quoted_header_and_bom(tmp_path: Path) -> None:
+    # The PatentsView bulk TSV quotes every header field; a BOM can also sneak in.
+    quoted = tmp_path / "bulk.tsv"
+    quoted.write_bytes(
+        b"\xef\xbb\xbf"  # UTF-8 BOM
+        b'"patent_id"\t"assignee_id"\t"disambig_assignee_organization"\n'
+        b'"1"\t"A1"\t"ACME CORPORATION"\n'
+    )
+    columns = reference_columns(quoted)
+    assert columns == ["patent_id", "assignee_id", "disambig_assignee_organization"]
+    # and the up-front check therefore accepts the real header names
+    gaz = build_reference(quoted, "disambig_assignee_organization", id_column="assignee_id")
+    assert gaz.size() == 1
