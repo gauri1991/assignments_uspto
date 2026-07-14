@@ -103,7 +103,7 @@ def test_batch_dialog_builds_template_from_ui(qtbot: Any, tmp_path: Path) -> Non
 def test_batch_dialog_runs_and_writes_output(qtbot: Any, tmp_path: Path) -> None:
     create_app([])
     store = BatchTemplateStore(tmp_path / "batch.json")
-    dialog = BatchDialog(store)
+    dialog = BatchDialog(store, EntityMemoryStore(tmp_path / "entities.json"))
     qtbot.addWidget(dialog)
 
     dialog._template_name.setText("granted")
@@ -571,7 +571,9 @@ def test_close_blocked_while_running_then_allowed(
     qtbot: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     create_app([])
-    dialog = BatchDialog(BatchTemplateStore(tmp_path / "b.json"))
+    dialog = BatchDialog(
+        BatchTemplateStore(tmp_path / "b.json"), EntityMemoryStore(tmp_path / "entities.json")
+    )
     qtbot.addWidget(dialog)
     dialog._template_name.setText("granted")
     dialog._steps = list(_template().steps)
@@ -599,7 +601,9 @@ def test_close_during_run_cancels_and_closes_after(
     qtbot: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     create_app([])
-    dialog = BatchDialog(BatchTemplateStore(tmp_path / "b.json"))
+    dialog = BatchDialog(
+        BatchTemplateStore(tmp_path / "b.json"), EntityMemoryStore(tmp_path / "entities.json")
+    )
     qtbot.addWidget(dialog)
     dialog._template_name.setText("granted")
     dialog._steps = list(_template().steps)
@@ -620,7 +624,9 @@ def test_close_during_run_cancels_and_closes_after(
 
 def test_cancel_slot_requests_worker_stop(qtbot: Any, tmp_path: Path) -> None:
     create_app([])
-    dialog = BatchDialog(BatchTemplateStore(tmp_path / "b.json"))
+    dialog = BatchDialog(
+        BatchTemplateStore(tmp_path / "b.json"), EntityMemoryStore(tmp_path / "entities.json")
+    )
     qtbot.addWidget(dialog)
     dialog._template_name.setText("granted")
     dialog._steps = list(_template().steps)
@@ -754,3 +760,19 @@ def test_filter_step_dialog_rebuilds_bar_on_table_change(qtbot: Any) -> None:
         dialog._filter_bar._column.itemText(i) for i in range(dialog._filter_bar._column.count())
     ]
     assert "name" in columns  # an assignees column
+
+
+def test_run_without_normalize_does_not_write_entity_store(qtbot: Any, tmp_path: Path) -> None:
+    create_app([])
+    memory_path = tmp_path / "entities.json"
+    dialog = BatchDialog(BatchTemplateStore(tmp_path / "b.json"), EntityMemoryStore(memory_path))
+    qtbot.addWidget(dialog)
+    dialog._template_name.setText("granted")
+    dialog._steps = list(_template().steps)  # filter + export only: nothing to learn
+    dialog._inputs.addItem(str(FIXTURE))
+    dialog._out_dir.setText(str(tmp_path / "out"))
+    dialog._run()
+
+    qtbot.waitUntil(lambda: "Done:" in dialog._console.toPlainText(), timeout=15000)
+    assert not memory_path.exists()  # untouched memory must not rewrite the store
+    assert "Entity memory:" not in dialog._console.toPlainText()

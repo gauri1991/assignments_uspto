@@ -1941,7 +1941,14 @@ class BatchDialog(QDialog):
 
     def _on_finished(self, result: object) -> None:
         self._finish_run()
-        if self._memory is not None:  # persist any entities learned during the run
+        batch = result if isinstance(result, BatchResult) else None
+        # Persist only when the run actually learned something. Sequential runs record into the
+        # shared memory's ``learned``; parallel runs carry it per file (``apply_learned`` merges
+        # silently), so check both. A run with no normalize steps must not rewrite the store.
+        learned = bool(self._memory is not None and self._memory.learned) or bool(
+            batch is not None and any(r.learned for r in batch.results)
+        )
+        if self._memory is not None and learned:
             self._memory_store.save(self._memory)
             canonicals, aliases = self._memory.counts()
             self._append_console(f"Entity memory: {canonicals:,} canonicals, {aliases:,} aliases")
