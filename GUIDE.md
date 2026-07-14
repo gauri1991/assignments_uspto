@@ -809,26 +809,28 @@ generic; for a **filter** step, only "check the filter clause" applies.
 firm-to-firm / CPC templates open with a filter that **AND**s four conditions, so a row survives only
 if *all* hold:
 
-1. `conveyance_text` **contains** `ASSIGNORS INTEREST`
+1. `conveyance_text` **contains** `ASSIGNOR'S INTEREST`
 2. `assignee_names` **not empty**
 3. `purge_indicator` **≠** `Y`
 4. `recorded_date` **not empty**
 
-The usual culprit is **condition 1**. Real USPTO sales read
-`ASSIGNMENT OF ASSIGNORS INTEREST (SEE DOCUMENT FOR DETAILS)` (which contains the phrase), but a file
-holding only **security interests, mergers, name changes, or government-interest** records contains no
-`ASSIGNORS INTEREST` text — so the AND drops everything.
+The usual culprit is **condition 1**. Real USPTO sales read `ASSIGNMENT OF ASSIGNOR'S INTEREST` —
+**with an apostrophe** (`ASSIGNOR'S`). The templates match that phrase; a file holding only
+**security interests, mergers, name changes, or government-interest** records contains no
+`ASSIGNOR'S INTEREST` text, so the AND drops everything. (Note: earlier template versions searched
+for `ASSIGNORS INTEREST` *without* the apostrophe, which matched almost nothing — if you edited a
+copy of a template, make sure the clause has the apostrophe.)
 
 **How to diagnose (30 seconds):** open the same `.xml`/`.zip` normally (not batch), add a filter clause
 on **`conveyance_text`** — because it's low-cardinality the value box pre-fills the **distinct
-conveyance types actually in your file**. If none contain "ASSIGNORS INTEREST", your file has no
+conveyance types actually in your file**. If none contain "ASSIGNOR'S INTEREST", your file has no
 firm-to-firm sale records under that phrasing. While there, check `recorded_date` isn't blank across the
 file (that would trip condition 4). You can also use **Batch ▸ Preview** — it runs the pipeline on a
 ~1,000-row sample and shows each step's row delta, pinpointing which step zeroed the table.
 
 **Fixes:**
 - **Relax condition 1** — double-click the filter step and change the clause to a phrase your file
-  actually uses (e.g. just `ASSIGNORS`, or the specific conveyance type you want), or remove it.
+  actually uses (e.g. just `ASSIGNOR`, or the specific conveyance type you want), or remove it.
 - Accept that the file genuinely has **no** firm-to-firm records — then a firm-to-firm template can't
   produce output regardless.
 

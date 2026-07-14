@@ -12,7 +12,7 @@
           {
             "column": "conveyance_text",
             "op": "contains",
-            "value": "ASSIGNORS INTEREST",
+            "value": "ASSIGNOR'S INTEREST",
             "value2": "",
             "case_sensitive": false
           },

@@ -1048,6 +1048,23 @@ def test_run_batch_strict_aborts_before_output(tmp_path: Path) -> None:
     assert not (tmp_path / "out").exists()  # aborted before any output was written
 
 
+def test_run_batch_filter_missing_column_fails_with_clear_message(tmp_path: Path) -> None:
+    # Default (non-strict) run: a filter clause naming a column the table lacks must fail that file
+    # with an actionable message naming the column — not an opaque pyarrow KeyError.
+    template = BatchTemplate(
+        name="badfilter",
+        steps=[
+            FilterStep(table="flat", clauses=[FilterClause("nope_col", "contains", "x")]),
+            ExportStep(fmt="csv", tables=["flat"]),
+        ],
+    )
+    result = run_batch(template, [FIXTURE], tmp_path / "out", timestamp="bf")
+    assert result.succeeded == 0
+    error = result.results[0].error or ""
+    assert "nope_col" in error and "not present" in error
+    assert "KeyError" not in error  # the opaque pyarrow error is no longer surfaced
+
+
 def test_run_batch_writes_manifest(tmp_path: Path) -> None:
     result = run_batch(_granted_template(), [FIXTURE], tmp_path / "out", timestamp="mf")
     run_dir = Path(result.run_dir)

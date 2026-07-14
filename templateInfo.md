@@ -405,10 +405,13 @@ template → how to verify with the tool**.
    `⚠ dropped all rows` in the Preview per-step summary. If a step zeroes the table, it's the
    path/column/gate, not your data.
 
-2. **Conveyance filter — recall hole + blind spot.** `contains "ASSIGNORS INTEREST"` misses variants
-   (`ASSIGNOR'S INTEREST`, older DTD text) and excludes nunc-pro-tunc / corrective assignments (some
-   are the only record of a real transfer). It also does **not** separate inventor→employer from
-   firm→firm — both carry that text.
+2. **Conveyance filter — recall hole + blind spot.** The templates match `contains "ASSIGNOR'S
+   INTEREST"` (with the apostrophe — the dominant USPTO wording `ASSIGNMENT OF ASSIGNOR'S INTEREST`,
+   ~479k rows in a typical daily file). Earlier versions searched `ASSIGNORS INTEREST` *without* the
+   apostrophe, which matched almost nothing and left `flat` empty — fixed across all bundled
+   templates. It still misses rarer variants (older DTD text) and excludes nunc-pro-tunc / corrective
+   assignments (some are the only record of a real transfer), and does **not** separate
+   inventor→employer from firm→firm — both carry that text.
    **Fix/Check:** run an `aggregate` on `conveyance_text` (group_by it) to see the real vocabulary,
    then build an **OR** filter of the strings you actually see. Separate inventors using the **seller
    gate / classify**, not the conveyance text.

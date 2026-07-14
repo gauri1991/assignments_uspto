@@ -1434,11 +1434,34 @@ def _apply_aggregate(tables: dict[str, pa.Table], step: AggregateStep, emit: OnE
     )
 
 
+def _check_filter_columns(table: pa.Table, step: FilterStep) -> None:
+    """Raise a clear error when a filter clause (or sort) names a column the table lacks.
+
+    Without this, pyarrow surfaces an opaque ``KeyError: 'Field "x" does not exist in schema'`` and
+    the whole file aborts with no output — commonly because an earlier step renamed/dropped the
+    column, the wrong table was chosen, or a clause was added with no column selected (empty name).
+    """
+    available = set(table.column_names)
+    needed = [c.column for c in step.clauses]
+    if step.sort and step.sort[0]:
+        needed.append(step.sort[0])
+    missing = [c for c in dict.fromkeys(needed) if c not in available]
+    if missing:
+        shown = ", ".join(repr(c) for c in missing)
+        raise ValueError(
+            f"filter on '{step.table}': column(s) {shown} not present "
+            f"(available: {', '.join(table.column_names)}). An earlier step may have renamed or "
+            "dropped the column, or a filter row was added without choosing a column — fix the "
+            "clause to name an existing column."
+        )
+
+
 def _apply_filter(tables: dict[str, pa.Table], step: FilterStep, emit: OnEvent) -> None:
     table = tables.get(step.table)
     if table is None:
         emit(BatchEvent("info", f"  skip filter: table '{step.table}' not present"))
         return
+    _check_filter_columns(table, step)
     before = table.num_rows
     indices = filter_sort(table, step.clauses, combine=step.combine, sort=step.sort)
     result = table.take(indices)
