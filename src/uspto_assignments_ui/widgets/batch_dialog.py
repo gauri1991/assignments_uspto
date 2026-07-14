@@ -1666,6 +1666,14 @@ class BatchDialog(QDialog):
         cpc_row.addWidget(cpc_btn)
         column.addLayout(cpc_row)
 
+        # Trace: dump each enabled step's output to <source>/steps/ for manual review.
+        self._save_steps = QCheckBox("Save each step's output (for review)")
+        self._save_steps.setToolTip(
+            "Write every enabled step's resulting table(s) to <run>/<source>/steps/"
+            "NN_<table>.parquet so you can open and check each intermediate."
+        )
+        column.addWidget(self._save_steps)
+
         column.addWidget(SectionLabel("Console"))
         self._console = QPlainTextEdit()
         self._console.setReadOnly(True)
@@ -1965,6 +1973,7 @@ class BatchDialog(QDialog):
             timestamp=timestamp,
             memory=self._memory,
             cpc_ctx=self._cpc_ctx(),
+            trace_steps=self._save_steps.isChecked(),
         )
         worker.moveToThread(thread)
         thread.started.connect(worker.run)

@@ -1140,3 +1140,39 @@ def test_template_10_loads_and_validates(tmp_path: Path) -> None:
     assert isinstance(step, ReferenceMatchStep)
     step.reference_path = str(reference)
     assert validate_template(template.load, template.steps) == []
+
+
+def test_run_batch_trace_steps_writes_per_step_parquet(tmp_path: Path) -> None:
+    normalize = NormalizeStep(table="assignees", column="name")
+    disabled = SortStep(table="assignees", column="name")
+    disabled.enabled = False
+    template = BatchTemplate(
+        name="traced",
+        steps=[
+            FilterStep(table="properties", clauses=[FilterClause("doc_kind", "equals", "B2")]),
+            normalize,
+            disabled,
+            ExportStep(fmt="csv", tables=["assignees"]),
+        ],
+    )
+    result = run_batch(template, [FIXTURE], tmp_path / "out", timestamp="tr", trace_steps=True)
+    steps_dir = Path(result.run_dir) / "sample_assignment" / "steps"
+    files = sorted(p.name for p in steps_dir.glob("*.parquet"))
+    # steps 1 (filter/properties) and 2 (normalize/assignees) trace; step 3 is disabled and step 4
+    # (export) writes the real export files, not a working-table trace.
+    assert files == ["01_properties.parquet", "02_assignees.parquet"]
+    # the traced normalize table carries the canonical column the step added
+    normalized = pq.read_table(steps_dir / "02_assignees.parquet")  # pyright: ignore[reportUnknownMemberType]
+    assert "name_canonical" in normalized.column_names
+    # the manifest lists the trace files (run-relative)
+    manifest = json.loads((Path(result.run_dir) / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["files"][0]["step_outputs"] == [
+        "sample_assignment/steps/01_properties.parquet",
+        "sample_assignment/steps/02_assignees.parquet",
+    ]
+
+
+def test_run_batch_no_trace_writes_no_steps_dir(tmp_path: Path) -> None:
+    result = run_batch(_granted_template(), [FIXTURE], tmp_path / "out", timestamp="nt")
+    assert not (Path(result.run_dir) / "sample_assignment" / "steps").exists()
+    assert result.results[0].step_outputs == []

@@ -105,6 +105,7 @@ class BatchWorker(QObject):
         timestamp: str,
         memory: EntityMemory | None = None,
         cpc_ctx: CpcRunContext | None = None,
+        trace_steps: bool = False,
     ) -> None:
         super().__init__()
         self._template = template
@@ -114,6 +115,7 @@ class BatchWorker(QObject):
         self._timestamp = timestamp
         self._memory = memory
         self._cpc_ctx = cpc_ctx
+        self._trace_steps = trace_steps
         self._stop = threading.Event()
 
     def cancel(self) -> None:
@@ -133,6 +135,7 @@ class BatchWorker(QObject):
                 on_event=self._emit_event,
                 cpc_ctx=self._cpc_ctx,
                 should_stop=self._stop.is_set,
+                trace_steps=self._trace_steps,
             )
         except Exception as exc:  # thread boundary: report any error via the failed signal
             self.failed.emit(f"{type(exc).__name__}: {exc}")

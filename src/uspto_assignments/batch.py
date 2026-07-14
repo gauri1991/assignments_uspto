@@ -953,6 +953,7 @@ class FileResult:
     # (alias, canonical, score) pairs the normalize steps learned while processing this file.
     learned: list[tuple[str, str, int]] = field(default_factory=list[tuple[str, str, int]])
     steps: list[StepStat] = field(default_factory=list[StepStat])  # per-step audit trail
+    step_outputs: list[str] = field(default_factory=list[str])  # per-step trace files (trace mode)
 
 
 @dataclass(slots=True)
@@ -1600,7 +1601,24 @@ def _warn_if_emptied(  # noqa: PLR0913 - a small guard threading the loop's loca
     return ""
 
 
-def _process_input(  # noqa: PLR0913 - threads collaborators; one branch per step kind
+def _trace_step_outputs(
+    tables: dict[str, pa.Table], touched: list[str], index: int, source_dir: Path
+) -> list[str]:
+    """Write a step's resulting table(s) to ``<source>/steps/NN_<table>.parquet`` for review."""
+    steps_dir = source_dir / "steps"
+    steps_dir.mkdir(parents=True, exist_ok=True)
+    written: list[str] = []
+    for name in touched:
+        table = tables.get(name)
+        if table is None:
+            continue
+        path = steps_dir / f"{index:02d}_{_safe_name(name)}.parquet"
+        export(table, path, "parquet")
+        written.append(str(path))
+    return written
+
+
+def _process_input(  # noqa: PLR0913 - threads collaborators; one branch per kind
     template: BatchTemplate,
     source: Path,
     template_dir: Path,
@@ -1609,12 +1627,14 @@ def _process_input(  # noqa: PLR0913 - threads collaborators; one branch per ste
     on_parse: OnParse | None = None,
     memory: EntityMemory | None = None,
     cpc_ctx: CpcRunContext | None = None,
+    trace_steps: bool = False,
 ) -> FileResult:
     memory = memory if memory is not None else EntityMemory()
     learned_before = len(memory.learned)
     start = time.monotonic()
     work_dir: Path | None = None
     step_stats: list[StepStat] = []  # audit trail (partial stats survive a mid-run failure)
+    step_outputs: list[str] = []  # per-step trace files, when trace_steps is on
     try:
         if source.is_file():
             work_dir = Path(tempfile.mkdtemp(prefix="uspto_batch_"))
@@ -1633,6 +1653,7 @@ def _process_input(  # noqa: PLR0913 - threads collaborators; one branch per ste
             before_cols: set[str] = (
                 set(tables[table_name].column_names) if table_name in tables else set()
             )
+            before_tables = set(tables)
             outputs.extend(
                 _apply_step(tables, step, memory, used_targets, source_dir, emit, cpc_ctx)
             )
@@ -1653,6 +1674,11 @@ def _process_input(  # noqa: PLR0913 - threads collaborators; one branch per ste
                     note=note,
                 )
             )
+            if trace_steps:  # the mutated table plus any new tables the step created
+                touched = ([table_name] if table_name in tables else []) + sorted(
+                    set(tables) - before_tables
+                )
+                step_outputs.extend(_trace_step_outputs(tables, touched, index, source_dir))
         rows = {name: table.num_rows for name, table in tables.items()}
         result = FileResult(
             str(source),
@@ -1661,11 +1687,16 @@ def _process_input(  # noqa: PLR0913 - threads collaborators; one branch per ste
             rows=rows,
             learned=memory.learned[learned_before:],
             steps=step_stats,
+            step_outputs=step_outputs,
         )
     except Exception as exc:  # per-file isolation: log, record, and keep going
         logger.exception("batch: failed on %s", source)
         result = FileResult(
-            str(source), ok=False, error=f"{type(exc).__name__}: {exc}", steps=step_stats
+            str(source),
+            ok=False,
+            error=f"{type(exc).__name__}: {exc}",
+            steps=step_stats,
+            step_outputs=step_outputs,
         )
     finally:
         if work_dir is not None:
@@ -1682,6 +1713,7 @@ def _process_one(  # noqa: PLR0913 - picklable worker threading the run's collab
     event_queue: Any,
     memory: EntityMemory,
     cpc_ctx: CpcRunContext | None = None,
+    trace_steps: bool = False,
 ) -> FileResult:
     """Picklable process-pool worker: streams events/progress live via ``event_queue``.
 
@@ -1699,6 +1731,7 @@ def _process_one(  # noqa: PLR0913 - picklable worker threading the run's collab
         on_parse=lambda count: event_queue.put(("parse", str(source), count)),
         memory=memory,
         cpc_ctx=cpc_ctx,
+        trace_steps=trace_steps,
     )
 
 
@@ -1768,6 +1801,7 @@ def _run_parallel(  # noqa: PLR0913 - internal helper threading the run's collab
     memory: EntityMemory,
     cpc_ctx: CpcRunContext | None = None,
     should_stop: Callable[[], bool] = _never_stop,
+    trace_steps: bool = False,
 ) -> tuple[list[FileResult], bool]:
     """Process inputs across a worker pool, emitting each file's events plus a combined total.
 
@@ -1820,7 +1854,15 @@ def _run_parallel(  # noqa: PLR0913 - internal helper threading the run's collab
             # ever shows up in profiles.
             futures = {
                 pool.submit(
-                    _process_one, template, src, template_dir, src_dir, event_queue, memory, cpc_ctx
+                    _process_one,
+                    template,
+                    src,
+                    template_dir,
+                    src_dir,
+                    event_queue,
+                    memory,
+                    cpc_ctx,
+                    trace_steps,
                 ): src
                 for src, src_dir in zip(inputs, source_dirs, strict=True)
             }
@@ -1873,24 +1915,26 @@ def _write_run_log(run_dir: Path, template: BatchTemplate, results: list[FileRes
     log_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _run_relative(raw: str, run_dir: Path) -> str:
+    """A path relative to the run folder (defensive: absolute if somehow outside it)."""
+    path = Path(raw)
+    try:
+        return str(path.relative_to(run_dir))
+    except ValueError:
+        return str(path)
+
+
 def _output_entries(result: FileResult, run_dir: Path) -> list[dict[str, Any]]:
     """Manifest/summary rows for one file's written outputs (paths relative to the run folder)."""
-    entries: list[dict[str, Any]] = []
-    for raw in result.outputs:
-        path = Path(raw)
-        try:
-            rel = str(path.relative_to(run_dir))
-        except ValueError:  # defensive: outputs are always inside the run dir
-            rel = str(path)
-        entries.append(
-            {
-                "path": rel,
-                "table": path.stem,
-                "format": path.suffix.lstrip("."),
-                "rows": result.rows.get(path.stem),
-            }
-        )
-    return entries
+    return [
+        {
+            "path": _run_relative(raw, run_dir),
+            "table": Path(raw).stem,
+            "format": Path(raw).suffix.lstrip("."),
+            "rows": result.rows.get(Path(raw).stem),
+        }
+        for raw in result.outputs
+    ]
 
 
 def _write_manifest(  # noqa: PLR0913 - snapshotting the whole run takes the run's collaborators
@@ -1942,6 +1986,7 @@ def _write_manifest(  # noqa: PLR0913 - snapshotting the whole run takes the run
                 "rows": result.rows,
                 "outputs": _output_entries(result, run_dir),
                 "steps": [asdict(stat) for stat in result.steps],
+                "step_outputs": [_run_relative(p, run_dir) for p in result.step_outputs],
             }
             for result in results
         ],
@@ -2086,6 +2131,7 @@ def run_batch(  # noqa: PLR0913 - a clear public entry point with keyword-only o
     cpc_ctx: CpcRunContext | None = None,
     should_stop: Callable[[], bool] | None = None,
     strict: bool = False,
+    trace_steps: bool = False,
 ) -> BatchResult:
     """Run ``template`` over ``inputs``, writing outputs under ``out_root``.
 
@@ -2106,6 +2152,8 @@ def run_batch(  # noqa: PLR0913 - a clear public entry point with keyword-only o
         strict: When True, any ``validate_template`` warning aborts the run (before any output
             is written) by raising :class:`TemplateValidationError`. The default emits the
             warnings as error events and continues.
+        trace_steps: When True, each enabled step's resulting table(s) are written to
+            ``<source-stem>/steps/NN_<table>.parquet`` for manual review of every intermediate.
 
     Returns:
         A :class:`BatchResult` summarizing successes, failures, and per-file details;
@@ -2140,6 +2188,7 @@ def run_batch(  # noqa: PLR0913 - a clear public entry point with keyword-only o
             memory,
             cpc_ctx,
             should_stop=stop,
+            trace_steps=trace_steps,
         )
         # Workers mutate pickled copies of the memory; merge what they learned back in. (The
         # sequential path shares ``memory`` in-process, so its learned pairs are already there.)
@@ -2163,6 +2212,7 @@ def run_batch(  # noqa: PLR0913 - a clear public entry point with keyword-only o
                 ),
                 memory=memory,
                 cpc_ctx=cpc_ctx,
+                trace_steps=trace_steps,
             )
             _emit_file_done(result, emit)
             results.append(result)
