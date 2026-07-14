@@ -23,7 +23,7 @@ import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 import duckdb as _duckdb
 import pyarrow as pa
@@ -58,12 +58,23 @@ class CpcSource(Protocol):
         ...
 
 
-def _urllib_transport(url: str, body: bytes, headers: dict[str, str]) -> bytes:
-    """Default transport: a single POST via the standard library (no third-party HTTP client)."""
-    request = urllib.request.Request(url, data=body, headers=headers, method="POST")
-    with urllib.request.urlopen(request) as response:
-        data: bytes = response.read()
-        return data
+def _make_urllib_transport(timeout: int) -> Transport:
+    """A POST transport via the stdlib (no third-party HTTP client), with a per-request timeout.
+
+    The timeout matters for a live API: without it a stalled socket hangs the whole run.
+    """
+
+    def transport(url: str, body: bytes, headers: dict[str, str]) -> bytes:
+        request = urllib.request.Request(url, data=body, headers=headers, method="POST")
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            data: bytes = response.read()
+            return data
+
+    return transport
+
+
+# Backward-compatible module-level default (30s); the API source builds a config-timed one instead.
+_urllib_transport = _make_urllib_transport(30)
 
 
 @dataclass(slots=True)
@@ -98,18 +109,23 @@ class LocalFileCpcSource:
         return {str(pid): [str(c) for c in codes] for pid, codes in rows}
 
 
+class ApiAuthError(RuntimeError):
+    """Raised on an HTTP 4xx from the API (bad/missing key, bad request) — not retried."""
+
+
 @dataclass(slots=True)
 class UsptoOdpApiSource:
-    """CPC from the USPTO ODP / PatentSearch API (POST by ``patent_id``), authed via ``X-Api-Key``.
+    """CPC from the USPTO ODP Patent Search API, authed via ``X-API-KEY``.
 
-    The key is read from the environment variable named by ``api_key_env`` — never stored on disk.
-    Requests are batched, rate-limited to stay under the ODP throttle, retried with backoff, and
-    hard-capped at ``max_api_calls`` so a large accidental fetch fails loudly instead of firing
-    thousands of calls.
+    Queries ``applicationMetaData.patentNumber`` (OR-joined per batch) at the ODP search endpoint
+    and reads ``applicationMetaData.cpcClassificationBag`` from each hit. The key is read from the
+    environment variable named by ``api_key_env`` — never stored on disk. Requests are batched,
+    rate-limited to stay under the ODP throttle, retried with backoff on transient network errors
+    (but not on 4xx), and hard-capped at ``max_api_calls`` so a large accidental fetch fails loudly.
     """
 
     config: CpcSourceConfig
-    transport: Transport = _urllib_transport
+    transport: Transport | None = None  # None ⇒ a config-timed urllib POST (tests inject a fake)
 
     def _api_key(self) -> str:
         key = os.environ.get(self.config.api_key_env, "")
@@ -119,6 +135,9 @@ class UsptoOdpApiSource:
                 f"(the config stores only the variable name, never the key)"
             )
         return key
+
+    def _transport(self) -> Transport:
+        return self.transport or _make_urllib_transport(self.config.timeout_seconds)
 
     def fetch(self, grant_ids: list[str]) -> dict[str, list[str]]:
         if not grant_ids:
@@ -133,7 +152,7 @@ class UsptoOdpApiSource:
                 f"raise the cap, narrow the input, or use a local_file source for large sets"
             )
         key = self._api_key()
-        list_field, _, item_field = cfg.code_field.partition(".")
+        transport = self._transport()
         min_interval = 60.0 / cfg.rate_limit_per_min if cfg.rate_limit_per_min > 0 else 0.0
         result: dict[str, list[str]] = {}
         last_call = 0.0
@@ -141,62 +160,93 @@ class UsptoOdpApiSource:
             elapsed = time.monotonic() - last_call
             if min_interval and elapsed < min_interval:
                 time.sleep(min_interval - elapsed)
-            payload = self._request(batch, key, list_field, item_field)
+            result.update(self._request(batch, key, transport))
             last_call = time.monotonic()
-            result.update(payload)
         return result
 
-    def _request(
-        self, batch: list[str], key: str, list_field: str, item_field: str
-    ) -> dict[str, list[str]]:
+    def _request(self, batch: list[str], key: str, transport: Transport) -> dict[str, list[str]]:
         cfg = self.config
+        or_terms = " OR ".join(batch)
         body = json.dumps(
             {
-                "q": {"patent_id": batch},
-                "f": ["patent_id", cfg.code_field],
-                "o": {"size": len(batch)},
+                "q": f"{cfg.patent_query_field}:({or_terms})",
+                "fields": [cfg.patent_query_field, cfg.cpc_response_field],
+                "pagination": {"offset": 0, "limit": len(batch)},
             }
         ).encode("utf-8")
-        headers = {"Content-Type": "application/json", "X-Api-Key": key}
-        raw = self._send_with_retries(body, headers)
-        return _parse_odp_response(raw, list_field, item_field)
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "X-API-KEY": key,
+        }
+        raw = self._send_with_retries(transport, body, headers)
+        return _parse_odp_response(raw, cfg.patent_query_field, cfg.cpc_response_field)
 
-    def _send_with_retries(self, body: bytes, headers: dict[str, str]) -> bytes:
+    def _send_with_retries(
+        self, transport: Transport, body: bytes, headers: dict[str, str]
+    ) -> bytes:
         cfg = self.config
         last_error: Exception | None = None
         for attempt in range(cfg.retries + 1):
             try:
-                return self.transport(cfg.endpoint, body, headers)
+                return transport(cfg.endpoint, body, headers)
+            except urllib.error.HTTPError as exc:
+                if 400 <= exc.code < 500:  # bad key / bad request — retrying won't help
+                    detail = _http_error_detail(exc)
+                    raise ApiAuthError(
+                        f"USPTO ODP returned HTTP {exc.code} ({exc.reason}){detail} — "
+                        f"check the API key in ${cfg.api_key_env} and the endpoint"
+                    ) from exc
+                last_error = exc  # 5xx: transient, retry
             except (urllib.error.URLError, TimeoutError, OSError) as exc:
                 last_error = exc
-                if attempt < cfg.retries:
-                    time.sleep(cfg.backoff_seconds * (2**attempt))
+            if attempt < cfg.retries:
+                time.sleep(cfg.backoff_seconds * (2**attempt))
         raise RuntimeError(
             f"USPTO ODP request failed after {cfg.retries + 1} attempts: {last_error}"
         )
 
 
-def _parse_odp_response(raw: bytes, list_field: str, item_field: str) -> dict[str, list[str]]:
-    """Extract ``{patent_id: [cpc symbols]}`` from an ODP/PatentSearch JSON response body."""
+def _http_error_detail(exc: urllib.error.HTTPError) -> str:
+    """A short, safe snippet of an HTTP error body (never echoes the request/key)."""
+    try:
+        text = exc.read().decode("utf-8", "replace").strip()
+    except OSError:
+        return ""
+    return f": {text[:160]}" if text else ""
+
+
+def _dig(obj: Any, dotted: str) -> Any:
+    """Walk a dotted path (``a.b.c``) through nested dicts; ``None`` if any hop is missing."""
+    current: Any = obj
+    for key in dotted.split("."):
+        if not isinstance(current, dict):
+            return None
+        current = cast("dict[str, Any]", current).get(key)
+    return current
+
+
+def _parse_odp_response(raw: bytes, patent_field: str, cpc_field: str) -> dict[str, list[str]]:
+    """Extract ``{patent_number: [cpc symbols]}`` from an ODP Patent Search JSON response.
+
+    Reads ``patentFileWrapperDataBag[]``; ``patent_field``/``cpc_field`` are dotted paths within
+    each wrapper record (defaults live under ``applicationMetaData``). Symbols keep their raw form
+    (space-padded); downstream ``grain_of`` strips whitespace.
+    """
     doc: Any = json.loads(raw.decode("utf-8"))
-    patents: Any = doc.get("patents") or []
+    records: Any = doc.get("patentFileWrapperDataBag") or []
     out: dict[str, list[str]] = {}
-    for patent in patents:
-        pid: Any = patent.get("patent_id")
+    for record in records:
+        pid: Any = _dig(record, patent_field)
         if not pid:
             continue
-        codes: list[str] = []
-        entries: Any = patent.get(list_field) or []
-        for entry in entries:
-            symbol: Any = entry.get(item_field) if hasattr(entry, "get") else None
-            if symbol:
-                codes.append(str(symbol))
-        # keep distinct while preserving order
-        out[str(pid)] = list(dict.fromkeys(codes))
+        codes_raw: Any = _dig(record, cpc_field) or []
+        codes = [str(c) for c in codes_raw if c] if isinstance(codes_raw, list) else []  # type: ignore[misc]
+        out[str(pid)] = list(dict.fromkeys(codes))  # distinct, order-preserving
     return out
 
 
-def make_source(config: CpcConfig, *, transport: Transport = _urllib_transport) -> CpcSource:
+def make_source(config: CpcConfig, *, transport: Transport | None = None) -> CpcSource:
     """Build the configured :class:`CpcSource` (``transport`` is injectable for tests)."""
     src = config.source
     if src.type == "local_file":

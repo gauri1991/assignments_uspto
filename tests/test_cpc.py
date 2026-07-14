@@ -6,6 +6,8 @@ No test touches the real network: the API source is exercised through an injecte
 from __future__ import annotations
 
 import json
+import re
+import urllib.error
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +37,7 @@ from uspto_assignments.cpcmatch import (
     reduce_codes,
 )
 from uspto_assignments.datasource import (
+    ApiAuthError,
     ApiBudgetError,
     CpcCache,
     LocalFileCpcSource,
@@ -90,20 +93,25 @@ def test_grain_reduction() -> None:
 # ------------------------------------------------------------------ fake transport
 
 
+_QUERY_IDS = re.compile(r"patentNumber:\(([^)]*)\)")
+
+
 def _fake_transport(catalog: dict[str, list[str]]) -> Any:
-    """Return a transport that answers a POST body's ``q.patent_id`` list from ``catalog``."""
+    """Return a transport that answers an ODP query's OR-joined patent numbers from ``catalog``."""
     calls: list[int] = []
 
     def transport(_url: str, body: bytes, headers: dict[str, str]) -> bytes:
-        assert headers.get("X-Api-Key")  # key must be sent
-        ids = json.loads(body.decode("utf-8"))["q"]["patent_id"]
+        assert headers.get("X-API-KEY")  # key must be sent
+        query = json.loads(body.decode("utf-8"))["q"]
+        match = _QUERY_IDS.search(query)
+        ids = match.group(1).split(" OR ") if match and match.group(1) else []
         calls.append(len(ids))
-        patents = [
-            {"patent_id": pid, "cpc_current": [{"cpc_group_id": c} for c in catalog[pid]]}
+        records = [
+            {"applicationMetaData": {"patentNumber": pid, "cpcClassificationBag": catalog[pid]}}
             for pid in ids
             if pid in catalog
         ]
-        return json.dumps({"patents": patents}).encode("utf-8")
+        return json.dumps({"patentFileWrapperDataBag": records}).encode("utf-8")
 
     transport.calls = calls  # type: ignore[attr-defined]  # test introspection handle
     return transport
@@ -122,6 +130,39 @@ def test_api_source_parses_and_batches(monkeypatch: pytest.MonkeyPatch) -> None:
     result = source.fetch(["10000001", "10000002", "10000003"])
     assert result == catalog
     assert transport.calls == [2, 1]  # batched at size 2
+
+
+def test_api_source_preserves_padded_symbols(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("USPTO_ODP_API_KEY", "secret")
+
+    def padded_transport(_url: str, body: bytes, headers: dict[str, str]) -> bytes:
+        assert headers.get("X-API-KEY")
+        records = [
+            {
+                "applicationMetaData": {
+                    "patentNumber": "10000001",
+                    "cpcClassificationBag": ["G01S   7/4863", "G01S  17/894"],
+                }
+            }
+        ]
+        return json.dumps({"patentFileWrapperDataBag": records}).encode("utf-8")
+
+    source = UsptoOdpApiSource(config=CpcConfig().source, transport=padded_transport)
+    # fetch preserves the raw (space-padded) symbols; grain_of strips them downstream.
+    assert source.fetch(["10000001"]) == {"10000001": ["G01S   7/4863", "G01S  17/894"]}
+
+
+def test_api_source_raises_on_http_4xx(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("USPTO_ODP_API_KEY", "badkey")
+
+    def failing_transport(url: str, _body: bytes, _headers: dict[str, str]) -> bytes:
+        raise urllib.error.HTTPError(url, 403, "Forbidden", {}, None)  # type: ignore[arg-type]
+
+    config = CpcConfig()
+    config.source.retries = 2
+    source = UsptoOdpApiSource(config=config.source, transport=failing_transport)
+    with pytest.raises(ApiAuthError, match="HTTP 403"):  # 4xx is not retried
+        source.fetch(["10000001"])
 
 
 def test_api_source_requires_key(monkeypatch: pytest.MonkeyPatch) -> None:
