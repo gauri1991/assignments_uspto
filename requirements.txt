@@ -1,0 +1,28 @@
+# Runtime dependencies for the USPTO patent-assignment tool (mirrors pyproject.toml).
+#
+# One-command setup to RUN THE DESKTOP UI from this folder:
+#     python -m venv .venv
+#     .venv\Scripts\Activate.ps1          # Windows PowerShell  (Linux/Mac: source .venv/bin/activate)
+#     pip install -r requirements.txt
+#     python run_ui.py
+#
+# The trailing `-e .` installs THIS project (editable), which is what makes
+# `import uspto_assignments_ui` resolve to .\src — required because the package lives under src/.
+# (pyproject.toml stays the source of truth; run `pip install -e ".[dev]"` for the dev tools/stubs.)
+
+# --- core (headless parse/convert/pipeline) ---
+lxml>=5.0
+pyarrow>=15.0
+numpy>=1.26
+openpyxl>=3.1
+rapidfuzz>=3
+duckdb>=1.0
+
+# --- desktop UI ---
+PyQt6>=6.6
+
+# --- optional ML classifier (rules work without it; uncomment to enable "probablepeople") ---
+# probablepeople>=0.5
+
+# --- the project itself (editable) — makes the packages importable from ./src ---
+-e .

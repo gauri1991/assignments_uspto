@@ -11,6 +11,7 @@ requires-python = ">=3.12"
 dependencies = [
     "lxml>=5.0",       # fast, recoverable streaming XML parse
     "pyarrow>=15.0",   # Parquet / Arrow tables + memory-mapped interactive store
+    "numpy>=1.26",     # view-index arrays for the interactive table model + batch helpers
     "openpyxl>=3.1",   # streaming (write_only) Excel output
     "rapidfuzz>=3",    # fast fuzzy matching for entity-name normalization
     "duckdb>=1.0",     # query layer over Arrow/Parquet (transaction ledger + leaderboards)
