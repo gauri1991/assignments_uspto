@@ -140,7 +140,7 @@ class MainWindow(QMainWindow):
         self._act_manage_queries = self._make_action("&Manage queries…", self._manage_queries)
         self._act_batch = self._make_action("&Batch processing…", self._open_batch, "Ctrl+B")
         self._act_entities = self._make_action("&Entity memory…", self._open_entities)
-        self._act_cpc = self._make_action("&CPC data source…", self._open_cpc_settings)
+        self._act_cpc = self._make_action("&CPC / USPTO API data source…", self._open_cpc_settings)
         # Actions that require a loaded dataset.
         self._data_actions = (
             self._act_save,
