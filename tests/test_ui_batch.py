@@ -41,6 +41,7 @@ from uspto_assignments_ui.app import create_app
 from uspto_assignments_ui.models import EntityAliasModel
 from uspto_assignments_ui.settings import BatchTemplateStore, EntityMemoryStore
 from uspto_assignments_ui.widgets import batch_dialog as bd
+from uspto_assignments_ui.widgets import entity_dialog as ed
 from uspto_assignments_ui.widgets.batch_dialog import (
     _PRESETS,
     AggregateStepDialog,
@@ -776,3 +777,40 @@ def test_run_without_normalize_does_not_write_entity_store(qtbot: Any, tmp_path:
     qtbot.waitUntil(lambda: "Done:" in dialog._console.toPlainText(), timeout=15000)
     assert not memory_path.exists()  # untouched memory must not rewrite the store
     assert "Entity memory:" not in dialog._console.toPlainText()
+
+
+def test_entity_dialog_seeds_from_disambiguated_reference(
+    qtbot: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    create_app([])
+    reference = tmp_path / "disambiguated.tsv"
+    reference.write_text(
+        "assignee_id\tdisambig_assignee_organization\n"
+        "a1\tAcme Corporation\n"
+        "a2\tGlobex LLC\n"
+        "a3\tAcme Corporation\n"  # duplicate mention -> one canonical
+        "a4\t\n",  # individual row (empty org) -> skipped
+        encoding="utf-8",
+    )
+    store = EntityMemoryStore(tmp_path / "entities.json")
+    dialog = EntityDialog(store)
+    qtbot.addWidget(dialog)
+
+    monkeypatch.setattr(
+        ed.QFileDialog, "getOpenFileName", staticmethod(lambda *a, **k: (str(reference), ""))
+    )
+    monkeypatch.setattr(
+        ed.QInputDialog,
+        "getText",
+        staticmethod(lambda *a, **k: ("disambig_assignee_organization", True)),
+    )
+    dialog._seed_from_reference()
+    qtbot.waitUntil(lambda: dialog._thread is None, timeout=15000)
+
+    assert sorted(dialog._memory.canonicals) == ["Acme Corporation", "Globex LLC"]
+    assert "seeded 2 new from reference" in dialog._counts.text()
+    assert not (tmp_path / "entities.json").exists()  # working copy: only Save persists
+
+    dialog._save()  # Save -> entities.json now holds the seeded canonicals
+    reloaded = EntityMemory.load(tmp_path / "entities.json")
+    assert sorted(reloaded.canonicals) == ["Acme Corporation", "Globex LLC"]

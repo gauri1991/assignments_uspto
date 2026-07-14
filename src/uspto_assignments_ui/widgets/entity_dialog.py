@@ -9,7 +9,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QThread, QTimer
+from PyQt6.QtGui import QCloseEvent
 from PyQt6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
@@ -19,20 +20,24 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QListWidget,
+    QMessageBox,
     QPushButton,
     QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
-from uspto_assignments import EntityMemory
+from uspto_assignments import EntityMemory, ReferenceGazetteer, build_reference
 
 from ..models import EntityAliasModel
 from ..settings import EntityMemoryStore
+from ..workers import CallWorker
 from .data_table import DataTable
 from .page import SectionLabel
 
 _IMPORT_FILTER = "Entity names (*.csv *.json *.txt);;All files (*)"
+_REFERENCE_FILTER = "Reference (*.tsv *.csv *.parquet);;All files (*)"
+_REFERENCE_NAME_COLUMN = "disambig_assignee_organization"  # PatentsView bulk-file default
 _SEARCH_DEBOUNCE_MS = 250
 _MAX_CANONICALS = 5000  # cap the visible canonical list so a 75k-entry memory stays responsive
 
@@ -61,6 +66,8 @@ class EntityDialog(QDialog):
         self.resize(720, 620)
         self._store = store
         self._memory = store.load()  # working copy; Save persists it, Cancel discards
+        self._thread: QThread | None = None  # reference-seeding worker (multi-GB file scans)
+        self._worker: CallWorker | None = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 16, 20, 16)
@@ -145,6 +152,7 @@ class EntityDialog(QDialog):
     def _build_file_row(self) -> QHBoxLayout:
         return self._button_row(
             ("Import…", self._import),
+            ("Seed from reference…", self._seed_from_reference),
             ("Export…", self._export),
             ("Change location…", self._relocate),
             ("Clear", self._clear),
@@ -255,6 +263,89 @@ class EntityDialog(QDialog):
             self._alias_model.delete_aliases(rows)
             self._refresh()
 
+    # -- reference seeding ---------------------------------------------------
+    def _seed_from_reference(self) -> None:
+        """Build canonicals from a disambiguated assignee reference (TSV/CSV/Parquet).
+
+        Streams the file off the GUI thread (it may be multi-GB) and merges every distinct
+        organization name into the working memory as a canonical. Save persists the result.
+        """
+        if self._thread is not None:
+            return
+        path_str, _ = QFileDialog.getOpenFileName(
+            self, "Disambiguated reference file", "", _REFERENCE_FILTER
+        )
+        if not path_str:
+            return
+        column, ok = QInputDialog.getText(
+            self,
+            "Reference name column",
+            "Organization-name column\n"
+            f"(PatentsView bulk file: {_REFERENCE_NAME_COLUMN};"
+            ' a compact extract: "organization"):',
+            text=_REFERENCE_NAME_COLUMN,
+        )
+        column = column.strip()
+        if not ok or not column:
+            return
+        path = Path(path_str)
+        self._counts.setText(f"Seeding from {path.name} — scanning…")
+        thread = QThread(self)
+        worker = CallWorker(lambda: build_reference(path, column))
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_reference_ready)
+        worker.failed.connect(self._on_reference_failed)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(self._cleanup_thread)
+        self._thread = thread
+        self._worker = worker
+        thread.start()
+
+    def _on_reference_ready(self, result: object) -> None:
+        if not isinstance(result, ReferenceGazetteer):
+            return
+        before = self._memory.counts()[0]
+        self._memory.merge(result.memory)
+        added = self._memory.counts()[0] - before
+        self._refresh()
+        canonicals, aliases = self._memory.counts()
+        self._counts.setText(
+            f"{canonicals:,} canonical names · {aliases:,} learned aliases · "
+            f"seeded {added:,} new from reference (Save to persist)"
+        )
+
+    def _on_reference_failed(self, message: str) -> None:
+        self._refresh()  # restore the counts line
+        QMessageBox.warning(self, "Seed failed", f"Could not read the reference:\n{message}")
+
+    def _cleanup_thread(self) -> None:
+        if self._thread is not None:
+            self._thread.deleteLater()
+        self._thread = None
+        self._worker = None
+
+    def _busy(self) -> bool:
+        """True (with a notice) while the reference scan is running — edits/close must wait."""
+        if self._thread is None:
+            return False
+        QMessageBox.information(self, "Busy", "Wait for the reference import to finish.")
+        return True
+
+    def closeEvent(self, a0: QCloseEvent | None) -> None:
+        """Never destroy the dialog while the seeding thread is alive."""
+        if self._busy():
+            if a0 is not None:
+                a0.ignore()
+            return
+        super().closeEvent(a0)
+
+    def reject(self) -> None:
+        """Route Esc/Cancel through the busy guard."""
+        if not self._busy():
+            super().reject()
+
     # -- file operations ---------------------------------------------------
     def _import(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Import entity names", "", _IMPORT_FILTER)
@@ -289,5 +380,7 @@ class EntityDialog(QDialog):
         self._refresh()
 
     def _save(self) -> None:
+        if self._busy():  # saving mid-scan would persist without the seeded names
+            return
         self._store.save(self._memory)
         self.accept()
