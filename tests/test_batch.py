@@ -135,7 +135,7 @@ def test_export_columns_order_and_rename_and_enabled(tmp_path: Path) -> None:
     )
     run_batch(template, [FIXTURE], tmp_path / "out", timestamp="v6")
     header = (
-        (tmp_path / "out" / "x" / "sample_assignment" / "assignees.csv")
+        (tmp_path / "out" / "x" / "run_v6" / "sample_assignment" / "assignees.csv")
         .read_text(encoding="utf-8")
         .splitlines()[0]
     )
@@ -150,7 +150,7 @@ def test_disabled_step_is_skipped_on_run(tmp_path: Path) -> None:
     )
     run_batch(template, [FIXTURE], tmp_path / "out", timestamp="v6d")
     header = (
-        (tmp_path / "out" / "d" / "sample_assignment" / "assignees.csv")
+        (tmp_path / "out" / "d" / "run_v6d" / "sample_assignment" / "assignees.csv")
         .read_text(encoding="utf-8")
         .splitlines()[0]
     )
@@ -268,11 +268,11 @@ def test_run_batch_sequential_writes_folder_per_source(tmp_path: Path) -> None:
     )
     assert (result.succeeded, result.failed) == (1, 0)
 
-    out = tmp_path / "out" / "granted" / "sample_assignment" / "properties.parquet"
+    out = tmp_path / "out" / "granted" / "run_t1" / "sample_assignment" / "properties.parquet"
     assert out.is_file()
     reopened = pq.read_table(out)  # pyright: ignore[reportUnknownMemberType]  # stub embeds Unknown
     assert reopened.num_rows == 1  # only the B2 (granted) row survives the filter
-    assert (tmp_path / "out" / "granted" / "run_t1.log").is_file()
+    assert (tmp_path / "out" / "granted" / "run_t1" / "run.log").is_file()
 
     messages = [e.message for e in events]
     assert any("filter properties" in m for m in messages)
@@ -298,7 +298,7 @@ def test_run_batch_accepts_dataset_folder_input(tmp_path: Path) -> None:
     template = BatchTemplate(name="copy", steps=[ExportStep(fmt="csv", tables=["assignors"])])
     result = run_batch(template, [tmp_path / "store"], tmp_path / "out", timestamp="t3")
     assert result.succeeded == 1
-    assert (tmp_path / "out" / "copy" / "store" / "assignors.csv").is_file()
+    assert (tmp_path / "out" / "copy" / "run_t3" / "store" / "assignors.csv").is_file()
 
 
 def test_run_batch_parallel_workers(tmp_path: Path) -> None:
@@ -316,8 +316,8 @@ def test_run_batch_parallel_workers(tmp_path: Path) -> None:
         on_event=events.append,
     )
     assert result.succeeded == 2
-    assert (tmp_path / "out" / "granted" / "a" / "properties.parquet").is_file()
-    assert (tmp_path / "out" / "granted" / "b" / "properties.parquet").is_file()
+    assert (tmp_path / "out" / "granted" / "run_t4" / "a" / "properties.parquet").is_file()
+    assert (tmp_path / "out" / "granted" / "run_t4" / "b" / "properties.parquet").is_file()
 
     messages = [e.message for e in events]
     # each worker's events are labelled with their file, and a combined total is shown
@@ -360,8 +360,8 @@ def test_run_batch_parallel_same_stem_inputs_get_distinct_dirs(tmp_path: Path) -
     shutil.copy(FIXTURE, b)
     result = run_batch(_granted_template(), [a, b], tmp_path / "out", workers=2, timestamp="t5")
     assert result.succeeded == 2
-    assert (tmp_path / "out" / "granted" / "x" / "properties.parquet").is_file()
-    assert (tmp_path / "out" / "granted" / "x (1)" / "properties.parquet").is_file()
+    assert (tmp_path / "out" / "granted" / "run_t5" / "x" / "properties.parquet").is_file()
+    assert (tmp_path / "out" / "granted" / "run_t5" / "x (1)" / "properties.parquet").is_file()
 
 
 def test_run_batch_parallel_results_in_input_order(tmp_path: Path) -> None:
@@ -398,7 +398,7 @@ def test_run_batch_should_stop_after_first_file(tmp_path: Path) -> None:
     )
     assert result.cancelled is True
     assert (result.succeeded, len(result.results)) == (1, 1)
-    assert (tmp_path / "out" / "granted" / "run_t7.log").is_file()  # log still written
+    assert (tmp_path / "out" / "granted" / "run_t7" / "run.log").is_file()  # log still written
     messages = [e.message for e in events]
     assert any(m.startswith("Batch cancelled:") for m in messages)
 
@@ -443,7 +443,7 @@ def test_run_batch_normalize_adds_canonical_and_learns(tmp_path: Path) -> None:
     )
     assert result.succeeded == 1
     header = (
-        (tmp_path / "out" / "norm" / "sample_assignment" / "assignees.csv")
+        (tmp_path / "out" / "norm" / "run_n1" / "sample_assignment" / "assignees.csv")
         .read_text(encoding="utf-8")
         .splitlines()[0]
     )
@@ -873,7 +873,7 @@ def test_run_batch_normalize_emits_score_and_review_columns(tmp_path: Path) -> N
     )
     run_batch(template, [FIXTURE], tmp_path / "out", timestamp="conf")
     header = (
-        (tmp_path / "out" / "conf" / "sample_assignment" / "assignees.csv")
+        (tmp_path / "out" / "conf" / "run_conf" / "sample_assignment" / "assignees.csv")
         .read_text(encoding="utf-8")
         .splitlines()[0]
     )
@@ -1043,3 +1043,34 @@ def test_run_batch_strict_aborts_before_output(tmp_path: Path) -> None:
         run_batch(template, [FIXTURE], tmp_path / "out", timestamp="s", strict=True)
     assert any("nope_col" in w for w in excinfo.value.warnings)
     assert not (tmp_path / "out").exists()  # aborted before any output was written
+
+
+def test_run_batch_writes_manifest(tmp_path: Path) -> None:
+    result = run_batch(_granted_template(), [FIXTURE], tmp_path / "out", timestamp="mf")
+    run_dir = Path(result.run_dir)
+    assert run_dir == tmp_path / "out" / "granted" / "run_mf"
+    manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["schema"] == 1
+    assert manifest["template"]["name"] == "granted"
+    assert [s["index"] for s in manifest["template"]["steps"]] == [1, 2]
+    assert manifest["template"]["steps"][0]["summary"].startswith("Filter ·")
+    assert manifest["summary"] == {"succeeded": 1, "failed": 0}
+    file_entry = manifest["files"][0]
+    assert len(file_entry["steps"]) == 2  # the per-step audit trail travels into the manifest
+    for output in file_entry["outputs"]:
+        assert (run_dir / output["path"]).is_file()  # relative paths resolve inside the run dir
+        assert output["rows"] == file_entry["rows"][output["table"]]
+
+
+def test_run_batch_defaults_timestamp_when_blank(tmp_path: Path) -> None:
+    result = run_batch(_granted_template(), [FIXTURE], tmp_path / "out")
+    run_dir = Path(result.run_dir)
+    assert run_dir.name.startswith("run_") and len(run_dir.name) > len("run_")
+    assert (run_dir / "manifest.json").is_file()
+
+
+def test_run_batch_same_timestamp_gets_distinct_run_dirs(tmp_path: Path) -> None:
+    first = run_batch(_granted_template(), [FIXTURE], tmp_path / "out", timestamp="dup")
+    second = run_batch(_granted_template(), [FIXTURE], tmp_path / "out", timestamp="dup")
+    assert Path(first.run_dir).name == "run_dup"
+    assert Path(second.run_dir).name == "run_dup (1)"  # unique_path keeps runs separate

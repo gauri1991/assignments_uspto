@@ -115,7 +115,7 @@ def test_batch_dialog_runs_and_writes_output(qtbot: Any, tmp_path: Path) -> None
     dialog._run()
 
     qtbot.waitUntil(lambda: "Done:" in dialog._console.toPlainText(), timeout=15000)
-    result = out / "granted" / "sample_assignment" / "properties.parquet"
+    result = next((out / "granted").glob("run_*/sample_assignment/properties.parquet"))
     assert result.is_file()
     reopened = pq.read_table(result)  # pyright: ignore[reportUnknownMemberType]
     assert reopened.num_rows == 1

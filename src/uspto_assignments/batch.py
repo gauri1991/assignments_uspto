@@ -21,6 +21,7 @@ from collections.abc import Callable, Sequence
 from concurrent.futures import Future, ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from queue import Empty
 from typing import Any, Literal
@@ -962,6 +963,7 @@ class BatchResult:
     results: list[FileResult]
     cancelled: bool = False  # True when the run stopped early via ``should_stop``
     warnings: list[str] = field(default_factory=list[str])  # pre-run validation warnings
+    run_dir: str = ""  # the per-run output folder (holds manifest.json, run.log, sources)
 
 
 OnEvent = Callable[[BatchEvent], None]
@@ -1858,11 +1860,9 @@ def _emit_file_done(result: FileResult, emit: OnEvent) -> None:
         )
 
 
-def _write_run_log(
-    template_dir: Path, timestamp: str, template: BatchTemplate, results: list[FileResult]
-) -> None:
-    log_path = template_dir / f"run_{timestamp or 'batch'}.log"
-    lines = [f"Batch template: {template.name}", f"Timestamp: {timestamp}", ""]
+def _write_run_log(run_dir: Path, template: BatchTemplate, results: list[FileResult]) -> None:
+    log_path = run_dir / "run.log"
+    lines = [f"Batch template: {template.name}", f"Run folder: {run_dir.name}", ""]
     for result in results:
         status = "OK" if result.ok else f"FAILED: {result.error}"
         lines.append(
@@ -1870,6 +1870,84 @@ def _write_run_log(
             f"rows={result.rows} outputs={len(result.outputs)}"
         )
     log_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _output_entries(result: FileResult, run_dir: Path) -> list[dict[str, Any]]:
+    """Manifest/summary rows for one file's written outputs (paths relative to the run folder)."""
+    entries: list[dict[str, Any]] = []
+    for raw in result.outputs:
+        path = Path(raw)
+        try:
+            rel = str(path.relative_to(run_dir))
+        except ValueError:  # defensive: outputs are always inside the run dir
+            rel = str(path)
+        entries.append(
+            {
+                "path": rel,
+                "table": path.stem,
+                "format": path.suffix.lstrip("."),
+                "rows": result.rows.get(path.stem),
+            }
+        )
+    return entries
+
+
+def _write_manifest(  # noqa: PLR0913 - snapshotting the whole run takes the run's collaborators
+    run_dir: Path,
+    template: BatchTemplate,
+    warnings: list[str],
+    results: list[FileResult],
+    *,
+    timestamp: str,
+    workers: int,
+    cancelled: bool,
+    strict: bool,
+    elapsed: float,
+    inputs: list[Path],
+) -> None:
+    """Write ``manifest.json``: the full audit record of one batch run."""
+    payload: dict[str, Any] = {
+        "schema": 1,
+        "template": {
+            "name": template.name,
+            "steps": [
+                {
+                    "index": index,
+                    "kind": type(step).__name__,
+                    "enabled": step.enabled,
+                    "summary": describe_step(step),
+                }
+                for index, step in enumerate(template.steps, start=1)
+            ],
+        },
+        "timestamp": timestamp,
+        "generated": datetime.now(UTC).isoformat(timespec="seconds"),
+        "duration_seconds": round(elapsed, 1),
+        "workers": workers,
+        "cancelled": cancelled,
+        "strict": strict,
+        "warnings": warnings,
+        "inputs": [str(path) for path in inputs],
+        "summary": {
+            "succeeded": sum(1 for r in results if r.ok),
+            "failed": sum(1 for r in results if not r.ok),
+        },
+        "files": [
+            {
+                "source": result.source,
+                "ok": result.ok,
+                "error": result.error,
+                "elapsed": round(result.elapsed, 1),
+                "rows": result.rows,
+                "outputs": _output_entries(result, run_dir),
+                "steps": [asdict(stat) for stat in result.steps],
+            }
+            for result in results
+        ],
+    }
+    (run_dir / "manifest.json").write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
 
 
 def run_batch(  # noqa: PLR0913 - a clear public entry point with keyword-only options
@@ -1890,9 +1968,11 @@ def run_batch(  # noqa: PLR0913 - a clear public entry point with keyword-only o
     Args:
         template: The pipeline to apply to each input.
         inputs: Files (``.xml``/``.zip``) and/or dataset folders to process.
-        out_root: Root output directory; a ``<template-name>/`` subfolder is created inside it.
+        out_root: Root output directory. Each run gets its own self-contained folder:
+            ``<out_root>/<template-name>/run_<timestamp>/`` holding ``manifest.json``,
+            ``run.log``, and one subfolder per source.
         workers: Number of parallel worker processes (``1`` = sequential with live per-step events).
-        timestamp: Stamp used in the run-log filename (the caller supplies it).
+        timestamp: Stamp naming the run folder (defaults to the current local time).
         memory: Entity memory for any normalize steps; new aliases learned during the run are
             merged back into it (persist it afterwards to keep learning). A fresh one is used if
             ``None``.
@@ -1916,9 +1996,11 @@ def run_batch(  # noqa: PLR0913 - a clear public entry point with keyword-only o
         raise TemplateValidationError(validation_warnings)
     memory = memory if memory is not None else EntityMemory()
     run_start = time.monotonic()
+    timestamp = timestamp or datetime.now().strftime("%Y%m%d_%H%M%S")
     template_dir = out_root / _safe_name(template.name)
-    template_dir.mkdir(parents=True, exist_ok=True)
-    source_dirs = _assign_source_dirs(inputs, template_dir)
+    run_dir = unique_path(template_dir / f"run_{timestamp}")  # same stamp twice -> " (1)"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    source_dirs = _assign_source_dirs(inputs, run_dir)
     results: list[FileResult] = []
     cancelled = False
 
@@ -1928,7 +2010,7 @@ def run_batch(  # noqa: PLR0913 - a clear public entry point with keyword-only o
             template,
             inputs,
             source_dirs,
-            template_dir,
+            run_dir,
             workers,
             emit,
             memory,
@@ -1949,7 +2031,7 @@ def run_batch(  # noqa: PLR0913 - a clear public entry point with keyword-only o
             result = _process_input(
                 template,
                 source,
-                template_dir,
+                run_dir,
                 source_dir,
                 emit,
                 on_parse=lambda count: emit(
@@ -1961,7 +2043,7 @@ def run_batch(  # noqa: PLR0913 - a clear public entry point with keyword-only o
             _emit_file_done(result, emit)
             results.append(result)
 
-    _write_run_log(template_dir, timestamp, template, results)
+    _write_run_log(run_dir, template, results)
     succeeded = sum(1 for r in results if r.ok)
     failed = len(results) - succeeded
     elapsed = time.monotonic() - run_start
@@ -1981,12 +2063,25 @@ def run_batch(  # noqa: PLR0913 - a clear public entry point with keyword-only o
                 f"Batch complete: {succeeded} succeeded, {failed} failed in {elapsed:.1f}s",
             )
         )
+    _write_manifest(
+        run_dir,
+        template,
+        validation_warnings,
+        results,
+        timestamp=timestamp,
+        workers=workers,
+        cancelled=cancelled,
+        strict=strict,
+        elapsed=elapsed,
+        inputs=inputs,
+    )
     return BatchResult(
         succeeded=succeeded,
         failed=failed,
         results=results,
         cancelled=cancelled,
         warnings=validation_warnings,
+        run_dir=str(run_dir),
     )
 
 

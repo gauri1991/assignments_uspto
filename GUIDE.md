@@ -525,11 +525,17 @@ Each template is applied to **each input independently**. Inputs can be USPTO `.
    flight finishes, the rest are skipped, and the summary notes what was cancelled). Closing the
    window mid-run prompts to cancel first — the window closes itself once the run stops.
 
-**Output layout** — folder-per-source:
+**Output layout** — every run gets its own self-contained, audit-ready folder:
 
 ```
-<output>/<template-name>/<source-stem>/<table>.<ext>
+<output>/<template-name>/run_<timestamp>/
+├── manifest.json     ← full audit record: template + step summaries, warnings,
+│                        per-file & per-step row counts, output paths
+├── run.log           ← plain-text per-file results
+└── <source-stem>/<table>.<ext>
 ```
+
+Re-running never mixes with earlier outputs (a duplicate timestamp gets a `` (1)`` suffix).
 
 **Parallel runs** — with *Workers > 1* and multiple inputs, files are processed in separate
 processes; the console shows distinct worker **PIDs**, interleaved per-file progress, and a combined

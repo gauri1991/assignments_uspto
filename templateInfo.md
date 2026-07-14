@@ -324,7 +324,7 @@ omitted) **auto-derives** the name per §2a — prefer leaving it blank so names
 - `columns` *(optional)* — `table → ordered list of columns to keep` (a table absent = all its
   columns). `renames` *(optional)* — `table → { source_column: output_name }`.
 - Prefer `parquet`/`csv` for large outputs; `xlsx` is slow above ~100k rows.
-- Outputs are written to `<output-folder>/<template-name>/<source-stem>/<table>.<ext>` (the output
+- Outputs are written to `<output-folder>/<template-name>/run_<timestamp>/<source-stem>/<table>.<ext>` (each run also gets a `manifest.json` audit record and `run.log`) (the output
   folder and inputs are chosen in the app, **not** in the template).
 
 ---
