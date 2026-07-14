@@ -50,6 +50,8 @@ class FilterBar(QWidget):
         columns: Sequence[str],
         distinct_provider: DistinctProvider | None = None,
         parent: QWidget | None = None,
+        *,
+        show_quick_search: bool = True,
     ) -> None:
         super().__init__(parent)
         self.setProperty("panel", "true")  # subtle frame around the filter area
@@ -59,7 +61,11 @@ class FilterBar(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(10, 10, 10, 10)
         root.setSpacing(8)
-        root.addWidget(self._build_search())
+        search = self._build_search()
+        # In the filter-step editor the owning dialog persists only clauses + combine, so the
+        # quick-search box is hidden there (it would be silently discarded).
+        search.setVisible(show_quick_search)
+        root.addWidget(search)
         root.addLayout(self._build_builder_row(columns))
         root.addLayout(self._build_chips_row())
 

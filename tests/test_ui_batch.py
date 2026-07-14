@@ -59,6 +59,7 @@ from uspto_assignments_ui.widgets.batch_dialog import (
     TransferTypeStepDialog,
 )
 from uspto_assignments_ui.widgets.entity_dialog import EntityDialog
+from uspto_assignments_ui.widgets.filter_bar import FilterBar
 from uspto_assignments_ui.widgets.preview_dialog import PreviewDialog
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_assignment.xml"
@@ -761,6 +762,18 @@ def test_filter_step_dialog_rebuilds_bar_on_table_change(qtbot: Any) -> None:
         dialog._filter_bar._column.itemText(i) for i in range(dialog._filter_bar._column.count())
     ]
     assert "name" in columns  # an assignees column
+    # regression: the old bar is detached immediately (no ghost painting a duplicate builder row)
+    assert original_bar.parent() is None
+    live_bars = [b for b in dialog.findChildren(FilterBar) if b.parent() is dialog]
+    assert live_bars == [dialog._filter_bar]  # exactly one bar attached to the dialog
+
+
+def test_filter_step_dialog_hides_quick_search(qtbot: Any) -> None:
+    create_app([])
+    dialog = FilterStepDialog()
+    qtbot.addWidget(dialog)
+    # the quick-search box is meaningless in a filter step (only clauses + combine are saved)
+    assert not dialog._filter_bar._search.isVisible()
 
 
 def test_run_without_normalize_does_not_write_entity_store(qtbot: Any, tmp_path: Path) -> None:

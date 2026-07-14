@@ -226,7 +226,7 @@ class FilterStepDialog(QDialog):
     def __init__(self, step: FilterStep | None = None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Filter step")
-        self.setMinimumWidth(560)
+        self.setMinimumWidth(720)  # the filter-builder row needs the room, or fields clip
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 16, 20, 16)
         layout.setSpacing(10)
@@ -240,7 +240,9 @@ class FilterStepDialog(QDialog):
         layout.addLayout(form)
 
         # Kept a direct child of the top-level VBox: _rebuild_filter_bar swaps it in place there.
-        self._filter_bar = FilterBar(_cols(self._table.currentText()))
+        # The quick-search box is hidden — a filter STEP stores only clauses + combine, so a
+        # free-text search here would be silently discarded.
+        self._filter_bar = FilterBar(_cols(self._table.currentText()), show_quick_search=False)
         layout.addWidget(self._filter_bar)
 
         buttons = QDialogButtonBox(
@@ -255,12 +257,16 @@ class FilterStepDialog(QDialog):
             self._filter_bar.set_state(step.clauses, step.combine, None)
 
     def _rebuild_filter_bar(self) -> None:
-        new_bar = FilterBar(_cols(self._table.currentText()))
+        new_bar = FilterBar(_cols(self._table.currentText()), show_quick_search=False)
+        old = self._filter_bar
         layout = self.layout()
         if layout is not None:
-            layout.replaceWidget(self._filter_bar, new_bar)
-        self._filter_bar.deleteLater()
+            layout.replaceWidget(old, new_bar)
         self._filter_bar = new_bar
+        # replaceWidget only drops ``old`` from the layout; detach it now so it can't linger as a
+        # painted ghost (deleteLater is deferred until the event loop spins).
+        old.setParent(None)
+        old.deleteLater()
 
     def step(self) -> FilterStep:
         """Return the configured filter step."""
@@ -643,11 +649,13 @@ class DedupeStepDialog(QDialog):
 
     def _rebuild_columns(self) -> None:
         new = _checkable_columns(_cols(self._table.currentText()), set())
+        old = self._columns
         layout = self.layout()
         if layout is not None:
-            layout.replaceWidget(self._columns, new)
-        self._columns.deleteLater()
+            layout.replaceWidget(old, new)
         self._columns = new
+        old.setParent(None)  # detach now so the old list can't paint as a ghost
+        old.deleteLater()
 
     def step(self) -> DedupeStep:
         """Return the configured dedupe step (``subset=None`` when no key columns are checked)."""
@@ -692,11 +700,13 @@ class SelectStepDialog(QDialog):
 
     def _rebuild_columns(self) -> None:
         new = _checkable_columns(_cols(self._table.currentText()), None)
+        old = self._columns
         layout = self.layout()
         if layout is not None:
-            layout.replaceWidget(self._columns, new)
-        self._columns.deleteLater()
+            layout.replaceWidget(old, new)
         self._columns = new
+        old.setParent(None)  # detach now so the old list can't paint as a ghost
+        old.deleteLater()
 
     def step(self) -> SelectStep:
         """Return the configured select step."""
@@ -870,11 +880,13 @@ class AggregateStepDialog(QDialog):
 
     def _rebuild_columns(self) -> None:
         new = _checkable_columns(_cols(self._table.currentText()), set())
+        old = self._columns
         layout = self.layout()
         if layout is not None:
-            layout.replaceWidget(self._columns, new)
-        self._columns.deleteLater()
+            layout.replaceWidget(old, new)
         self._columns = new
+        old.setParent(None)  # detach now so the old list can't paint as a ghost
+        old.deleteLater()
         self._rebuild_distinct()
 
     def _rebuild_distinct(self) -> None:
