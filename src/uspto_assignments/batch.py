@@ -830,6 +830,14 @@ def _referenced_columns(step: BatchStep) -> tuple[str, list[str]]:  # noqa: PLR0
     return "", []  # ExportStep validated separately
 
 
+class TemplateValidationError(ValueError):
+    """Raised by ``run_batch(strict=True)`` when the template has validation warnings."""
+
+    def __init__(self, warnings: list[str]) -> None:
+        super().__init__(f"{len(warnings)} validation warning(s): " + "; ".join(warnings[:3]))
+        self.warnings = warnings
+
+
 def _reference_column_problems(step: ReferenceMatchStep) -> list[str]:
     """Warnings for configured reference columns missing from the (existing) reference file.
 
@@ -953,6 +961,7 @@ class BatchResult:
     failed: int
     results: list[FileResult]
     cancelled: bool = False  # True when the run stopped early via ``should_stop``
+    warnings: list[str] = field(default_factory=list[str])  # pre-run validation warnings
 
 
 OnEvent = Callable[[BatchEvent], None]
@@ -1874,6 +1883,7 @@ def run_batch(  # noqa: PLR0913 - a clear public entry point with keyword-only o
     on_event: OnEvent | None = None,
     cpc_ctx: CpcRunContext | None = None,
     should_stop: Callable[[], bool] | None = None,
+    strict: bool = False,
 ) -> BatchResult:
     """Run ``template`` over ``inputs``, writing outputs under ``out_root``.
 
@@ -1889,6 +1899,9 @@ def run_batch(  # noqa: PLR0913 - a clear public entry point with keyword-only o
         on_event: Optional callback receiving :class:`BatchEvent`s as processing proceeds.
         should_stop: Optional cancellation probe, polled between files (cancellation is per-file:
             the file in flight finishes, remaining inputs are skipped). Must be thread-safe.
+        strict: When True, any ``validate_template`` warning aborts the run (before any output
+            is written) by raising :class:`TemplateValidationError`. The default emits the
+            warnings as error events and continues.
 
     Returns:
         A :class:`BatchResult` summarizing successes, failures, and per-file details;
@@ -1896,6 +1909,11 @@ def run_batch(  # noqa: PLR0913 - a clear public entry point with keyword-only o
     """
     emit = on_event or _noop_event
     stop = should_stop or _never_stop
+    validation_warnings = validate_template(template.load, template.steps)
+    for warning in validation_warnings:
+        emit(BatchEvent("error", f"⚠ {warning}"))
+    if strict and validation_warnings:
+        raise TemplateValidationError(validation_warnings)
     memory = memory if memory is not None else EntityMemory()
     run_start = time.monotonic()
     template_dir = out_root / _safe_name(template.name)
@@ -1963,7 +1981,13 @@ def run_batch(  # noqa: PLR0913 - a clear public entry point with keyword-only o
                 f"Batch complete: {succeeded} succeeded, {failed} failed in {elapsed:.1f}s",
             )
         )
-    return BatchResult(succeeded=succeeded, failed=failed, results=results, cancelled=cancelled)
+    return BatchResult(
+        succeeded=succeeded,
+        failed=failed,
+        results=results,
+        cancelled=cancelled,
+        warnings=validation_warnings,
+    )
 
 
 # --------------------------------------------------------------------------------------

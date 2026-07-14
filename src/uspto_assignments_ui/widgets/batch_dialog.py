@@ -1914,9 +1914,7 @@ class BatchDialog(QDialog):
         template = self.template()
         self._console.clear()
         warnings = validate_template(template.load, template.steps)
-        if warnings:
-            for warning in warnings:
-                self._append_console(f"⚠ {warning}", "error")
+        if warnings:  # run_batch re-emits each warning to the console; only prompt here
             proceed = QMessageBox.question(
                 self,
                 "Validation warnings",

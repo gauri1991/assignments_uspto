@@ -32,6 +32,7 @@ from uspto_assignments import (
     ReferenceMatchStep,
     SelectStep,
     SortStep,
+    TemplateValidationError,
     TransferTypeStep,
     columns_after,
     describe_step,
@@ -1016,3 +1017,29 @@ def test_run_batch_parallel_step_stats_cross_process(tmp_path: Path) -> None:
     for file_result in result.results:  # StepStats must pickle back from worker processes
         assert len(file_result.steps) == len(_granted_template().steps)
         assert all(s.label for s in file_result.steps)
+
+
+def test_run_batch_emits_and_records_validation_warnings(tmp_path: Path) -> None:
+    template = BatchTemplate(
+        name="warned",
+        steps=[
+            ReferenceMatchStep(table="flat", column="assignor_names", reference_path="/no/ref.tsv"),
+            ExportStep(fmt="csv", tables=["flat"]),
+        ],
+    )
+    events: list[BatchEvent] = []
+    result = run_batch(template, [FIXTURE], tmp_path / "out", timestamp="w", on_event=events.append)
+    assert any("reference file not found" in w for w in result.warnings)
+    assert any(e.level == "error" and "reference file not found" in e.message for e in events)
+    assert result.succeeded == 1  # warn-and-continue by default (the step skips gracefully)
+
+
+def test_run_batch_strict_aborts_before_output(tmp_path: Path) -> None:
+    template = BatchTemplate(
+        name="strictfail",
+        steps=[FilterStep(table="flat", clauses=[FilterClause("nope_col", "contains", "x")])],
+    )
+    with pytest.raises(TemplateValidationError) as excinfo:
+        run_batch(template, [FIXTURE], tmp_path / "out", timestamp="s", strict=True)
+    assert any("nope_col" in w for w in excinfo.value.warnings)
+    assert not (tmp_path / "out").exists()  # aborted before any output was written
