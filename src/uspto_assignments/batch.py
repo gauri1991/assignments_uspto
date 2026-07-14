@@ -18,7 +18,8 @@ import shutil
 import tempfile
 import time
 from collections.abc import Callable, Sequence
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import Future, ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from queue import Empty
@@ -1444,6 +1445,7 @@ def _process_input(  # noqa: PLR0913 - threads collaborators; one branch per ste
     template: BatchTemplate,
     source: Path,
     template_dir: Path,
+    source_dir: Path,
     emit: OnEvent,
     on_parse: OnParse | None = None,
     memory: EntityMemory | None = None,
@@ -1453,7 +1455,6 @@ def _process_input(  # noqa: PLR0913 - threads collaborators; one branch per ste
     learned_before = len(memory.learned)
     start = time.monotonic()
     work_dir: Path | None = None
-    source_dir = unique_path(template_dir / source.stem)
     try:
         if source.is_file():
             work_dir = Path(tempfile.mkdtemp(prefix="uspto_batch_"))
@@ -1492,6 +1493,7 @@ def _process_one(  # noqa: PLR0913 - picklable worker threading the run's collab
     template: BatchTemplate,
     source: Path,
     template_dir: Path,
+    source_dir: Path,
     event_queue: Any,
     memory: EntityMemory,
     cpc_ctx: CpcRunContext | None = None,
@@ -1507,6 +1509,7 @@ def _process_one(  # noqa: PLR0913 - picklable worker threading the run's collab
         template,
         source,
         template_dir,
+        source_dir,
         emit=lambda event: event_queue.put(("event", str(source), event)),
         on_parse=lambda count: event_queue.put(("parse", str(source), count)),
         memory=memory,
@@ -1514,9 +1517,46 @@ def _process_one(  # noqa: PLR0913 - picklable worker threading the run's collab
     )
 
 
+def _assign_source_dirs(inputs: Sequence[Path], template_dir: Path) -> list[Path]:
+    """Reserve one distinct output dir per input, serially, before any processing starts.
+
+    ``unique_path`` alone is race-prone across worker processes: two same-stem inputs (e.g.
+    ``a/x.xml`` and ``b/x.xml``) would both see the same free path and overwrite each other's
+    outputs. Deciding every dir up front in the parent keeps uniqueness serial; ``claimed`` tracks
+    dirs reserved this run that don't exist on disk yet.
+    """
+    claimed: set[Path] = set()
+    dirs: list[Path] = []
+    for source in inputs:
+        candidate = template_dir / source.stem
+        counter = 1
+        while candidate in claimed or candidate.exists():
+            candidate = template_dir / f"{source.stem} ({counter})"
+            counter += 1
+        claimed.add(candidate)
+        dirs.append(candidate)
+    return dirs
+
+
+def _future_result(future: Future[FileResult], source: Path) -> FileResult:
+    """Collect one worker future, converting an unexpected crash into a failed :class:`FileResult`.
+
+    ``_process_input`` already isolates per-file errors, so an exception here means the worker
+    process itself died or its result couldn't be unpickled. ``BrokenProcessPool`` is re-raised —
+    it poisons the whole pool and the caller must stop the run.
+    """
+    try:
+        return future.result()
+    except BrokenProcessPool:
+        raise
+    except Exception as exc:  # per-file isolation, mirroring the sequential path
+        return FileResult(str(source), ok=False, error=f"{type(exc).__name__}: {exc}")
+
+
 def _run_parallel(  # noqa: PLR0913 - internal helper threading the run's collaborators
     template: BatchTemplate,
     inputs: list[Path],
+    source_dirs: Sequence[Path],
     template_dir: Path,
     workers: int,
     emit: OnEvent,
@@ -1561,25 +1601,41 @@ def _run_parallel(  # noqa: PLR0913 - internal helper threading the run's collab
                 last_emit = now
 
         with ProcessPoolExecutor(max_workers=workers) as pool:
+            # ``memory`` is pickled once per submit (per input file). Acceptable at current sizes;
+            # an ``initializer``-based one-time transfer per worker is the upgrade path if this
+            # ever shows up in profiles.
             futures = {
                 pool.submit(
-                    _process_one, template, src, template_dir, event_queue, memory, cpc_ctx
+                    _process_one, template, src, template_dir, src_dir, event_queue, memory, cpc_ctx
                 ): src
-                for src in inputs
+                for src, src_dir in zip(inputs, source_dirs, strict=True)
             }
             pending = set(futures)
-            while pending:
-                drain(force=False)
-                finished = {future for future in pending if future.done()}
-                for future in finished:
-                    result = future.result()
-                    _emit_file_done(result, emit)
-                    results.append(result)
-                    completed += 1
-                pending -= finished
-                if pending:
-                    time.sleep(0.05)
+            try:
+                while pending:
+                    drain(force=False)
+                    finished = {future for future in pending if future.done()}
+                    pending -= finished
+                    for future in finished:
+                        result = _future_result(future, futures[future])
+                        _emit_file_done(result, emit)
+                        results.append(result)
+                        completed += 1
+                    if pending:
+                        time.sleep(0.05)
+            except BrokenProcessPool as exc:
+                # The pool is unusable; record every not-yet-collected input as failed and stop.
+                message = f"{type(exc).__name__}: worker process died — remaining inputs skipped"
+                emit(BatchEvent("error", message))
+                collected = {result.source for result in results}
+                results.extend(
+                    FileResult(str(src), ok=False, error=message)
+                    for src in inputs
+                    if str(src) not in collected
+                )
             drain(force=True)
+    order = {str(path): index for index, path in enumerate(inputs)}
+    results.sort(key=lambda r: order.get(r.source, len(order)))
     return results
 
 
@@ -1637,18 +1693,26 @@ def run_batch(  # noqa: PLR0913 - a clear public entry point with keyword-only o
     run_start = time.monotonic()
     template_dir = out_root / _safe_name(template.name)
     template_dir.mkdir(parents=True, exist_ok=True)
+    source_dirs = _assign_source_dirs(inputs, template_dir)
     results: list[FileResult] = []
 
     if workers > 1 and len(inputs) > 1:
         emit(BatchEvent("info", f"Processing {len(inputs)} inputs with {workers} workers…"))
-        results = _run_parallel(template, inputs, template_dir, workers, emit, memory, cpc_ctx)
+        results = _run_parallel(
+            template, inputs, source_dirs, template_dir, workers, emit, memory, cpc_ctx
+        )
+        # Workers mutate pickled copies of the memory; merge what they learned back in. (The
+        # sequential path shares ``memory`` in-process, so its learned pairs are already there.)
+        for result in results:
+            memory.apply_learned(result.learned)
     else:
-        for source in inputs:
+        for source, source_dir in zip(inputs, source_dirs, strict=True):
             emit(BatchEvent("info", f"▶ {source.name}"))
             result = _process_input(
                 template,
                 source,
                 template_dir,
+                source_dir,
                 emit,
                 on_parse=lambda count: emit(
                     BatchEvent("info", f"  parsing… {count:,} assignments")
@@ -1659,8 +1723,6 @@ def run_batch(  # noqa: PLR0913 - a clear public entry point with keyword-only o
             _emit_file_done(result, emit)
             results.append(result)
 
-    for result in results:  # merge worker-learned aliases back into the shared memory
-        memory.apply_learned(result.learned)
     _write_run_log(template_dir, timestamp, template, results)
     succeeded = sum(1 for r in results if r.ok)
     failed = len(results) - succeeded
