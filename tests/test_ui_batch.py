@@ -39,7 +39,7 @@ from uspto_assignments import (
 )
 from uspto_assignments_ui.app import create_app
 from uspto_assignments_ui.models import EntityAliasModel
-from uspto_assignments_ui.settings import BatchTemplateStore, EntityMemoryStore
+from uspto_assignments_ui.settings import BatchTemplateStore, EntityMemoryStore, UiStateStore
 from uspto_assignments_ui.widgets import batch_dialog as bd
 from uspto_assignments_ui.widgets import entity_dialog as ed
 from uspto_assignments_ui.widgets.batch_dialog import (
@@ -936,3 +936,26 @@ def test_mark_reviewed_confirms_alias_and_clears_review_queue(qtbot: Any, tmp_pa
         for r in range(dialog._alias_model.rowCount())
     ]
     assert scores and all(s == 100 for s in scores)  # human-confirmed
+
+
+def test_batch_dialog_output_defaults_to_data_out(
+    qtbot: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    create_app([])
+    dialog = BatchDialog(
+        BatchTemplateStore(tmp_path / "b.json"), ui_state=UiStateStore(tmp_path / "ui.json")
+    )
+    qtbot.addWidget(dialog)
+    assert dialog._out_dir.text() == str(tmp_path / "data" / "out")
+
+
+def test_batch_dialog_output_prefers_saved_dir(qtbot: Any, tmp_path: Path) -> None:
+    state = UiStateStore(tmp_path / "ui.json")
+    saved = tmp_path / "my_outputs"
+    saved.mkdir()
+    state.set_last_dir("output", str(saved))
+    create_app([])
+    dialog = BatchDialog(BatchTemplateStore(tmp_path / "b.json"), ui_state=state)
+    qtbot.addWidget(dialog)
+    assert dialog._out_dir.text() == str(saved)

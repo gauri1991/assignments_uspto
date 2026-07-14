@@ -189,3 +189,38 @@ class EntityMemoryStore:
     def clear(self) -> None:
         """Reset the active memory to empty (discards learned canonicals/aliases)."""
         EntityMemory().save(self._path)
+
+
+class UiStateStore:
+    """Remembers last-used dialog directories (app-config JSON, stateless per call).
+
+    Keys are free-form ("input", "output", "reference"); unknown or invalid entries read as "",
+    which the dialogs treat as "no preference" (Qt then falls back to its default).
+    """
+
+    def __init__(self, path: Path | None = None) -> None:
+        self._path = path if path is not None else config_dir() / "ui_state.json"
+
+    def _load(self) -> dict[str, str]:
+        if not self._path.is_file():
+            return {}
+        try:
+            raw = json.loads(self._path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        dirs = raw.get("last_dirs", {})
+        return {str(k): str(v) for k, v in dirs.items()} if isinstance(dirs, dict) else {}
+
+    def last_dir(self, key: str) -> str:
+        """The last directory recorded for ``key`` ("" when unset or no longer a directory)."""
+        value = self._load().get(key, "")
+        return value if value and Path(value).is_dir() else ""
+
+    def set_last_dir(self, key: str, value: str) -> None:
+        """Record ``value`` as the last directory for ``key`` (blank values are ignored)."""
+        if not value:
+            return
+        dirs = self._load()
+        dirs[key] = value
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._path.write_text(json.dumps({"last_dirs": dirs}, indent=2), encoding="utf-8")

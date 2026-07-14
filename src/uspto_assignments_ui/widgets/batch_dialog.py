@@ -76,7 +76,7 @@ from uspto_assignments import (
     describe_step as _describe_step,
 )
 
-from ..settings import BatchTemplateStore, CpcConfigStore, EntityMemoryStore
+from ..settings import BatchTemplateStore, CpcConfigStore, EntityMemoryStore, UiStateStore
 from ..workers import BatchWorker, CallWorker, LogEmitter, QtLogHandler
 from .cpc_settings_dialog import CpcSettingsDialog
 from .field_tree import FieldTree
@@ -1224,9 +1224,13 @@ class ReferenceMatchStepDialog(QDialog):
             self._column.setCurrentText("assignor_names")
 
     def _pick_reference(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Reference file", "", _REFERENCE_FILTER)
+        state = UiStateStore()  # stateless per call; shared with the batch dialog's dirs
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Reference file", state.last_dir("reference"), _REFERENCE_FILTER
+        )
         if path:
             self._reference.setText(path)
+            state.set_last_dir("reference", str(Path(path).parent))
 
     def _build_reference(self) -> None:
         src, _ = QFileDialog.getOpenFileName(
@@ -1502,6 +1506,7 @@ class BatchDialog(QDialog):
         parent: QWidget | None = None,
         *,
         cpc_store: CpcConfigStore | None = None,
+        ui_state: UiStateStore | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Batch processing")
@@ -1517,6 +1522,7 @@ class BatchDialog(QDialog):
         self._store = store
         self._memory_store = memory_store if memory_store is not None else EntityMemoryStore()
         self._cpc_store = cpc_store if cpc_store is not None else CpcConfigStore()
+        self._ui_state = ui_state if ui_state is not None else UiStateStore()
         self._memory: EntityMemory | None = None  # populated at run time from the store
         self._steps: list[BatchStep] = []
         self._completed = 0  # files finished this run (drives the determinate progress bar)
@@ -1635,6 +1641,8 @@ class BatchDialog(QDialog):
         column.addWidget(SectionLabel("Output"))
         self._out_dir = QLineEdit()
         self._out_dir.setPlaceholderText("output folder…")
+        # Managed default: remembered last output dir, else <cwd>/data/out.
+        self._out_dir.setText(self._ui_state.last_dir("output") or str(Path.cwd() / "data" / "out"))
         browse = QPushButton("Browse…")
         browse.clicked.connect(self._choose_output)
         out_row = QHBoxLayout()
@@ -1782,15 +1790,23 @@ class BatchDialog(QDialog):
     # -- inputs ------------------------------------------------------------
     def _add_files(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(
-            self, "Add input files", "", "USPTO assignment (*.xml *.zip);;All files (*)"
+            self,
+            "Add input files",
+            self._ui_state.last_dir("input"),
+            "USPTO assignment (*.xml *.zip);;All files (*)",
         )
         for path in paths:
             self._inputs.addItem(path)
+        if paths:
+            self._ui_state.set_last_dir("input", str(Path(paths[0]).parent))
 
     def _add_folder(self) -> None:
-        path = QFileDialog.getExistingDirectory(self, "Add dataset folder")
+        path = QFileDialog.getExistingDirectory(
+            self, "Add dataset folder", self._ui_state.last_dir("input")
+        )
         if path:
             self._inputs.addItem(path)
+            self._ui_state.set_last_dir("input", path)
 
     def _remove_input(self) -> None:
         for item in self._inputs.selectedItems():
@@ -1890,9 +1906,12 @@ class BatchDialog(QDialog):
 
     # -- run ---------------------------------------------------------------
     def _choose_output(self) -> None:
-        path = QFileDialog.getExistingDirectory(self, "Choose output folder")
+        path = QFileDialog.getExistingDirectory(
+            self, "Choose output folder", self._ui_state.last_dir("output")
+        )
         if path:
             self._out_dir.setText(path)
+            self._ui_state.set_last_dir("output", path)
 
     def _open_cpc_settings(self) -> None:
         CpcSettingsDialog(self._cpc_store, self).exec()
