@@ -74,7 +74,7 @@ Optional dependency extras:
 | Extra | Adds | Needed for |
 |---|---|---|
 | `ui` | `PyQt6` | the desktop app |
-| `ml` | `probablepeople` | the optional ML entity-type classifier (rules work without it) |
+| `ml` | `probablepeople` | alias for the ML classifier — now part of the default install (rules still work if absent) |
 | `dev` | `pytest`, `pytest-qt`, `ruff`, `pyright`, `lxml-stubs`, `pyarrow-stubs` | development |
 
 Entry points (installed as console scripts, or run the shims directly):
@@ -395,8 +395,9 @@ firm-to-firm transfers and to identify individual assignors (inventors).
   short (2–4 token) all-alphabetic name with no company keyword.
 - **Unknown** — everything else, e.g. single-token brands like `SONY` (deliberately not guessed).
 
-**Optional ML backend** — set a step's *method* to `probablepeople` to use a CRF name classifier
-(install with `pip install -e ".[ml]"`). If it isn't installed it logs a note and falls back to rules.
+**ML backend** — set a step's *method* to `probablepeople` to use a CRF name classifier. It's
+included in the default install, so this works out of the box; if the package is ever missing the
+run log shows a one-line note (amber) and the step falls back to rules.
 
 **Multi-party mode** (for concatenated `*_names` columns) — how to combine the parties' types:
 

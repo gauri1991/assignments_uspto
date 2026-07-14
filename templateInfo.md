@@ -106,7 +106,7 @@ Example: after `{"kind":"normalize","table":"flat","column":"assignor_names"}`, 
 | filter clause | `op` | `contains`, `equals`, `not_equals` (null-safe exclusion), `starts_with`, `not_empty`, `is_empty`, `in_range` |
 | filter | `combine` | `and`, `or` |
 | normalize / compare / reference_match | `scorer` | `wratio` (default), `token_set`, `token_sort`, `partial`, `qratio`, `ratio`, `jaro_winkler` |
-| classify / transfer_type | `method` | `rules` (default), `probablepeople` (optional ML; falls back to rules if not installed) |
+| classify / transfer_type | `method` | `rules` (default), `probablepeople` (ML; in the default install, falls back to rules if absent) |
 | classify | `mode` | `all` (default), `any`, `first`, `majority` |
 | classify output / transfer_type types | entity type | `company`, `individual`, `unknown` |
 | compare | `method` | `exact` (default), `fuzzy` |
@@ -150,7 +150,7 @@ so a crowded prefix never slows a match — this cap is shared by `normalize`, `
 the ledger pipeline, so full-`g_assignee_disambiguated.tsv` runs are safe at scale.
 
 **`classify`** — `method: "rules"` (default; legal-suffix + org keywords, and the `LAST, FIRST`
-person form) or `probablepeople` (optional ML; falls back to rules if not installed). `mode` combines
+person form) or `probablepeople` (ML; in the default install, falls back to rules if absent). `mode` combines
 a multi-party `*_names` value: `all` (one agreed type across every party, else `unknown`), `any`
 (company if any party is), `first`, `majority`.
 
@@ -564,7 +564,7 @@ CLI pipeline. They compose: templates for exploration, the pipeline for the anal
 | Capability | Where | Notes |
 |---|---|---|
 | Rule-based entity-type classifier | `classify` step / `transfer_type` (`method: "rules"`) | legal-suffix + org-keyword detection, `LAST, FIRST` person form; deterministic and fast |
-| **probablepeople** (statistical CRF model) | `method: "probablepeople"` on `classify`/`transfer_type` | the only bundled *learned* model; optional install (`pip install -e ".[ml]"`); parses person-vs-corporation; falls back to rules if absent |
+| **probablepeople** (statistical CRF model) | `method: "probablepeople"` on `classify`/`transfer_type` | the only bundled *learned* model; ships in the default install; parses person-vs-corporation; falls back to rules if absent |
 | rapidfuzz similarity algorithms | `scorer` on `normalize`/`compare`/`reference_match` | 7 algorithms (§4b) — string similarity, not ML |
 | Learnable entity memory | `normalize` with `learn: true` | grows alias→canonical mappings from data (path-dependent — see §4b) |
 
