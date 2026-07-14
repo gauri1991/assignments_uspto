@@ -232,11 +232,11 @@ class FilterStepDialog(QDialog):
         self._table = QComboBox()
         self._table.addItems(list(STORE_TABLES))
         self._table.currentIndexChanged.connect(self._rebuild_filter_bar)
-        row = QHBoxLayout()
-        row.addWidget(QLabel("Table"))
-        row.addWidget(self._table, 1)
-        layout.addLayout(row)
+        form = QFormLayout()
+        form.addRow("Table", self._table)
+        layout.addLayout(form)
 
+        # Kept a direct child of the top-level VBox: _rebuild_filter_bar swaps it in place there.
         self._filter_bar = FilterBar(_cols(self._table.currentText()))
         layout.addWidget(self._filter_bar)
 
@@ -428,14 +428,16 @@ class ExportStepDialog(QDialog):
             item.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
             self._tables.addItem(item)
         self._tables.itemChanged.connect(self._refresh_editor)
-        layout.addWidget(self._tables)
+        layout.addWidget(self._tables, 1)
 
         self._customize = QCheckBox("Choose final columns (order + rename)")
         self._customize.toggled.connect(self._on_customize_toggled)
         layout.addWidget(self._customize)
         self._editor = _ExportColumnEditor()
         self._editor.setVisible(False)
-        layout.addWidget(self._editor)
+        # Weighted heavier than the tables list so toggling the editor redistributes space
+        # instead of erratically resizing the dialog.
+        layout.addWidget(self._editor, 2)
 
         self._hint = QLabel("Check at least one table to export.")
         self._hint.setVisible(False)
@@ -531,8 +533,8 @@ class NormalizeStepDialog(QDialog):
         form.addRow("Split separator", self._separator)
         form.addRow("Match threshold", self._threshold)
         form.addRow("Scorer", self._scorer)
+        form.addRow("", self._learn)  # aligned under the field column
         layout.addLayout(form)
-        layout.addWidget(self._learn)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -603,13 +605,13 @@ class DedupeStepDialog(QDialog):
 
         self._table = QComboBox()
         self._table.addItems(list(STORE_TABLES))
-        table_row = QHBoxLayout()
-        table_row.addWidget(QLabel("Table"))
-        table_row.addWidget(self._table, 1)
-        layout.addLayout(table_row)
+        form = QFormLayout()
+        form.addRow("Table", self._table)
+        layout.addLayout(form)
 
         layout.addWidget(QLabel("Key columns (none checked = whole row)"))
-        # Default: no key columns checked (dedupe on the whole row).
+        # Default: no key columns checked (dedupe on the whole row). Kept a direct child of the
+        # top-level VBox: _rebuild_columns swaps it in place there.
         self._columns = _checkable_columns(_cols(self._table.currentText()), set())
         layout.addWidget(self._columns)
         self._table.currentIndexChanged.connect(self._rebuild_columns)
@@ -652,13 +654,13 @@ class SelectStepDialog(QDialog):
 
         self._table = QComboBox()
         self._table.addItems(list(STORE_TABLES))
-        table_row = QHBoxLayout()
-        table_row.addWidget(QLabel("Table"))
-        table_row.addWidget(self._table, 1)
-        layout.addLayout(table_row)
+        form = QFormLayout()
+        form.addRow("Table", self._table)
+        layout.addLayout(form)
 
         layout.addWidget(QLabel("Columns to keep"))
-        # Default: keep all columns (checked); a new table resets to all-kept.
+        # Default: keep all columns (checked); a new table resets to all-kept. Kept a direct
+        # child of the top-level VBox: _rebuild_columns swaps it in place there.
         self._columns = _checkable_columns(_cols(self._table.currentText()), None)
         layout.addWidget(self._columns)
         self._table.currentIndexChanged.connect(self._rebuild_columns)
@@ -706,8 +708,8 @@ class SortStepDialog(QDialog):
         self._ascending.setChecked(True)
         form.addRow("Table", self._table)
         form.addRow("Column", self._column)
+        form.addRow("", self._ascending)  # aligned under the field column
         layout.addLayout(form)
-        layout.addWidget(self._ascending)
 
         self._table.currentIndexChanged.connect(self._rebuild_columns)
         self._rebuild_columns()
@@ -817,13 +819,13 @@ class AggregateStepDialog(QDialog):
 
         self._table = QComboBox()
         self._table.addItems(list(STORE_TABLES))
-        table_row = QHBoxLayout()
-        table_row.addWidget(QLabel("Table"))
-        table_row.addWidget(self._table, 1)
-        layout.addLayout(table_row)
+        table_form = QFormLayout()
+        table_form.addRow("Table", self._table)
+        layout.addLayout(table_form)
 
         layout.addWidget(QLabel("Group by columns"))
-        # Default: nothing grouped yet; a new table resets to no group-by columns.
+        # Default: nothing grouped yet; a new table resets to no group-by columns. Kept a direct
+        # child of the top-level VBox: _rebuild_columns swaps it in place there.
         self._columns = _checkable_columns(_cols(self._table.currentText()), set())
         layout.addWidget(self._columns)
 
@@ -1538,7 +1540,8 @@ class BatchDialog(QDialog):
         column.addWidget(SectionLabel("Inputs (xml / zip files or dataset folders)"))
         self._inputs = QListWidget()
         self._inputs.setProperty("panel", "true")
-        column.addWidget(self._inputs)
+        # Weighted 1:2:2 with the field tree and steps list — the working areas get the space.
+        column.addWidget(self._inputs, 1)
         column.addLayout(
             self._button_row(
                 ("Add files…", self._add_files),
@@ -1552,18 +1555,17 @@ class BatchDialog(QDialog):
         self._max.setRange(0, _MAX_RECORDS_CAP)
         self._max.setSpecialValueText("All records")
         self._max.setValue(0)
-        max_row = QHBoxLayout()
-        max_row.addWidget(QLabel("Max records"))
-        max_row.addWidget(self._max, 1)
-        column.addLayout(max_row)
+        max_form = QFormLayout()
+        max_form.addRow("Max records", self._max)
+        column.addLayout(max_form)
         self._fields = FieldTree()
-        column.addWidget(self._fields)
+        column.addWidget(self._fields, 2)
 
         column.addWidget(SectionLabel("Steps (double-click to edit)"))
         self._steps_list = QListWidget()
         self._steps_list.setProperty("panel", "true")
         self._steps_list.itemDoubleClicked.connect(self._edit_step)
-        column.addWidget(self._steps_list)
+        column.addWidget(self._steps_list, 2)
 
         add_btn = QPushButton("Add step ▾")
         add_btn.setProperty("primary", "true")
@@ -1607,10 +1609,9 @@ class BatchDialog(QDialog):
         self._workers = QSpinBox()
         self._workers.setRange(1, 32)
         self._workers.setValue(1)
-        workers_row = QHBoxLayout()
-        workers_row.addWidget(QLabel("Workers (1 = sequential)"))
-        workers_row.addWidget(self._workers, 1)
-        column.addLayout(workers_row)
+        workers_form = QFormLayout()
+        workers_form.addRow("Workers (1 = sequential)", self._workers)
+        column.addLayout(workers_form)
 
         # CPC: a per-run network opt-in for fetch_cpc steps, plus quick access to the source config.
         self._allow_network = QCheckBox("Allow network for CPC fetch this run")

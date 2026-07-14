@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import (
     QDialogButtonBox,
     QDoubleSpinBox,
     QFormLayout,
+    QHBoxLayout,
     QLabel,
     QLineEdit,
     QPushButton,
@@ -88,7 +89,12 @@ class CpcSettingsDialog(QDialog):
 
         self._key_status = QLabel()
         self._key_status.setWordWrap(True)
-        layout.addWidget(self._key_status)
+        test = QPushButton("Check API key")
+        test.clicked.connect(self._refresh_key_status)
+        key_row = QHBoxLayout()
+        key_row.addWidget(self._key_status, 1)
+        key_row.addWidget(test)
+        layout.addLayout(key_row)
         self._api_key_env.textChanged.connect(self._refresh_key_status)
         self._refresh_key_status()
 
@@ -103,16 +109,20 @@ class CpcSettingsDialog(QDialog):
         self._threshold = _float_spin(0.0, 1000.0, config.match.overlap_threshold)
         self._min_patents = _int_spin(1, 10_000, config.match.min_in_domain_patents)
         self._hit_floor = _float_spin(0.0, 1.0, config.match.hit_rate_floor, step=0.05)
-        self._cache_path = QLineEdit(config.cache.path)
-        self._cache_ttl = _int_spin(0, 3650, config.cache.ttl_days)
         match_form.addRow("Overlap grain", self._grain)
         match_form.addRow("Overlap metric", self._metric)
         match_form.addRow("Overlap threshold", self._threshold)
         match_form.addRow("Min in-domain patents", self._min_patents)
         match_form.addRow("Hit-rate floor (abort below)", self._hit_floor)
-        match_form.addRow("Cache folder", self._cache_path)
-        match_form.addRow("Cache TTL (days)", self._cache_ttl)
         layout.addLayout(match_form)
+
+        layout.addWidget(SectionLabel("Cache"))
+        cache_form = QFormLayout()
+        self._cache_path = QLineEdit(config.cache.path)
+        self._cache_ttl = _int_spin(0, 3650, config.cache.ttl_days)
+        cache_form.addRow("Cache folder", self._cache_path)
+        cache_form.addRow("Cache TTL (days)", self._cache_ttl)
+        layout.addLayout(cache_form)
 
         location = QLabel(
             f"Saved to <code>{store.path()}</code>. Endpoint/auth verified as of "
@@ -120,10 +130,6 @@ class CpcSettingsDialog(QDialog):
         )
         location.setWordWrap(True)
         layout.addWidget(location)
-
-        test = QPushButton("Check API key")
-        test.clicked.connect(self._refresh_key_status)
-        layout.addWidget(test)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel

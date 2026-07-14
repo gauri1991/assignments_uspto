@@ -741,3 +741,16 @@ def test_alias_tab_notes_truncation(qtbot: Any, tmp_path: Path) -> None:
     dialog._refresh_aliases()  # what the debounce timer fires
     assert not dialog._alias_model.truncated
     assert "match(es)" in dialog._alias_note.text()
+
+
+def test_filter_step_dialog_rebuilds_bar_on_table_change(qtbot: Any) -> None:
+    create_app([])
+    dialog = FilterStepDialog()
+    qtbot.addWidget(dialog)
+    original_bar = dialog._filter_bar
+    dialog._table.setCurrentText("assignees")  # must swap in a bar with that table's columns
+    assert dialog._filter_bar is not original_bar
+    columns = [
+        dialog._filter_bar._column.itemText(i) for i in range(dialog._filter_bar._column.count())
+    ]
+    assert "name" in columns  # an assignees column
