@@ -21,7 +21,7 @@ import pyarrow.compute as _pc_module
 import pyarrow.csv as _pa_csv
 import pyarrow.parquet as _pq
 
-from .normalize import DEFAULT_SCORER, DEFAULT_THRESHOLD, EntityMemory
+from .normalize import DEFAULT_SCORER, DEFAULT_THRESHOLD, EntityMemory, review_flags
 
 # pyarrow.compute / pyarrow.csv are under-typed in the stubs; route through Any (see filters.py).
 pc: Any = _pc_module
@@ -153,7 +153,7 @@ def load_reference(
     return cached
 
 
-def match_column(  # noqa: PLR0913 - a clear public entry point with keyword-only options
+def match_column(  # noqa: PLR0913, PLR0915 - one linear pass building several output columns
     table: pa.Table,
     column: str,
     gazetteer: ReferenceGazetteer,
@@ -240,11 +240,7 @@ def match_column(  # noqa: PLR0913 - a clear public entry point with keyword-onl
     if score_col:
         result = put(result, score_col, pa.array(score_vals, type=pa.int32()))
     if review_col:
-        # 0 (unmatched) and 100 (exact) never flag, whatever the threshold.
-        flags_out = [
-            None if s is None else ("true" if 0 < s < min(review_threshold, 100) else "false")
-            for s in score_vals
-        ]
+        flags_out = review_flags(score_vals, review_threshold)
         result = put(result, review_col, pa.array(flags_out, type=pa.string()))
     return result
 

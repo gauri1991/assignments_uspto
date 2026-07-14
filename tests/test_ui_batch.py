@@ -887,3 +887,52 @@ def test_entity_dialog_review_filter_narrows_aliases(qtbot: Any, tmp_path: Path)
     assert "match(es)" in dialog._alias_note.text()
     dialog._review_only.setChecked(False)
     assert dialog._alias_model.rowCount() == 2
+
+
+def test_compare_dialog_roundtrips_score_and_review(qtbot: Any) -> None:
+    create_app([])
+    step = CompareStep(
+        table="flat",
+        left="assignor_names",
+        right="assignee_names",
+        method="fuzzy",
+        emit_score=True,
+        review_threshold=92,
+    )
+    dialog = CompareStepDialog(step)
+    qtbot.addWidget(dialog)
+    rebuilt = dialog.step()
+    assert rebuilt.emit_score is True and rebuilt.review_threshold == 92
+
+
+def test_step_descriptions_show_confidence_markers(qtbot: Any) -> None:
+    create_app([])
+    described = bd._describe_step(
+        NormalizeStep(table="flat", column="assignor_names", emit_score=True, review_threshold=95)
+    )
+    assert "· score" in described and "review<95" in described
+    plain = bd._describe_step(NormalizeStep(table="flat", column="assignor_names"))
+    assert "score" not in plain and "review" not in plain
+
+
+def test_mark_reviewed_confirms_alias_and_clears_review_queue(qtbot: Any, tmp_path: Path) -> None:
+    create_app([])
+    memory = EntityMemory(canonicals=["ACME CORPORATION"])
+    memory.resolve("ACME CORPORATON", threshold=85)  # fuzzy learn < 100
+    store = EntityMemoryStore(tmp_path / "entities.json")
+    store.save(memory)
+    dialog = EntityDialog(store)
+    qtbot.addWidget(dialog)
+    dialog._review_cap.setValue(100)
+    dialog._review_only.setChecked(True)
+    assert dialog._alias_model.rowCount() == 1  # the marginal alias is queued
+
+    dialog._alias_table.selectRow(0)
+    dialog._confirm_alias()
+    assert dialog._alias_model.rowCount() == 0  # confirmed -> off the queue
+    dialog._review_only.setChecked(False)
+    scores = [
+        int(dialog._alias_model.data(dialog._alias_model.index(r, 2)))
+        for r in range(dialog._alias_model.rowCount())
+    ]
+    assert scores and all(s == 100 for s in scores)  # human-confirmed

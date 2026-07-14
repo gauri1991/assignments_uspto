@@ -120,3 +120,12 @@ class EntityAliasModel(QAbstractTableModel):
         for alias in [a for row in rows if (a := self.alias_at(row)) is not None]:
             self._memory.delete_alias(alias)
         self.refresh()
+
+    def confirm_aliases(self, rows: list[int]) -> None:
+        """Mark the aliases at the given view rows human-confirmed (score 100)."""
+        for row in rows:
+            alias = self.alias_at(row)
+            if alias is not None:
+                # Re-pointing an alias at its own canonical clears the fuzzy learn score.
+                self._memory.set_alias(alias, self._rows[row][1])
+        self.refresh()

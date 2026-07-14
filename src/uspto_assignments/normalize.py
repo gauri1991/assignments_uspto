@@ -245,7 +245,7 @@ class EntityMemory:
         match = process.extractOne(key, choices, scorer=scorer_fn, score_cutoff=threshold)
         if match is None:
             return None
-        return self._canonicals[indices[match[2]]], int(round(match[1]))
+        return self._canonicals[indices[match[2]]], round(match[1])
 
     def max_block(self) -> int:
         """Largest fuzzy block (diagnostics): bounded by the cap unless names are identical."""
@@ -458,6 +458,15 @@ class EntityMemory:
         return len(self._canonicals)
 
 
+def review_flags(scores: list[int | None], review_threshold: int) -> list[str | None]:
+    """Review flags for confidence scores: "true" for fuzzy accepts below the bar.
+
+    0 (unmatched) and 100 (exact/identity) never flag, whatever the threshold.
+    """
+    cap = min(review_threshold, 100)
+    return [None if s is None else ("true" if 0 < s < cap else "false") for s in scores]
+
+
 def normalize_column(  # noqa: PLR0913 - a clear public entry point with keyword-only options
     table: pa.Table,
     column: str,
@@ -529,11 +538,6 @@ def normalize_column(  # noqa: PLR0913 - a clear public entry point with keyword
     if score_target:
         result = put(result, score_target, pa.array(scores, type=pa.int32()))
     if review_target:
-        # In review: accepted via a fuzzy match below the bar. 0 (unmatched) and 100 (exact)
-        # never flag, whatever the threshold.
-        flags = [
-            None if s is None else ("true" if 0 < s < min(review_threshold, 100) else "false")
-            for s in scores
-        ]
+        flags = review_flags(scores, review_threshold)
         result = put(result, review_target, pa.array(flags, type=pa.string()))
     return result

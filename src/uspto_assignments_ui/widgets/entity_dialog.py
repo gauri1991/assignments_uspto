@@ -160,7 +160,11 @@ class EntityDialog(QDialog):
         hint = QLabel("Double-click a canonical cell to reassign an alias.")
         hint.setProperty("role", "hint")
         col.addWidget(hint)
-        col.addLayout(self._button_row(("Delete alias", self._delete_alias)))
+        col.addLayout(
+            self._button_row(
+                ("Mark reviewed", self._confirm_alias), ("Delete alias", self._delete_alias)
+            )
+        )
         return tab
 
     # -- file + save/cancel rows -------------------------------------------
@@ -282,6 +286,13 @@ class EntityDialog(QDialog):
         if rows:
             self._alias_model.delete_aliases(rows)
             self._refresh()
+
+    def _confirm_alias(self) -> None:
+        """Accept the selected marginal aliases: score → 100, dropping them off the review queue."""
+        rows = sorted({i.row() for i in self._alias_table.selectedIndexes()})
+        if rows:
+            self._alias_model.confirm_aliases(rows)
+            self._update_alias_note()
 
     # -- reference seeding ---------------------------------------------------
     def _seed_from_reference(self) -> None:

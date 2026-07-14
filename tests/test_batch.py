@@ -877,3 +877,60 @@ def test_run_batch_normalize_emits_score_and_review_columns(tmp_path: Path) -> N
     )
     assert "name_canonical_score" in header
     assert "name_canonical_review" in header
+
+
+def test_apply_compare_fuzzy_score_and_review_columns() -> None:
+    table = pa.table(
+        {
+            "a": ["ACME CORPORATION", "ACME CORPORATION", "ACME CORPORATION", None],
+            "b": ["ACME CORPORATION", "ACME CORPORATON", "ZZZZZ", "X"],
+        }
+    )
+    step = CompareStep(
+        table="t",
+        left="a",
+        right="b",
+        method="fuzzy",
+        threshold=85,
+        emit_score=True,
+        review_threshold=100,
+    )
+    tables = {"t": table}
+    _apply_compare(tables, step, _Sink())
+    result = tables["t"]
+    scores = result.column("a_matches_b_score").to_pylist()
+    review = result.column("a_matches_b_review").to_pylist()
+    flags = result.column("a_matches_b").to_pylist()
+    assert scores[0] == 100 and flags[0] == "true" and review[0] == "false"  # exact never reviews
+    assert scores[1] is not None and 85 <= scores[1] < 100  # fuzzy match -> review band
+    assert flags[1] == "true" and review[1] == "true"
+    assert flags[2] == "false" and review[2] == "false"  # below threshold: no match, no review
+    assert scores[3] is None and flags[3] == "false"  # null comparand
+
+
+def test_apply_compare_exact_keeps_threshold_free_semantics() -> None:
+    table = pa.table({"a": ["X", "Y"], "b": ["X", "Z"]})
+    step = CompareStep(table="t", left="a", right="b", method="exact", threshold=0, emit_score=True)
+    tables = {"t": table}
+    _apply_compare(tables, step, _Sink())
+    assert tables["t"].column("a_matches_b").to_pylist() == ["true", "false"]
+    assert tables["t"].column("a_matches_b_score").to_pylist() == [100, 0]
+
+
+def test_compare_step_score_review_roundtrip_and_schema(tmp_path: Path) -> None:
+    step = CompareStep(
+        table="flat",
+        left="x",
+        right="y",
+        emit_score=True,
+        review_threshold=92,
+        action="keep_matches",
+    )
+    path = tmp_path / "t.json"
+    dump_templates([BatchTemplate(name="c", steps=[step])], path)
+    loaded = load_templates(path)[0].steps[0]
+    assert isinstance(loaded, CompareStep)
+    assert loaded.emit_score is True and loaded.review_threshold == 92
+    cols = columns_after(LoadConfig(), [step], upto=1)["flat"]
+    assert "x_matches_y_score" in cols and "x_matches_y_review" in cols
+    assert "x_matches_y" not in cols  # non-flag action adds no boolean column

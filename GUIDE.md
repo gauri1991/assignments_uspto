@@ -307,12 +307,35 @@ The **scorer** (fuzzy algorithm) is selectable:
 
 The **match threshold** (0–100, default **90**) is the minimum score to count as a match.
 
+### Match confidence & the review band
+
+The threshold is a hard gate — but a match that scored exactly 90 is not the same as a score-100
+exact hit. The fuzzy steps (**Normalize**, **Match against reference**, **Compare**) can keep that
+confidence visible instead of discarding it:
+
+- **Add match-score column** — emits `<target>_score` (0–100). `100` = exact or identity, `0` = no
+  match; for multi-party values (split on `"; "`) it is the **weakest** party's score, since one bad
+  party is what makes a row suspect.
+- **Flag review below N** — emits `<target>_review` with `"true"` for rows that were **accepted via
+  a fuzzy match scoring under N**. Exact matches (100) and unmatched rows (0) never flag, whatever
+  the threshold. This is the classic record-linkage *clerical-review band*: accept ≥ N outright,
+  review [threshold, N), reject < threshold. A typical setup is threshold 90, review below 95.
+
+Both columns flow through the schema-aware pickers, filters, and exports like any other column — so
+you can filter `<target>_review = true` into its own worksheet, or sort an export by score. Scores
+also have **provenance**: an alias learned from a marginal fuzzy match remembers its original score,
+so on later runs the exact alias hit still reports 90, not a laundered 100.
+
 ### The learnable entity memory
 
 Normalization is backed by an **entity memory**: a deduplicated set of canonical names plus learned
 `alias → canonical` mappings. It **grows as it resolves names** (unless a step sets *match-only*), and
 persists to JSON. It's stored in a **relocatable project file** (default `entities.json` in the
 working folder); a pointer file remembers the chosen location across sessions.
+
+Each fuzzy-learned alias is stored **with the score it was learned at** (file format v2:
+`"alias": ["CANONICAL", 91]`; curated/exact entries stay plain strings, and v1 files load unchanged
+as score-100). The store is only rewritten when a run actually learned something.
 
 ### The memory editor — *Settings ▸ Entity memory*
 
@@ -321,9 +344,17 @@ A tabbed editor that works on a **working copy** (Save persists, Cancel discards
 - **Canonicals** tab — searchable list; **Add**, **Rename** (repoints its aliases), **Merge** (fold
   one canonical into another), **Delete** (also removes its aliases). Structural edits rebuild the
   fuzzy block index so matching keeps working.
-- **Aliases** tab — searchable table of `alias → canonical`; **double-click a canonical cell to
-  reassign** an alias, or **Delete alias**.
-- File actions — **Import…** (seed from CSV `alias,canonical` / JSON / one-name-per-line), **Export…**
+- **Aliases** tab — searchable table of `alias → canonical` with a **Score** column (the confidence
+  each alias was learned at; 100 = exact or curated). **Double-click a canonical cell to reassign**
+  an alias, or **Delete alias**.
+- **The review queue** — check **Only aliases learned below [N]** to see just the marginal fuzzy
+  learnings. For each one either **Mark reviewed** (accept it: score becomes 100 and it leaves the
+  queue), double-click to reassign it to the right canonical (also marks it human-confirmed), or
+  **Delete alias**. Work the queue down after big normalize runs.
+- File actions — **Import…** (seed from CSV `alias,canonical` / JSON / one-name-per-line),
+  **Seed from reference…** (stream a disambiguated-assignee file — TSV/CSV/Parquet, multi-GB OK —
+  and add every distinct organization as a canonical; see
+  [Reference matching](#9-reference-matching-patentsview-disambiguated-assignees)), **Export…**
   (save the memory as JSON), **Change location…** (relocate the active file), **Clear** (reset to
   empty — use this to discard junk accumulated from a bad run).
 
@@ -412,7 +443,10 @@ For the matched column it adds:
 
 - `<col>_disambiguated` — the raw name replaced by the matched organization (unmatched names kept as-is);
 - `<col>_matched` — `"true"` / `"false"`;
-- `<col>_assignee_id` — the matched organization's id (when an id column is set).
+- `<col>_assignee_id` — the matched organization's id (when an id column is set);
+- `<col>_match_score` — the weakest matched-party score, 0–100 (only with *Add match-score column*);
+- `<col>_match_review` — `"true"` for rows accepted below the review bar (only with *Flag review
+  below N* — see [Match confidence & the review band](#match-confidence--the-review-band)).
 
 **Action**: `flag` (add the columns), `keep_matched` (keep only known-company rows — drops presumed
 individuals), or `drop_matched`. **Mode**: `any` (matched if any party is a known company) or `all`.
@@ -486,7 +520,10 @@ Each template is applied to **each input independently**. Inputs can be USPTO `.
 4. **Steps** — *Add step ▾* (menu below), reorder isn't needed (they run top-to-bottom);
    **double-click a step to edit** it; *Remove*.
 5. **Output** — choose an output folder; **Workers** (1 = sequential; >1 processes files in parallel).
-6. **Run batch** — watch the live **console**; a run log is written too.
+6. **Run batch** — watch the live **console** and the per-file progress bar; a run log is written
+   too. A **Cancel** button appears while a run is active (cancellation is per-file: the file in
+   flight finishes, the rest are skipped, and the summary notes what was cancelled). Closing the
+   window mid-run prompts to cancel first — the window closes itself once the run stops.
 
 **Output layout** — folder-per-source:
 
@@ -505,7 +542,8 @@ total. Sequential mode streams live per-step progress (`X of Y` for parse/normal
 - **Collision guard** — if two Normalize steps would write the same column on the same table, the
   second is auto-renamed (with a console note) so nothing is clobbered.
 - **Learn-back** — aliases learned by workers are merged back into the shared entity memory after the
-  run (persist the memory to keep learning across runs).
+  run, with their match scores. The memory file is only rewritten when a run actually learned
+  something.
 
 ### Batch step catalog
 
@@ -520,7 +558,9 @@ Fields: `table`, `clauses[]`, `combine` (`and`/`or`), `columns` (optional projec
 Fuzzy-normalize a name column to canonical forms via the entity memory.
 Fields: `table`, `column` (default `name`), `target` (blank → `<column>_canonical`), `threshold`
 (default 90), `separator` (blank → `"; "` for `*_names` columns), `learn` (default true — off =
-match-only), `scorer` (default `wratio`; see [scorers](#7-entity-normalization--the-memory-editor)).
+match-only), `scorer` (default `wratio`; see [scorers](#7-entity-normalization--the-memory-editor)),
+`emit_score` (adds `<target>_score`), `review_threshold` (0 = off; adds `<target>_review` — see
+[Match confidence](#match-confidence--the-review-band)).
 
 #### Classify
 Add an entity-type column (`company`/`individual`/`unknown`).
@@ -531,7 +571,9 @@ Fields: `table`, `column`, `target` (blank → `<column>_type`), `method` (`rule
 Compare two columns row-wise (e.g. assignor vs assignee) and flag or drop matches.
 Fields: `table`, `left`, `right`, `target` (blank → `<left>_matches_<right>`), `method`
 (`exact` — fast, ideal on canonical columns — or `fuzzy`), `scorer`, `threshold`, `action`
-(`flag` = add a `"true"/"false"` column · `drop_matches` · `keep_matches`).
+(`flag` = add a `"true"/"false"` column · `drop_matches` · `keep_matches`), `emit_score` (adds
+`<target>_score`, the per-row similarity — added before any drop/keep filtering so surviving rows
+keep it), `review_threshold` (0 = off; adds `<target>_review` flagging fuzzy matches below the bar).
 
 #### Transfer type
 One-click preset: keep only rows whose classified assignor/assignee types match a chosen pairing.
@@ -545,8 +587,9 @@ Match a name column against a disambiguated-assignee reference file (see
 Fields: `table` (default `flat`), `column` (default `assignor_names`), `reference_path`,
 `name_column` (default `disambig_assignee_organization`), `id_column` (optional, e.g. `assignee_id`),
 `threshold`, `scorer`, `separator`, `mode` (`any`/`all`), `delimiter` (blank → auto), `action`
-(`flag`/`keep_matched`/`drop_matched`). Outputs `<col>_disambiguated`, `<col>_matched`, and
-`<col>_assignee_id` (when an id column is set).
+(`flag`/`keep_matched`/`drop_matched`), `emit_score` (adds `<col>_match_score`),
+`review_threshold` (0 = off; adds `<col>_match_review`). Outputs `<col>_disambiguated`,
+`<col>_matched`, and `<col>_assignee_id` (when an id column is set).
 
 #### Fetch CPC
 Attach CPC classification codes to a patent-number column via the configured CPC source

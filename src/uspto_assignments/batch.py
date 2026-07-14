@@ -316,10 +316,20 @@ class CompareStep:
     scorer: str = DEFAULT_SCORER  # rapidfuzz algorithm when method == "fuzzy"
     threshold: int = DEFAULT_THRESHOLD
     action: str = "flag"  # flag | drop_matches | keep_matches
+    emit_score: bool = False  # add a {target}_score column (per-row similarity, 0–100)
+    review_threshold: int = 0  # >0: add {target}_review flagging fuzzy matches scoring below it
     enabled: bool = True
 
     def resolved_target(self) -> str:
         return self.target or f"{self.left}_matches_{self.right}"
+
+    def resolved_score(self) -> str:
+        """The confidence column name (added only when ``emit_score`` is set)."""
+        return f"{self.resolved_target()}_score"
+
+    def resolved_review(self) -> str:
+        """The review-flag column name (added only when ``review_threshold`` > 0)."""
+        return f"{self.resolved_target()}_review"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -332,6 +342,8 @@ class CompareStep:
             "scorer": self.scorer,
             "threshold": self.threshold,
             "action": self.action,
+            "emit_score": self.emit_score,
+            "review_threshold": self.review_threshold,
         }
 
 
@@ -581,6 +593,8 @@ def _decode_step(data: dict[str, Any]) -> BatchStep:  # noqa: PLR0911, PLR0912 -
             scorer=str(data.get("scorer", DEFAULT_SCORER)),
             threshold=int(data.get("threshold", DEFAULT_THRESHOLD)),
             action=str(data.get("action", "flag")),
+            emit_score=bool(data.get("emit_score", False)),
+            review_threshold=int(data.get("review_threshold", 0)),
         )
     if kind == "transfer_type":
         return TransferTypeStep(
@@ -712,6 +726,16 @@ def load_templates(path: Path) -> list[BatchTemplate]:
 # --------------------------------------------------------------------------------------
 # Schema propagation + validation (drives schema-aware pickers and pre-run warnings)
 # --------------------------------------------------------------------------------------
+def _confidence_columns(step: NormalizeStep | ReferenceMatchStep | CompareStep) -> list[str]:
+    """The optional score/review column names a confidence-enabled step adds."""
+    names: list[str] = []
+    if step.emit_score:
+        names.append(step.resolved_score())
+    if step.review_threshold > 0:
+        names.append(step.resolved_review())
+    return names
+
+
 def columns_after(  # noqa: PLR0912 - one branch per step kind
     load: LoadConfig, steps: Sequence[BatchStep], upto: int
 ) -> dict[str, list[str]]:
@@ -743,22 +767,20 @@ def columns_after(  # noqa: PLR0912 - one branch per step kind
         if isinstance(step, NormalizeStep | ClassifyStep | DeriveStep):
             add(step.table, step.resolved_target())
             if isinstance(step, NormalizeStep):
-                if step.emit_score:
-                    add(step.table, step.resolved_score())
-                if step.review_threshold > 0:
-                    add(step.table, step.resolved_review())
+                for name in _confidence_columns(step):
+                    add(step.table, name)
         elif isinstance(step, CompareStep):
             if step.action == "flag":
                 add(step.table, step.resolved_target())
+            for name in _confidence_columns(step):
+                add(step.table, name)
         elif isinstance(step, ReferenceMatchStep):
             add(step.table, step.resolved_target())
             add(step.table, step.resolved_matched())
             if step.id_column:
                 add(step.table, step.resolved_id())
-            if step.emit_score:
-                add(step.table, step.resolved_score())
-            if step.review_threshold > 0:
-                add(step.table, step.resolved_review())
+            for name in _confidence_columns(step):
+                add(step.table, name)
         elif isinstance(step, FilterStep):
             if step.columns:
                 project(step.table, step.columns)
@@ -1050,20 +1072,29 @@ def _apply_classify(tables: dict[str, pa.Table], step: ClassifyStep, emit: OnEve
     emit(BatchEvent("info", f"  classify {step.table}.{step.column} → {step.resolved_target()}"))
 
 
-def _match_mask(table: pa.Table, step: CompareStep) -> Any:
-    """A boolean array: True where ``left`` matches ``right`` (exact, or fuzzy ≥ threshold)."""
+def _compare_scores(table: pa.Table, step: CompareStep) -> Any:
+    """Per-row similarity of ``left`` vs ``right`` as an int32 array (nulls propagate).
+
+    Exact method: 100 where equal, 0 otherwise (vectorized). Fuzzy: the rapidfuzz score.
+    """
     left: Any = pc.cast(table.column(step.left), pa.string())
     right: Any = pc.cast(table.column(step.right), pa.string())
     if step.method != "fuzzy":
-        return pc.fill_null(pc.equal(left, right), False)
+        return pc.cast(pc.if_else(pc.equal(left, right), 100, 0), pa.int32())
     scorer_fn = get_scorer(step.scorer)
-    left_vals = left.to_pylist()
-    right_vals = right.to_pylist()
-    flags = [
-        a is not None and b is not None and scorer_fn(a, b) >= step.threshold
-        for a, b in zip(left_vals, right_vals, strict=True)
-    ]
-    return pa.array(flags, type=pa.bool_())
+    return pa.array(
+        [
+            None if a is None or b is None else round(scorer_fn(a, b))
+            for a, b in zip(left.to_pylist(), right.to_pylist(), strict=True)
+        ],
+        type=pa.int32(),
+    )
+
+
+def _replace_column(table: pa.Table, name: str, values: Any) -> pa.Table:
+    if name in table.column_names:
+        table = table.drop_columns([name])
+    return table.append_column(name, values)
 
 
 def _apply_compare(tables: dict[str, pa.Table], step: CompareStep, emit: OnEvent) -> None:
@@ -1073,7 +1104,19 @@ def _apply_compare(tables: dict[str, pa.Table], step: CompareStep, emit: OnEvent
             BatchEvent("info", f"  skip compare: {step.table}.{step.left}/{step.right} not present")
         )
         return
-    mask: Any = _match_mask(table, step)
+    scores: Any = _compare_scores(table, step)
+    if step.method != "fuzzy":  # exact: equality decides, regardless of threshold
+        mask: Any = pc.fill_null(pc.equal(scores, 100), False)
+    else:
+        mask = pc.fill_null(pc.greater_equal(scores, step.threshold), False)
+    # Confidence columns are appended BEFORE any filtering so kept rows carry their score.
+    if step.emit_score:
+        table = _replace_column(table, step.resolved_score(), scores)
+    if step.review_threshold > 0:
+        cap = min(step.review_threshold, 100)  # exact matches (100) never flag
+        in_review: Any = pc.and_(mask, pc.less(pc.fill_null(scores, 0), cap))
+        review: Any = pc.if_else(in_review, pa.scalar("true"), pa.scalar("false"))
+        table = _replace_column(table, step.resolved_review(), review)
     match_count = pc.sum(pc.cast(mask, pa.int64())).as_py() or 0
     if step.action == "drop_matches":
         tables[step.table] = table.filter(pc.invert(mask))
@@ -1084,9 +1127,7 @@ def _apply_compare(tables: dict[str, pa.Table], step: CompareStep, emit: OnEvent
     else:  # flag: add a "true"/"false" column the existing filters can act on
         target = step.resolved_target()
         flags: Any = pc.if_else(mask, pa.scalar("true"), pa.scalar("false"))
-        if target in table.column_names:
-            table = table.drop_columns([target])
-        tables[step.table] = table.append_column(target, flags)
+        tables[step.table] = _replace_column(table, target, flags)
         emit(BatchEvent("info", f"  compare {step.table} → {target} ({match_count:,} matches)"))
 
 

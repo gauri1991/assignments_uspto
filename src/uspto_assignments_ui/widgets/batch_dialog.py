@@ -503,7 +503,9 @@ class ExportStepDialog(QDialog):
 class NormalizeStepDialog(QDialog):
     """Configure a normalize step: fuzzy-map a name column to a canonical column."""
 
-    def __init__(self, step: NormalizeStep | None = None, parent: QWidget | None = None) -> None:
+    def __init__(  # noqa: PLR0915 - linear widget assembly
+        self, step: NormalizeStep | None = None, parent: QWidget | None = None
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Normalize step")
         self.setMinimumWidth(440)
@@ -970,7 +972,9 @@ class ClassifyStepDialog(QDialog):
 class CompareStepDialog(QDialog):
     """Configure a compare step: match two columns and flag, drop, or keep matches."""
 
-    def __init__(self, step: CompareStep | None = None, parent: QWidget | None = None) -> None:
+    def __init__(  # noqa: PLR0915 - linear widget assembly
+        self, step: CompareStep | None = None, parent: QWidget | None = None
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Compare columns step")
         self.setMinimumWidth(460)
@@ -995,6 +999,10 @@ class CompareStepDialog(QDialog):
         self._action = QComboBox()
         for label, value in _COMPARE_ACTIONS:
             self._action.addItem(label, value)
+        self._emit_score = QCheckBox("Add match-score column (similarity 0–100)")
+        self._review = QSpinBox()
+        self._review.setRange(0, 100)
+        self._review.setSpecialValueText("Off")  # 0 = no review flagging
         form.addRow("Table", self._table)
         form.addRow("Left column", self._left)
         form.addRow("Right column", self._right)
@@ -1002,6 +1010,8 @@ class CompareStepDialog(QDialog):
         form.addRow("Scorer (fuzzy)", self._scorer)
         form.addRow("Threshold (fuzzy)", self._threshold)
         form.addRow("Action", self._action)
+        form.addRow("", self._emit_score)
+        form.addRow("Flag review below", self._review)
         layout.addLayout(form)
 
         buttons = QDialogButtonBox(
@@ -1022,6 +1032,8 @@ class CompareStepDialog(QDialog):
             self._scorer.setCurrentText(step.scorer)
             self._threshold.setValue(step.threshold)
             self._action.setCurrentIndex(max(0, self._action.findData(step.action)))
+            self._emit_score.setChecked(step.emit_score)
+            self._review.setValue(step.review_threshold)
 
     def _rebuild_columns(self) -> None:
         cols = _cols(self._table.currentText())
@@ -1039,6 +1051,8 @@ class CompareStepDialog(QDialog):
             scorer=self._scorer.currentText(),
             threshold=self._threshold.value(),
             action=self._action.currentData(),
+            emit_score=self._emit_score.isChecked(),
+            review_threshold=self._review.value(),
         )
 
 
@@ -2107,6 +2121,16 @@ def _warnings_by_step(warnings: list[str]) -> dict[int, list[str]]:
     return grouped
 
 
+def _confidence_suffix(step: NormalizeStep | ReferenceMatchStep | CompareStep) -> str:
+    """The steps-list marker for confidence options (e.g. " · score · review<95")."""
+    parts = ""
+    if step.emit_score:
+        parts += " · score"
+    if step.review_threshold > 0:
+        parts += f" · review<{step.review_threshold}"
+    return parts
+
+
 def _describe_step(step: BatchStep) -> str:  # noqa: PLR0911, PLR0912 - one line per step kind
     if isinstance(step, FilterStep):
         clause_count = len(step.clauses)
@@ -2116,7 +2140,7 @@ def _describe_step(step: BatchStep) -> str:  # noqa: PLR0911, PLR0912 - one line
         learn = "" if step.learn else " · match-only"
         return (
             f"Normalize · {step.table}.{step.column} → {step.resolved_target()} "
-            f"(≥{step.threshold}){split}{learn}"
+            f"(≥{step.threshold}){split}{learn}{_confidence_suffix(step)}"
         )
     if isinstance(step, DedupeStep):
         key = ", ".join(step.subset) if step.subset else "whole row"
@@ -2133,13 +2157,17 @@ def _describe_step(step: BatchStep) -> str:  # noqa: PLR0911, PLR0912 - one line
         return f"Classify · {step.table}.{step.column} → {step.resolved_target()} ({step.method})"
     if isinstance(step, CompareStep):
         return (
-            f"Compare · {step.table} · {step.left} vs {step.right} · {step.method} · {step.action}"
+            f"Compare · {step.table} · {step.left} vs {step.right} · {step.method} · "
+            f"{step.action}{_confidence_suffix(step)}"
         )
     if isinstance(step, TransferTypeStep):
         return f"Transfer type · {step.table} · {step.assignor_type} → {step.assignee_type}"
     if isinstance(step, ReferenceMatchStep):
         ref = Path(step.reference_path).name or "(no file)"
-        return f"Reference match · {step.table}.{step.column} vs {ref} · {step.action}"
+        return (
+            f"Reference match · {step.table}.{step.column} vs {ref} · "
+            f"{step.action}{_confidence_suffix(step)}"
+        )
     if isinstance(step, FetchCpcStep):
         return f"Fetch CPC · {step.table}.{step.column} → cpc_codes"
     if isinstance(step, CpcMatchStep):
