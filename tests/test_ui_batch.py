@@ -814,3 +814,76 @@ def test_entity_dialog_seeds_from_disambiguated_reference(
     dialog._save()  # Save -> entities.json now holds the seeded canonicals
     reloaded = EntityMemory.load(tmp_path / "entities.json")
     assert sorted(reloaded.canonicals) == ["Acme Corporation", "Globex LLC"]
+
+
+# -- match confidence: dialog fields + alias review queue -------------------
+
+
+def test_normalize_dialog_roundtrips_score_and_review(qtbot: Any) -> None:
+    create_app([])
+    step = NormalizeStep(
+        table="flat", column="assignor_names", emit_score=True, review_threshold=95
+    )
+    dialog = NormalizeStepDialog(step)
+    qtbot.addWidget(dialog)
+    assert dialog._emit_score.isChecked()
+    assert dialog._review.value() == 95
+    rebuilt = dialog.step()
+    assert rebuilt.emit_score is True and rebuilt.review_threshold == 95
+    # defaults stay off
+    fresh = NormalizeStepDialog()
+    qtbot.addWidget(fresh)
+    built = fresh.step()
+    assert built.emit_score is False and built.review_threshold == 0
+
+
+def test_reference_dialog_roundtrips_score_and_review(qtbot: Any) -> None:
+    create_app([])
+    step = ReferenceMatchStep(
+        table="flat", column="assignor_names", emit_score=True, review_threshold=93
+    )
+    dialog = ReferenceMatchStepDialog(step)
+    qtbot.addWidget(dialog)
+    rebuilt = dialog.step()
+    assert rebuilt.emit_score is True and rebuilt.review_threshold == 93
+
+
+def test_alias_model_score_column_and_review_filter(qtbot: Any) -> None:
+    create_app([])
+    memory = EntityMemory(canonicals=["ACME CORPORATION"])
+    memory.set_alias("ACME CORP", "ACME CORPORATION")  # curated -> 100
+    memory.resolve("ACME CORPORATON", threshold=85)  # fuzzy-learned -> < 100
+    model = EntityAliasModel(memory)
+    assert model.columnCount() == 3
+    assert model.rowCount() == 2
+    scores = {
+        model.data(model.index(r, 0)): int(model.data(model.index(r, 2)))
+        for r in range(model.rowCount())
+    }
+    assert scores["ACME CORP"] == 100
+    fuzzy_key = next(k for k in scores if k != "ACME CORP")
+    assert scores[fuzzy_key] < 100
+
+    model.set_review_filter(100)  # review queue: only the fuzzy-learned alias remains
+    assert model.rowCount() == 1
+    assert model.data(model.index(0, 0)) == fuzzy_key
+    model.set_review_filter(None)
+    assert model.rowCount() == 2
+
+
+def test_entity_dialog_review_filter_narrows_aliases(qtbot: Any, tmp_path: Path) -> None:
+    create_app([])
+    memory = EntityMemory(canonicals=["ACME CORPORATION"])
+    memory.set_alias("ACME CORP", "ACME CORPORATION")
+    memory.resolve("ACME CORPORATON", threshold=85)
+    store = EntityMemoryStore(tmp_path / "entities.json")
+    store.save(memory)
+    dialog = EntityDialog(store)
+    qtbot.addWidget(dialog)
+    assert dialog._alias_model.rowCount() == 2
+    dialog._review_cap.setValue(98)  # the sample typo scores 97
+    dialog._review_only.setChecked(True)  # -> only the fuzzy learn shows
+    assert dialog._alias_model.rowCount() == 1
+    assert "match(es)" in dialog._alias_note.text()
+    dialog._review_only.setChecked(False)
+    assert dialog._alias_model.rowCount() == 2

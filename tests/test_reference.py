@@ -32,16 +32,18 @@ def test_build_reference_dedupes_and_skips_individuals(tmp_path: Path) -> None:
     _write_tsv(tsv)
     gaz = build_reference(tsv, "disambig_assignee_organization", id_column="assignee_id")
     assert gaz.size() == 3  # 3 distinct non-empty organizations
-    assert gaz.match("ADOBE SYSTEMS INCORPORATED") == ("ADOBE SYSTEMS INCORPORATED", "A1")
+    assert gaz.match("ADOBE SYSTEMS INCORPORATED") == ("ADOBE SYSTEMS INCORPORATED", "A1", 100)
 
 
 def test_reference_match_exact_fuzzy_and_miss(tmp_path: Path) -> None:
     tsv = tmp_path / "ref.tsv"
     _write_tsv(tsv)
     gaz = build_reference(tsv, "disambig_assignee_organization", id_column="assignee_id")
-    assert gaz.match("Adobe Systems, Inc.") == ("ADOBE SYSTEMS INCORPORATED", "A1")  # cleaned exact
+    cleaned = gaz.match("Adobe Systems, Inc.")  # cleaned key fuzzy-matches the full org name
+    assert cleaned[:2] == ("ADOBE SYSTEMS INCORPORATED", "A1")
+    assert cleaned[2] >= 90
     assert gaz.match("QUALCOMM INC", threshold=80)[0] == "QUALCOMM INCORPORATED"  # fuzzy
-    assert gaz.match("SMITH, JOHN") == (None, None)  # unmatched -> presumed individual
+    assert gaz.match("SMITH, JOHN") == (None, None, 0)  # unmatched -> presumed individual
 
 
 def test_match_column_multi_party_any(tmp_path: Path) -> None:
@@ -99,7 +101,7 @@ def test_extract_distinct_reference_and_reload(tmp_path: Path) -> None:
     assert set(written.column_names) == {"organization", "assignee_id"}
     # the compact file reloads through the standard loader with default column names
     gaz = load_reference(compact, "organization", id_column="assignee_id")
-    assert gaz.match("MACROMEDIA INC") == ("MACROMEDIA INC", "A2")
+    assert gaz.match("MACROMEDIA INC") == ("MACROMEDIA INC", "A2", 100)
 
 
 def test_load_reference_caches_until_mtime_changes(tmp_path: Path) -> None:
@@ -108,3 +110,29 @@ def test_load_reference_caches_until_mtime_changes(tmp_path: Path) -> None:
     first = load_reference(tsv, "disambig_assignee_organization")
     again = load_reference(tsv, "disambig_assignee_organization")
     assert first is again  # cached instance reused (same path + mtime + columns)
+
+
+def test_match_column_emits_score_and_review_columns(tmp_path: Path) -> None:
+    tsv = tmp_path / "ref.tsv"
+    _write_tsv(tsv)
+    gaz = build_reference(tsv, "disambig_assignee_organization", id_column="assignee_id")
+    table = pa.table({"name": ["ADOBE SYSTEMS INCORPORATED", "QUALCOMM INC", "SMITH, JOHN", None]})
+    result = match_column(
+        table,
+        "name",
+        gaz,
+        "name_disambiguated",
+        "name_matched",
+        "name_assignee_id",
+        threshold=80,
+        score_col="name_match_score",
+        review_col="name_match_review",
+        review_threshold=99,
+    )
+    scores = result.column("name_match_score").to_pylist()
+    review = result.column("name_match_review").to_pylist()
+    assert scores[0] == 100 and review[0] == "false"  # exact
+    assert scores[1] is not None and 80 <= scores[1] < 99  # fuzzy -> review band
+    assert review[1] == "true"
+    assert scores[2] == 0 and review[2] == "false"  # unmatched: not a review case
+    assert scores[3] is None and review[3] is None

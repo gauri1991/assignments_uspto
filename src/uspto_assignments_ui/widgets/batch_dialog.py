@@ -527,6 +527,10 @@ class NormalizeStepDialog(QDialog):
         self._scorer.addItems(scorer_names())
         self._learn = QCheckBox("Learn new canonicals (uncheck to match a curated memory only)")
         self._learn.setChecked(True)
+        self._emit_score = QCheckBox("Add match-score column (confidence 0–100)")
+        self._review = QSpinBox()
+        self._review.setRange(0, 100)
+        self._review.setSpecialValueText("Off")  # 0 = no review flagging
         form.addRow("Table", self._table)
         form.addRow("Name column", self._column)
         form.addRow("Canonical column", self._target)
@@ -534,6 +538,8 @@ class NormalizeStepDialog(QDialog):
         form.addRow("Match threshold", self._threshold)
         form.addRow("Scorer", self._scorer)
         form.addRow("", self._learn)  # aligned under the field column
+        form.addRow("", self._emit_score)
+        form.addRow("Flag review below", self._review)
         layout.addLayout(form)
 
         buttons = QDialogButtonBox(
@@ -560,6 +566,8 @@ class NormalizeStepDialog(QDialog):
             self._threshold.setValue(step.threshold)
             self._scorer.setCurrentText(step.scorer)
             self._learn.setChecked(step.learn)
+            self._emit_score.setChecked(step.emit_score)
+            self._review.setValue(step.review_threshold)
 
     def _rebuild_columns(self) -> None:
         self._column.clear()
@@ -588,6 +596,8 @@ class NormalizeStepDialog(QDialog):
             separator=self._separator.text(),
             learn=self._learn.isChecked(),
             scorer=self._scorer.currentText(),
+            emit_score=self._emit_score.isChecked(),
+            review_threshold=self._review.value(),
         )
 
 
@@ -1149,6 +1159,10 @@ class ReferenceMatchStepDialog(QDialog):
         self._action = QComboBox()
         for label, value in _REFERENCE_ACTIONS:
             self._action.addItem(label, value)
+        self._emit_score = QCheckBox("Add match-score column (confidence 0–100)")
+        self._review = QSpinBox()
+        self._review.setRange(0, 100)
+        self._review.setSpecialValueText("Off")  # 0 = no review flagging
 
         form.addRow("Table", self._table)
         form.addRow("Name column", self._column)
@@ -1159,6 +1173,8 @@ class ReferenceMatchStepDialog(QDialog):
         form.addRow("Threshold", self._threshold)
         form.addRow("Multi-party mode", self._mode)
         form.addRow("Action", self._action)
+        form.addRow("", self._emit_score)
+        form.addRow("Flag review below", self._review)
         layout.addLayout(form)
 
         buttons = QDialogButtonBox(
@@ -1181,6 +1197,8 @@ class ReferenceMatchStepDialog(QDialog):
             self._threshold.setValue(step.threshold)
             self._mode.setCurrentIndex(max(0, self._mode.findData(step.mode)))
             self._action.setCurrentIndex(max(0, self._action.findData(step.action)))
+            self._emit_score.setChecked(step.emit_score)
+            self._review.setValue(step.review_threshold)
 
     def _rebuild_columns(self) -> None:
         self._column.clear()
@@ -1233,6 +1251,8 @@ class ReferenceMatchStepDialog(QDialog):
             threshold=self._threshold.value(),
             mode=self._mode.currentData(),
             action=self._action.currentData(),
+            emit_score=self._emit_score.isChecked(),
+            review_threshold=self._review.value(),
         )
 
 

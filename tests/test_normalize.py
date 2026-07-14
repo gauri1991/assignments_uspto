@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from typing import Any, cast
 
 import pyarrow as pa
 
@@ -16,12 +18,12 @@ def test_clean_uppercases_and_strips_punctuation() -> None:
 
 def test_resolve_creates_then_fuzzy_matches() -> None:
     memory = EntityMemory()
-    canonical, is_new = memory.resolve("GENERAL ELECTRIC COMPANY", threshold=90)
+    canonical, is_new, _score = memory.resolve("GENERAL ELECTRIC COMPANY", threshold=90)
     assert is_new
     assert canonical == "GENERAL ELECTRIC COMPANY"
 
     # a near-duplicate resolves to the same canonical (not a new entity)
-    again, is_new2 = memory.resolve("GENERAL ELECTRIC COMPANY, A CORP", threshold=80)
+    again, is_new2, _score2 = memory.resolve("GENERAL ELECTRIC COMPANY, A CORP", threshold=80)
     assert not is_new2
     assert again == "GENERAL ELECTRIC COMPANY"
 
@@ -59,14 +61,14 @@ def test_merge_and_apply_learned() -> None:
     assert {"ALPHA", "BETA"} <= set(a.canonicals)
 
     c = EntityMemory()
-    c.apply_learned([("gamma key", "GAMMA")])
+    c.apply_learned([("gamma key", "GAMMA", 100)])
     assert "GAMMA" in c.canonicals
 
 
 def test_resolve_match_only_does_not_create_new_canonical() -> None:
     memory = EntityMemory(canonicals=["ACME CORP"])
     before = memory.counts()[0]
-    canonical, is_new = memory.resolve("TOTALLY DIFFERENT CO", threshold=90, learn=False)
+    canonical, is_new, _score = memory.resolve("TOTALLY DIFFERENT CO", threshold=90, learn=False)
     assert canonical == "TOTALLY DIFFERENT CO"  # returned as-is
     assert not is_new
     assert memory.counts()[0] == before  # nothing added — curated memory stays clean
@@ -82,7 +84,7 @@ def test_resolve_with_token_set_scorer() -> None:
     memory = EntityMemory(canonicals=["GENERAL ELECTRIC COMPANY"])
     # token_set ignores extra tokens — a strong match despite the trailing legal boilerplate
     # (the shared prefix keeps it in the same block, which blocking requires).
-    canonical, _ = memory.resolve(
+    canonical, _, _ = memory.resolve(
         "GENERAL ELECTRIC COMPANY A NEW YORK CORPORATION", threshold=80, scorer="token_set"
     )
     assert canonical == "GENERAL ELECTRIC COMPANY"
@@ -91,7 +93,7 @@ def test_resolve_with_token_set_scorer() -> None:
 def test_match_returns_canonical_or_none_without_mutating() -> None:
     memory = EntityMemory(canonicals=["ADOBE SYSTEMS INCORPORATED"])
     assert (
-        memory.match("Adobe Systems, Inc.") == "ADOBE SYSTEMS INCORPORATED"
+        memory.match("Adobe Systems, Inc.")[0] == "ADOBE SYSTEMS INCORPORATED"  # type: ignore[index]
     )  # cleaned exact/fuzzy
     assert memory.match("TOTALLY UNKNOWN CO") is None  # no match -> None (distinguishable)
     assert memory.counts() == (1, 0)  # pure: nothing learned or added
@@ -173,7 +175,8 @@ def test_shared_blocking_caps_pathological_prefix() -> None:
     memory = EntityMemory(canonicals=names)
     assert memory.max_block() <= _BLOCK_CAP  # bounded, not 50k
     # a match still resolves the right entity within its (re-split) sub-block
-    assert memory.match("THE 000042 HOLDINGS LLC", threshold=90) == "THE 000042 HOLDINGS LLC"
+    matched = memory.match("THE 000042 HOLDINGS LLC", threshold=90)
+    assert matched is not None and matched[0] == "THE 000042 HOLDINGS LLC"
 
     # the shared index re-splits deterministically and keeps identical keys together
     diverging: CappedBlockIndex[str] = CappedBlockIndex(
@@ -187,5 +190,76 @@ def test_shared_blocking_caps_pathological_prefix() -> None:
 def test_blocking_results_unchanged_below_cap() -> None:
     """Below the cap the shared index behaves like plain prefix blocking (no regressions)."""
     memory = EntityMemory(canonicals=["ACME CORPORATION", "ACME CORP", "BETA LLC"])
-    assert memory.match("ACME CORPORATON", threshold=85) in {"ACME CORPORATION", "ACME CORP"}
+    close = memory.match("ACME CORPORATON", threshold=85)
+    assert close is not None and close[0] in {"ACME CORPORATION", "ACME CORP"}
     assert memory.match("ZETA INC", threshold=90) is None  # different prefix block → no match
+
+
+def test_resolve_reports_score_and_alias_provenance() -> None:
+    memory = EntityMemory(canonicals=["ACME CORPORATION"])
+    canonical, is_new, score = memory.resolve("ACME CORPORATON", threshold=85)  # typo -> fuzzy
+    assert canonical == "ACME CORPORATION"
+    assert not is_new
+    assert 85 <= score < 100
+    # the exact alias hit on a later run reports the ORIGINAL learn score, not 100
+    again, _, score2 = memory.resolve("ACME CORPORATON", threshold=85)
+    assert again == "ACME CORPORATION"
+    assert score2 == score
+    assert memory.alias_score(clean("ACME CORPORATON")) == score
+    # a brand-new name is its own canonical: identity mapping, score 100
+    _, is_new3, score3 = memory.resolve("ZINGWHAT WIDGETS LLC", threshold=90)
+    assert is_new3 and score3 == 100
+    # match-only miss: score 0
+    fresh = EntityMemory(canonicals=["ACME CORPORATION"])
+    _, _, score4 = fresh.resolve("TOTALLY DIFFERENT", threshold=95, learn=False)
+    assert score4 == 0
+
+
+def test_entities_json_v2_roundtrip_and_v1_legacy_load(tmp_path: Path) -> None:
+    memory = EntityMemory(canonicals=["ACME CORPORATION"])
+    memory.resolve("ACME CORPORATON", threshold=85)  # fuzzy-learned alias with score < 100
+    path = tmp_path / "entities.json"
+    memory.save(path)
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    assert raw["version"] == 2
+    fuzzy_values: list[list[Any]] = [
+        cast("list[Any]", v) for v in raw["aliases"].values() if isinstance(v, list)
+    ]
+    assert fuzzy_values and fuzzy_values[0][0] == "ACME CORPORATION" and fuzzy_values[0][1] < 100
+
+    reloaded = EntityMemory.load(path)
+    assert reloaded.alias_score(clean("ACME CORPORATON")) < 100  # score survives the roundtrip
+
+    # v1 legacy file (bare string values) loads with score 100
+    legacy = tmp_path / "legacy.json"
+    legacy.write_text(
+        json.dumps(
+            {"canonicals": ["ACME CORPORATION"], "aliases": {"acme corp": "ACME CORPORATION"}}
+        ),
+        encoding="utf-8",
+    )
+    old = EntityMemory.load(legacy)
+    assert old.aliases == {"acme corp": "ACME CORPORATION"}
+    assert old.alias_score("acme corp") == 100
+
+
+def test_normalize_column_emits_score_and_review_columns() -> None:
+    memory = EntityMemory(canonicals=["ACME CORPORATION", "GLOBEX LLC"])
+    table = pa.table({"name": ["ACME CORPORATION", "ACME CORPORATON", "NEWCO VENTURES", None]})
+    result = normalize_column(
+        table,
+        "name",
+        "name_canonical",
+        memory,
+        threshold=85,
+        score_target="name_canonical_score",
+        review_target="name_canonical_review",
+        review_threshold=98,
+    )
+    scores = result.column("name_canonical_score").to_pylist()
+    review = result.column("name_canonical_review").to_pylist()
+    assert scores[0] == 100  # identical to its canonical
+    assert scores[1] is not None and 85 <= scores[1] < 98  # fuzzy typo -> review band
+    assert review[1] == "true"
+    assert scores[2] == 100 and review[2] == "false"  # new canonical: identity, not review
+    assert scores[3] is None and review[3] is None  # null passthrough
