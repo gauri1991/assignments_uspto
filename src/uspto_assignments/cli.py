@@ -4,6 +4,7 @@ Subcommands::
 
     uspto-assign parse <xml|zip> …               # legacy conversion (bare paths still work)
     uspto-assign ingest <xml|zip|dataset-dir> --out data/raw   # land Parquet, natural grain
+    uspto-assign build-reference reference/g_assignee_disambiguated.tsv  # compact gazetteer parquet
     uspto-assign build-dictionary --patentsview reference/…tsv --out dictionary
     uspto-assign resolve --raw data/raw --dict dictionary --out data/resolved
     uspto-assign ledger  --raw data/raw --dict dictionary --out data/ledger
@@ -32,6 +33,7 @@ from .dictionary import build_dictionary
 from .exporters import export_store
 from .ledger import build_ledger, load_raw, reconcile_cpc, resolve_raw_mentions, top_buyers
 from .parser import iter_records
+from .reference import extract_distinct_reference
 from .tables import open_dataset, parse_to_store
 from .writers import DEFAULT_BATCH_SIZE, write_excel, write_parquet
 
@@ -41,6 +43,7 @@ pq: Any = _pq
 _SUBCOMMANDS = {
     "parse",
     "ingest",
+    "build-reference",
     "build-dictionary",
     "resolve",
     "ledger",
@@ -81,6 +84,33 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("input", type=Path, help=".xml/.zip file or an existing dataset folder")
     p.add_argument("--out", type=Path, required=True, help="output directory for raw Parquet")
     p.add_argument("--limit", type=int, default=None, help="cap parsed assignment records")
+
+    p = sub.add_parser(
+        "build-reference",
+        help="compact a big disambiguated-assignee TSV into a reusable reference parquet "
+        "(columns auto-detected)",
+    )
+    p.add_argument(
+        "input",
+        type=Path,
+        help="PatentsView g_assignee_disambiguated .tsv/.csv (or an existing reference file)",
+    )
+    p.add_argument(
+        "--out",
+        type=Path,
+        default=Path("reference/reference.parquet"),
+        help="output parquet (default: reference/reference.parquet)",
+    )
+    p.add_argument(
+        "--name-column",
+        default="",
+        help="organization column (auto-detected from the header if omitted)",
+    )
+    p.add_argument(
+        "--id-column",
+        default=None,
+        help="id column (auto-detected if omitted; pass an empty string to omit ids entirely)",
+    )
 
     p = sub.add_parser("build-dictionary", help="build the standalone resolution dictionary")
     p.add_argument("--out", type=Path, default=Path("dictionary"), help="artifact directory")
@@ -208,6 +238,19 @@ def _cmd_ingest(args: argparse.Namespace) -> None:
     _write_cli_manifest(args.out, "ingest", source, outputs, started)
 
 
+def _cmd_build_reference(args: argparse.Namespace) -> None:
+    src: Path = args.input
+    if not src.is_file():
+        raise SystemExit(f"input file not found: {src}")
+    try:
+        count = extract_distinct_reference(
+            src, args.out, name_column=args.name_column, id_column=args.id_column
+        )
+    except (OSError, ValueError) as exc:  # unreadable file / unrecognisable columns
+        raise SystemExit(f"could not build reference: {exc}") from exc
+    print(f"reference built: {count:,} distinct organizations -> {args.out}")
+
+
 def _cmd_build_dictionary(args: argparse.Namespace) -> None:
     extra: list[tuple[Path, str, str, str]] = []
     for spec in args.extra:
@@ -326,6 +369,7 @@ def _cmd_templates_summary(args: argparse.Namespace) -> None:
 _DISPATCH = {
     "parse": _cmd_parse,
     "ingest": _cmd_ingest,
+    "build-reference": _cmd_build_reference,
     "build-dictionary": _cmd_build_dictionary,
     "resolve": _cmd_resolve,
     "ledger": _cmd_ledger,

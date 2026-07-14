@@ -106,6 +106,44 @@ def test_extract_distinct_reference_and_reload(tmp_path: Path) -> None:
     assert gaz.match("MACROMEDIA INC") == ("MACROMEDIA INC", "A2", 100)
 
 
+def test_extract_distinct_reference_auto_detects_columns(tmp_path: Path) -> None:
+    # The common case: no column arguments. The raw TSV's org column is
+    # ``disambig_assignee_organization`` and its id column ``assignee_id`` — both auto-detected.
+    tsv = tmp_path / "ref.tsv"
+    _write_tsv(tsv)
+    compact = tmp_path / "compact.parquet"
+    count = extract_distinct_reference(tsv, compact)
+    assert count == 3
+    written = pq.read_table(compact)  # pyright: ignore[reportUnknownMemberType]
+    assert set(written.column_names) == {"organization", "assignee_id"}
+    assert set(written.column("assignee_id").to_pylist()) == {"A1", "A2", "A4"}
+
+
+def test_extract_distinct_reference_forgives_wrong_name_column(tmp_path: Path) -> None:
+    # A caller who guesses the *compact* name ("organization") against the *raw* TSV used to hit an
+    # opaque error; now it falls back to auto-detecting the real column instead of crashing.
+    tsv = tmp_path / "ref.tsv"
+    _write_tsv(tsv)
+    compact = tmp_path / "compact.parquet"
+    count = extract_distinct_reference(tsv, compact, name_column="organization")
+    assert count == 3
+
+
+def test_extract_distinct_reference_id_column_empty_forces_org_only(tmp_path: Path) -> None:
+    tsv = tmp_path / "ref.tsv"
+    _write_tsv(tsv)
+    compact = tmp_path / "compact.parquet"
+    extract_distinct_reference(tsv, compact, id_column="")  # explicit: no ids even though present
+    assert pq.read_schema(compact).names == ["organization"]  # pyright: ignore[reportUnknownMemberType]
+
+
+def test_extract_distinct_reference_no_org_column_raises_clear_error(tmp_path: Path) -> None:
+    weird = tmp_path / "weird.parquet"
+    pq.write_table(pa.table({"some_col": ["X"], "other": ["Y"]}), weird)  # pyright: ignore[reportUnknownMemberType]
+    with pytest.raises(ValueError, match=r"auto-detect the organization column.*some_col, other"):
+        extract_distinct_reference(weird, tmp_path / "out.parquet")
+
+
 def test_load_reference_caches_until_mtime_changes(tmp_path: Path) -> None:
     tsv = tmp_path / "ref.tsv"
     _write_tsv(tsv)

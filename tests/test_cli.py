@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pyarrow.parquet as pq
+
 from uspto_assignments.cli import main
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_assignment.xml"
@@ -30,6 +32,19 @@ def test_cli_ingest_writes_manifest(tmp_path: Path) -> None:
     assert "assignments.parquet" in paths
     for output in manifest["outputs"]:
         assert (out / output["path"]).is_file()
+
+
+def test_cli_build_reference_auto_detects(tmp_path: Path) -> None:
+    raw = tmp_path / "g_assignee_disambiguated.tsv"
+    raw.write_text(
+        "disambig_assignee_organization\tassignee_id\n"
+        "ADOBE SYSTEMS INCORPORATED\tA1\n"
+        "QUALCOMM INCORPORATED\tA4\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "reference.parquet"
+    main(["build-reference", str(raw), "--out", str(out)])  # no column flags: auto-detected
+    assert set(pq.read_schema(out).names) == {"organization", "assignee_id"}  # pyright: ignore[reportUnknownMemberType]
 
 
 def test_templates_summary_writes_markdown(tmp_path: Path) -> None:

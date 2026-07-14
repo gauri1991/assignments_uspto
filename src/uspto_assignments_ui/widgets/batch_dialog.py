@@ -69,6 +69,7 @@ from uspto_assignments import (
     dump_templates,
     extract_distinct_reference,
     load_templates,
+    reference_columns,
     run_preview,
     scorer_names,
     validate_template,
@@ -1256,20 +1257,24 @@ class ReferenceMatchStepDialog(QDialog):
         )
         if not dst:
             return
+        id_field = self._id_column.text().strip()
         try:
             count = extract_distinct_reference(
                 Path(src),
                 Path(dst),
+                # Blank fields auto-detect the columns; a wrong name still falls back to detection.
                 name_column=self._name_column.text().strip(),
-                id_column=self._id_column.text().strip(),
+                id_column=id_field or None,
             )
         except (OSError, ValueError, KeyError) as exc:
             QMessageBox.warning(self, "Build failed", f"Could not build compact reference:\n{exc}")
             return
         self._reference.setText(dst)
-        self._name_column.setText("organization")  # the compact file's column names
-        if self._id_column.text().strip():
-            self._id_column.setText("assignee_id")
+        # Point the step at the compact file's canonical columns — set the id field only if the
+        # build actually produced one (org-only inputs have no id column).
+        built_cols = reference_columns(Path(dst))
+        self._name_column.setText("organization")
+        self._id_column.setText("assignee_id" if "assignee_id" in built_cols else "")
         self.setWindowTitle(f"Match against reference step — built {count:,} orgs")
 
     def step(self) -> ReferenceMatchStep:

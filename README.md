@@ -148,9 +148,9 @@ A native desktop viewer explores the parsed data interactively:
     `<col>_match_score` / `<col>_match_review` — see match confidence below); *keep-matched* drops
     the rest (presumed individuals). Validation checks the reference file exists **and actually
     has** the configured name/id columns before the run. Point it at the raw `g_assignee_disambiguated.tsv` (configurable
-    name/id column + delimiter, streamed) or use **Build compact…** to pre-extract distinct
-    organizations into a small reusable Parquet. Blocked fuzzy matching keeps it fast (millions of
-    rows in seconds).
+    name/id column + delimiter, streamed) or pre-extract distinct organizations into a small
+    reusable Parquet — either `uspto-assign build-reference <tsv>` (columns auto-detected) or the
+    **Build compact…** button. Blocked fuzzy matching keeps it fast (millions of rows in seconds).
   - **CPC enrichment & portfolio matching** — *Fetch CPC* attaches classification codes to a
     patent-number column (`cpc_codes` / `cpc_subclasses` / `cpc_lookup_status`) via the live
     **USPTO Open Data Portal API** (`api.uspto.gov`, `X-API-KEY`; configure it in
