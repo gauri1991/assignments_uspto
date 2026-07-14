@@ -18,6 +18,7 @@ from openpyxl import load_workbook
 
 from uspto_assignments import (
     AggregateStep,
+    AttachCpcFileStep,
     BatchEvent,
     BatchStep,
     BatchTemplate,
@@ -1176,3 +1177,20 @@ def test_run_batch_no_trace_writes_no_steps_dir(tmp_path: Path) -> None:
     result = run_batch(_granted_template(), [FIXTURE], tmp_path / "out", timestamp="nt")
     assert not (Path(result.run_dir) / "sample_assignment" / "steps").exists()
     assert result.results[0].step_outputs == []
+
+
+def test_template_11_attach_cpc_from_file_loads_and_validates(tmp_path: Path) -> None:
+    path = Path(__file__).resolve().parent.parent / "templates" / "11_attach_cpc_from_file.json"
+    template = load_templates(path)[0]
+    assert template.name.startswith("11 - Attach CPC from file")
+    assert len(template.steps) == 4
+    step = template.steps[1]
+    assert isinstance(step, AttachCpcFileStep)
+    assert step.separator == ";" and step.code_column == "CPC"
+    # the step adds the CPC trio, so the export column list validates clean
+    cols = columns_after(template.load, template.steps, upto=2)["flat"]
+    for name in ("cpc_codes", "cpc_subclasses", "cpc_lookup_status"):
+        assert name in cols
+    # only warning is the placeholder file path (user supplies their PatSeer export)
+    warnings = validate_template(template.load, template.steps)
+    assert warnings == ["Step 2 (AttachCpcFile): CPC file not found: cpc/patseer_export.csv"]

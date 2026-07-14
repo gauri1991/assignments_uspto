@@ -161,6 +161,18 @@ warnings for each template. Regenerate after any template change.
 
 **Warnings:** none
 
+## 11_attach_cpc_from_file.json
+
+### 11 - Attach CPC from file (firm-to-firm, offline PatSeer join)
+
+1. Filter · flat · 4 clause(s) · AND
+2. Attach CPC file · flat.doc_number vs patseer_export.csv → cpc_codes
+3. Derive · flat.transaction_date_year = year(transaction_date)
+4. Export · csv · flat
+
+**Warnings:**
+- ⚠ Step 2 (AttachCpcFile): CPC file not found: cpc/patseer_export.csv
+
 ## buyer_identification_templates.json
 
 ### Buyers - firm-to-firm transactions (clean, enriched)
