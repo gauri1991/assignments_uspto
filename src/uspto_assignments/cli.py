@@ -17,8 +17,11 @@ artifact at build time; every later stage only reads local Parquet.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import tempfile
+import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -119,21 +122,53 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _write_cli_manifest(
+    out_dir: Path,
+    command: str,
+    source: Path,
+    outputs: list[tuple[Path, int | None]],
+    started: float,
+) -> None:
+    """Write ``manifest.json`` into ``out_dir``: the audit record of one direct CLI conversion."""
+    payload = {
+        "schema": 1,
+        "command": command,
+        "input": str(source),
+        "generated": datetime.now(UTC).isoformat(timespec="seconds"),
+        "duration_seconds": round(time.monotonic() - started, 1),
+        "outputs": [
+            {
+                "path": str(path.relative_to(out_dir)) if path.is_absolute() else str(path),
+                "rows": rows,
+            }
+            for path, rows in outputs
+        ],
+    }
+    (out_dir / "manifest.json").write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+
+
 def _cmd_parse(args: argparse.Namespace) -> None:
     input_path: Path = args.input
     if not input_path.is_file():
         raise SystemExit(f"input file not found: {input_path}")
+    started = time.monotonic()
     outdir: Path = args.outdir
     outdir.mkdir(parents=True, exist_ok=True)
+    outputs: list[tuple[Path, int | None]] = []
     if "parquet" in args.formats:
         counts = write_parquet(iter_records(input_path), outdir, args.basename, args.batch_size)
         for name, n in counts.items():
             print(f"parquet {name}: {n} rows -> {outdir / f'{name}.parquet'}")
+            outputs.append((outdir / f"{name}.parquet", n))
     if "excel" in args.formats:
         counts = write_excel(iter_records(input_path), outdir, args.basename)
         print(f"excel -> {outdir / f'{args.basename}.xlsx'}")
         for name, n in counts.items():
             print(f"  sheet {name}: {n} rows")
+        outputs.append((outdir / f"{args.basename}.xlsx", sum(counts.values())))
+    _write_cli_manifest(outdir, "parse", input_path, outputs, started)
 
 
 def _cmd_ingest(args: argparse.Namespace) -> None:
@@ -145,9 +180,13 @@ def _cmd_ingest(args: argparse.Namespace) -> None:
         store = parse_to_store(source, work, limit=args.limit)
     else:
         raise SystemExit(f"input not found: {source}")
+    started = time.monotonic()
     written = export_store(store, args.out, "parquet")
-    for path in written:
-        print(f"ingested -> {path}")
+    outputs: list[tuple[Path, int | None]] = []
+    for name, rows in written.items():
+        print(f"ingested -> {name} ({rows:,} rows)")
+        outputs.append((args.out / f"{name}.parquet", rows))
+    _write_cli_manifest(args.out, "ingest", source, outputs, started)
 
 
 def _cmd_build_dictionary(args: argparse.Namespace) -> None:
