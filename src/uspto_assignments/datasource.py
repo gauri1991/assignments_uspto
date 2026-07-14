@@ -113,6 +113,11 @@ class ApiAuthError(RuntimeError):
     """Raised on an HTTP 4xx from the API (bad/missing key, bad request) — not retried."""
 
 
+# The ODP Patent Search endpoint returns HTTP 404 (not an empty 200) when a query matches nothing;
+# this stand-in body makes the parser yield "no CPC for this batch" instead of erroring.
+_EMPTY_ODP_BODY = b'{"patentFileWrapperDataBag": []}'
+
+
 @dataclass(slots=True)
 class UsptoOdpApiSource:
     """CPC from the USPTO ODP Patent Search API, authed via ``X-API-KEY``.
@@ -191,6 +196,8 @@ class UsptoOdpApiSource:
             try:
                 return transport(cfg.endpoint, body, headers)
             except urllib.error.HTTPError as exc:
+                if exc.code == 404:  # ODP search returns 404 for "zero matches" — an empty result
+                    return _EMPTY_ODP_BODY
                 if 400 <= exc.code < 500:  # bad key / bad request — retrying won't help
                     detail = _http_error_detail(exc)
                     raise ApiAuthError(

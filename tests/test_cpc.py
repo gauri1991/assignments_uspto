@@ -165,6 +165,17 @@ def test_api_source_raises_on_http_4xx(monkeypatch: pytest.MonkeyPatch) -> None:
         source.fetch(["10000001"])
 
 
+def test_api_source_treats_404_as_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("USPTO_ODP_API_KEY", "secret")
+
+    def not_found_transport(url: str, _body: bytes, _headers: dict[str, str]) -> bytes:
+        # ODP returns 404 for a query that matches no records — an empty result, not an error.
+        raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)  # type: ignore[arg-type]
+
+    source = UsptoOdpApiSource(config=CpcConfig().source, transport=not_found_transport)
+    assert source.fetch(["6534515", "99999999999"]) == {}  # no raise; all unresolved
+
+
 def test_api_source_requires_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("USPTO_ODP_API_KEY", raising=False)
     source = UsptoOdpApiSource(config=CpcConfig().source, transport=_fake_transport({}))
