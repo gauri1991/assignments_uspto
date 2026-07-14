@@ -229,7 +229,7 @@ Launch with a file, a dataset folder, or blank:
 - **File**: `Open XML/ZIP…` (Ctrl+O) · `Open dataset folder…` · `Save processed…` (Ctrl+S) ·
   `Export current table…` (Ctrl+E) · `Export all tables…` · `Close dataset` (Ctrl+W) · `Exit`.
 - **Queries**: `Save current query…` · `Manage queries…`.
-- **Settings**: `Batch processing…` (Ctrl+B) · `Entity memory…` · `CPC data source…`.
+- **Settings**: `Batch processing…` (Ctrl+B) · `Entity memory…` · `CPC / USPTO API data source…`.
 - **Toolbar**: Open · Open dataset · Save · Export current · Export all · Manage queries · Batch · Close.
 
 **Load options** (shown when opening) — pick which tables/fields to load (a checkable
@@ -468,16 +468,20 @@ are **exact joins on the normalized grant number**, so they get their own step k
 **Configure the source once — *Settings ▸ CPC data source*.** The dialog edits a project config file
 (`cpc_config.json`, saved in the working folder, shareable — it holds **no secret**) covering:
 
-- **Source**: **USPTO ODP / PatentSearch API** (`data.uspto.gov`, default) or a **local bulk file**
-  (e.g. PatentsView `g_cpc_current.tsv`, offline & scale-safe). Endpoint/auth are config, verified
-  "as of" a date — re-verify against live docs, since USPTO endpoints change.
+- **Source**: **USPTO ODP / PatentSearch API** (default) or a **local bulk file**
+  (e.g. PatentsView `g_cpc_current.tsv`, offline & scale-safe). The live API is the USPTO Open Data
+  Portal Patent Search endpoint `https://api.uspto.gov/api/v1/patent/applications/search`,
+  authenticated with an `X-API-KEY` header (PatentsView migrated to `data.uspto.gov` on
+  2026-03-20; the old `search.patentsview.org` endpoint is dead and auto-repaired on load).
 - **API key**: stored **only as an environment-variable name** (default `USPTO_ODP_API_KEY`); the key
   itself is read from the environment at run time and never written to disk. The dialog shows whether
-  that variable is currently set.
+  that variable is currently set, and a **Test connection** button fires one live call (patent
+  10000000) to confirm the key + endpoint actually work, reporting the CPC codes it got back.
 - **Network posture**: **offline by default**. A `fetch_cpc` step reads the cache only and lists
-  uncached numbers; it hits the network **only** when you tick *Allow network for CPC fetch this run*
-  in the batch dialog. After the first fetch populates the cache (`data/cpc/`, TTL-controlled), every
-  run is offline and reproducible.
+  uncached numbers; it hits the network **only** when all three switches are on: `export
+  USPTO_ODP_API_KEY=…` (add it to `~/.bashrc` to persist), set **Network posture = Allow network
+  fetch**, and tick *Allow network for CPC fetch this run* in the batch dialog. After the first
+  fetch populates the cache (`data/cpc/`, TTL-controlled), every run is offline and reproducible.
 - **Match defaults**: overlap grain (`subclass` default / `main_group` / `full_symbol`), overlap
   metric (`shared_count` / `jaccard` / `rarity_weighted`), threshold, ranking weights, minimum
   in-domain patents, and the hit-rate floor. Keeping these in the config (not per-step) means every
@@ -806,10 +810,21 @@ source ▸ File patent column*), and confirm you're pointing at a CPC table, not
 ### "N grant patents are uncached — enable network to fetch"
 
 `fetch_cpc` is **offline by default**: it found grant patents with no cached CPC and didn't call the
-API. Tick ***Allow network for CPC fetch this run*** in the batch dialog (and make sure the API-key
-env var named in *Settings ▸ CPC data source* is exported) to fetch and cache them. Subsequent runs
-read from the cache offline. Or point the source at a local bulk CPC file, which never needs the
-network.
+API. To fetch and cache them, turn on all three switches: `export USPTO_ODP_API_KEY=…`, set
+**Network posture = Allow network fetch** in *Settings ▸ CPC / USPTO API data source*, and tick
+***Allow network for CPC fetch this run*** in the batch dialog. Subsequent runs read from the cache
+offline. Or point the source at a local bulk CPC file, which never needs the network. Use the
+dialog's **Test connection** button first to confirm the key + endpoint work.
+
+### CPC fetch fails with a connection or HTTP 4xx error
+
+The live endpoint is `https://api.uspto.gov/api/v1/patent/applications/search` (PatentsView moved to
+the USPTO Open Data Portal on 2026-03-20; the old `search.patentsview.org` host is gone — a saved
+config still pointing there is auto-repaired on load). An **HTTP 401/403** means the key is
+missing or wrong: check that `USPTO_ODP_API_KEY` is exported and valid (the **Test connection**
+button reports the exact status). Get a key from <https://data.uspto.gov>. A **name-resolution /
+timeout** error means no network path to `api.uspto.gov` — fetch is skipped and rows stay
+`uncached`.
 
 ### The exported `year` column is blank for some rows
 
