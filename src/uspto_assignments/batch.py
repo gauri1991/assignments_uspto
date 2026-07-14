@@ -914,6 +914,23 @@ class BatchEvent:
 
 
 @dataclass(slots=True)
+class StepStat:
+    """Per-step audit stats: how the working table changed when the step ran.
+
+    Captured for every step of every file in a real run (``FileResult.steps``) and for
+    previews. Fields stay picklable primitives — they cross the worker-process boundary.
+    """
+
+    index: int  # 1-based position in the template
+    label: str  # human-readable step summary
+    table: str
+    rows_before: int
+    rows_after: int
+    columns_added: list[str] = field(default_factory=list[str])
+    note: str = ""
+
+
+@dataclass(slots=True)
 class FileResult:
     """The outcome of processing one input file."""
 
@@ -925,6 +942,7 @@ class FileResult:
     elapsed: float = 0.0  # wall-clock seconds spent on this file
     # (alias, canonical, score) pairs the normalize steps learned while processing this file.
     learned: list[tuple[str, str, int]] = field(default_factory=list[tuple[str, str, int]])
+    steps: list[StepStat] = field(default_factory=list[StepStat])  # per-step audit trail
 
 
 @dataclass(slots=True)
@@ -1540,10 +1558,13 @@ def _warn_if_emptied(  # noqa: PLR0913 - a small guard threading the loop's loca
     table_name: str,
     before: int | None,
     emit: OnEvent,
-) -> None:
-    """Surface the #1 silent failure: a step that drops a non-empty table to 0 (or nearly)."""
+) -> str:
+    """Surface the #1 silent failure: a step that drops a non-empty table to 0 (or nearly).
+
+    Returns the note recorded in the step audit trail ("" when nothing noteworthy).
+    """
     if not before or not table_name:
-        return
+        return ""
     after = tables[table_name].num_rows if table_name in tables else 0
     kind = type(step).__name__.removesuffix("Step")
     if after == 0:
@@ -1554,7 +1575,8 @@ def _warn_if_emptied(  # noqa: PLR0913 - a small guard threading the loop's loca
                 f"filter clause, reference_path/name_column, or the match gate",
             )
         )
-    elif after <= before * (1 - _LARGE_DROP_FRACTION):
+        return "⚠ dropped all rows"
+    if after <= before * (1 - _LARGE_DROP_FRACTION):
         emit(
             BatchEvent(
                 "info",
@@ -1562,6 +1584,8 @@ def _warn_if_emptied(  # noqa: PLR0913 - a small guard threading the loop's loca
                 f"from '{table_name}'",
             )
         )
+        return f"dropped {before - after:,} of {before:,} rows"
+    return ""
 
 
 def _process_input(  # noqa: PLR0913 - threads collaborators; one branch per step kind
@@ -1578,6 +1602,7 @@ def _process_input(  # noqa: PLR0913 - threads collaborators; one branch per ste
     learned_before = len(memory.learned)
     start = time.monotonic()
     work_dir: Path | None = None
+    step_stats: list[StepStat] = []  # audit trail (partial stats survive a mid-run failure)
     try:
         if source.is_file():
             work_dir = Path(tempfile.mkdtemp(prefix="uspto_batch_"))
@@ -1586,14 +1611,36 @@ def _process_input(  # noqa: PLR0913 - threads collaborators; one branch per ste
         outputs: list[str] = []
         used_targets: set[tuple[str, str]] = set()  # (table, target) claimed (collision guard)
         for index, step in enumerate(template.steps, start=1):
-            if not step.enabled:
-                continue  # UI-disabled step: skip without deleting
             table_name: str = getattr(step, "table", "")
+            if not step.enabled:  # UI-disabled step: skip without deleting
+                step_stats.append(
+                    StepStat(index, describe_step(step), table_name, 0, 0, note="disabled")
+                )
+                continue
             before = tables[table_name].num_rows if table_name in tables else None
+            before_cols: set[str] = (
+                set(tables[table_name].column_names) if table_name in tables else set()
+            )
             outputs.extend(
                 _apply_step(tables, step, memory, used_targets, source_dir, emit, cpc_ctx)
             )
-            _warn_if_emptied(tables, step, index, table_name, before, emit)
+            note = _warn_if_emptied(tables, step, index, table_name, before, emit)
+            after_table = tables.get(table_name)
+            step_stats.append(
+                StepStat(
+                    index,
+                    describe_step(step),
+                    table_name,
+                    rows_before=before or 0,
+                    rows_after=after_table.num_rows if after_table is not None else 0,
+                    columns_added=(
+                        sorted(set(after_table.column_names) - before_cols)
+                        if after_table is not None
+                        else []
+                    ),
+                    note=note,
+                )
+            )
         rows = {name: table.num_rows for name, table in tables.items()}
         result = FileResult(
             str(source),
@@ -1601,10 +1648,13 @@ def _process_input(  # noqa: PLR0913 - threads collaborators; one branch per ste
             outputs=outputs,
             rows=rows,
             learned=memory.learned[learned_before:],
+            steps=step_stats,
         )
     except Exception as exc:  # per-file isolation: log, record, and keep going
         logger.exception("batch: failed on %s", source)
-        result = FileResult(str(source), ok=False, error=f"{type(exc).__name__}: {exc}")
+        result = FileResult(
+            str(source), ok=False, error=f"{type(exc).__name__}: {exc}", steps=step_stats
+        )
     finally:
         if work_dir is not None:
             shutil.rmtree(work_dir, ignore_errors=True)
@@ -1919,19 +1969,6 @@ def run_batch(  # noqa: PLR0913 - a clear public entry point with keyword-only o
 # --------------------------------------------------------------------------------------
 # Preview (dry-run on a small sample)
 # --------------------------------------------------------------------------------------
-@dataclass(slots=True)
-class StepStat:
-    """Per-step preview stats: how the working table changed when the step ran."""
-
-    index: int  # 1-based position in the template
-    label: str  # human-readable step summary
-    table: str
-    rows_before: int
-    rows_after: int
-    columns_added: list[str] = field(default_factory=list[str])
-    note: str = ""
-
-
 PREVIEW_LIMIT = 1000
 
 

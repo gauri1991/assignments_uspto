@@ -977,3 +977,42 @@ def test_describe_step_one_line_per_kind() -> None:
     ]
     for step in steps:
         assert describe_step(step)  # every kind renders a non-empty one-liner
+
+
+def test_run_batch_records_step_stats(tmp_path: Path) -> None:
+    template = BatchTemplate(
+        name="stats",
+        steps=[
+            FilterStep(table="properties", clauses=[FilterClause("doc_kind", "equals", "B2")]),
+            NormalizeStep(table="assignees", column="name"),
+            ExportStep(fmt="csv", tables=["properties"]),
+        ],
+    )
+    result = run_batch(template, [FIXTURE], tmp_path / "out", timestamp="ss")
+    stats = result.results[0].steps
+    assert [s.index for s in stats] == [1, 2, 3]
+    assert stats[0].label.startswith("Filter · properties")
+    assert stats[0].rows_before > stats[0].rows_after  # the filter dropped rows
+    assert stats[1].columns_added == ["name_canonical"]
+    assert stats[2].table == ""  # export has no working table
+
+
+def test_run_batch_disabled_step_recorded_in_stats(tmp_path: Path) -> None:
+    disabled = NormalizeStep(table="assignees", column="name")
+    disabled.enabled = False
+    template = BatchTemplate(
+        name="dis", steps=[disabled, ExportStep(fmt="csv", tables=["assignees"])]
+    )
+    result = run_batch(template, [FIXTURE], tmp_path / "out", timestamp="dd")
+    assert result.results[0].steps[0].note == "disabled"
+
+
+def test_run_batch_parallel_step_stats_cross_process(tmp_path: Path) -> None:
+    a = tmp_path / "a.xml"
+    b = tmp_path / "b.xml"
+    shutil.copy(FIXTURE, a)
+    shutil.copy(FIXTURE, b)
+    result = run_batch(_granted_template(), [a, b], tmp_path / "out", workers=2, timestamp="pp")
+    for file_result in result.results:  # StepStats must pickle back from worker processes
+        assert len(file_result.steps) == len(_granted_template().steps)
+        assert all(s.label for s in file_result.steps)
