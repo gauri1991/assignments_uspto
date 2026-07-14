@@ -93,7 +93,13 @@ The CLI now has **subcommands**; a bare input path still works as the legacy `pa
 ```bash
 .venv/bin/uspto-assign parse INPUT [--outdir DIR] [--formats LIST] [--basename STEM] [--batch-size N]
 .venv/bin/python main.py INPUT …                    # legacy invocation, identical behaviour
+.venv/bin/uspto-assign templates-summary            # regenerate templates/TEMPLATES.md
 ```
+
+`parse` and `ingest` write a `manifest.json` audit record into the output directory (command,
+input, duration, every output file with rows). `templates-summary` renders every template as
+numbered step one-liners plus its validation warnings into `templates/TEMPLATES.md` — regenerate
+it after any template change (run from the project root so relative reference paths validate).
 
 ### 3b. Buyer-identification pipeline (entity resolution + transaction ledger)
 
@@ -519,7 +525,8 @@ Each template is applied to **each input independently**. Inputs can be USPTO `.
 3. **Load** — an optional max-record cap and a field/table selection tree (loads only what you need).
 4. **Steps** — *Add step ▾* (menu below), reorder isn't needed (they run top-to-bottom);
    **double-click a step to edit** it; *Remove*.
-5. **Output** — choose an output folder; **Workers** (1 = sequential; >1 processes files in parallel).
+5. **Output** — defaults to your last-used folder (or `data/out`); **Workers** (1 = sequential;
+   >1 processes files in parallel). File dialogs remember where you last picked.
 6. **Run batch** — watch the live **console** and the per-file progress bar; a run log is written
    too. A **Cancel** button appears while a run is active (cancellation is per-file: the file in
    flight finishes, the rest are skipped, and the summary notes what was cancelled). Closing the
