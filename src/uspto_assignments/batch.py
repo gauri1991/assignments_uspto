@@ -849,6 +849,7 @@ class BatchResult:
     succeeded: int
     failed: int
     results: list[FileResult]
+    cancelled: bool = False  # True when the run stopped early via ``should_stop``
 
 
 OnEvent = Callable[[BatchEvent], None]
@@ -856,6 +857,11 @@ OnEvent = Callable[[BatchEvent], None]
 
 def _noop_event(_event: BatchEvent) -> None:
     """No-op event sink used when the caller passes no ``on_event``."""
+
+
+def _never_stop() -> bool:
+    """Default ``should_stop``: never cancel."""
+    return False
 
 
 OnParse = Callable[[int], None]
@@ -1553,6 +1559,26 @@ def _future_result(future: Future[FileResult], source: Path) -> FileResult:
         return FileResult(str(source), ok=False, error=f"{type(exc).__name__}: {exc}")
 
 
+def _record_pool_failure(
+    exc: BrokenProcessPool, inputs: list[Path], results: list[FileResult], emit: OnEvent
+) -> None:
+    """Record every not-yet-collected input as failed after the pool died."""
+    message = f"{type(exc).__name__}: worker process died — remaining inputs skipped"
+    emit(BatchEvent("error", message))
+    collected = {result.source for result in results}
+    results.extend(
+        FileResult(str(src), ok=False, error=message) for src in inputs if str(src) not in collected
+    )
+
+
+def _cancel_pending(pending: set[Future[FileResult]], emit: OnEvent) -> set[Future[FileResult]]:
+    """Drop every not-yet-started future; return the ones already in flight."""
+    remaining = {future for future in pending if not future.cancel()}
+    if remaining:
+        emit(BatchEvent("info", "Batch cancelled — waiting for in-flight file(s)…"))
+    return remaining
+
+
 def _run_parallel(  # noqa: PLR0913 - internal helper threading the run's collaborators
     template: BatchTemplate,
     inputs: list[Path],
@@ -1562,8 +1588,13 @@ def _run_parallel(  # noqa: PLR0913 - internal helper threading the run's collab
     emit: OnEvent,
     memory: EntityMemory,
     cpc_ctx: CpcRunContext | None = None,
-) -> list[FileResult]:
-    """Process inputs across a worker pool, emitting each file's events plus a combined total."""
+    should_stop: Callable[[], bool] = _never_stop,
+) -> tuple[list[FileResult], bool]:
+    """Process inputs across a worker pool, emitting each file's events plus a combined total.
+
+    Returns ``(results, cancelled)``. Cancellation is per-file: not-yet-started inputs are
+    dropped, files already in flight run to completion and are collected normally.
+    """
     results: list[FileResult] = []
     per_source: dict[str, int] = {}
     completed = 0
@@ -1611,8 +1642,12 @@ def _run_parallel(  # noqa: PLR0913 - internal helper threading the run's collab
                 for src, src_dir in zip(inputs, source_dirs, strict=True)
             }
             pending = set(futures)
+            cancelled = False
             try:
                 while pending:
+                    if not cancelled and should_stop():
+                        cancelled = True
+                        pending = _cancel_pending(pending, emit)
                     drain(force=False)
                     finished = {future for future in pending if future.done()}
                     pending -= finished
@@ -1624,19 +1659,11 @@ def _run_parallel(  # noqa: PLR0913 - internal helper threading the run's collab
                     if pending:
                         time.sleep(0.05)
             except BrokenProcessPool as exc:
-                # The pool is unusable; record every not-yet-collected input as failed and stop.
-                message = f"{type(exc).__name__}: worker process died — remaining inputs skipped"
-                emit(BatchEvent("error", message))
-                collected = {result.source for result in results}
-                results.extend(
-                    FileResult(str(src), ok=False, error=message)
-                    for src in inputs
-                    if str(src) not in collected
-                )
+                # The pool is unusable; record the remaining inputs as failed and stop.
+                _record_pool_failure(exc, inputs, results, emit)
             drain(force=True)
     order = {str(path): index for index, path in enumerate(inputs)}
-    results.sort(key=lambda r: order.get(r.source, len(order)))
-    return results
+    return sorted(results, key=lambda r: order.get(r.source, len(order))), cancelled
 
 
 def _emit_file_done(result: FileResult, emit: OnEvent) -> None:
@@ -1671,6 +1698,7 @@ def run_batch(  # noqa: PLR0913 - a clear public entry point with keyword-only o
     memory: EntityMemory | None = None,
     on_event: OnEvent | None = None,
     cpc_ctx: CpcRunContext | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> BatchResult:
     """Run ``template`` over ``inputs``, writing outputs under ``out_root``.
 
@@ -1684,22 +1712,35 @@ def run_batch(  # noqa: PLR0913 - a clear public entry point with keyword-only o
             merged back into it (persist it afterwards to keep learning). A fresh one is used if
             ``None``.
         on_event: Optional callback receiving :class:`BatchEvent`s as processing proceeds.
+        should_stop: Optional cancellation probe, polled between files (cancellation is per-file:
+            the file in flight finishes, remaining inputs are skipped). Must be thread-safe.
 
     Returns:
-        A :class:`BatchResult` summarizing successes, failures, and per-file details.
+        A :class:`BatchResult` summarizing successes, failures, and per-file details;
+        ``result.cancelled`` is True when the run stopped early.
     """
     emit = on_event or _noop_event
+    stop = should_stop or _never_stop
     memory = memory if memory is not None else EntityMemory()
     run_start = time.monotonic()
     template_dir = out_root / _safe_name(template.name)
     template_dir.mkdir(parents=True, exist_ok=True)
     source_dirs = _assign_source_dirs(inputs, template_dir)
     results: list[FileResult] = []
+    cancelled = False
 
     if workers > 1 and len(inputs) > 1:
         emit(BatchEvent("info", f"Processing {len(inputs)} inputs with {workers} workers…"))
-        results = _run_parallel(
-            template, inputs, source_dirs, template_dir, workers, emit, memory, cpc_ctx
+        results, cancelled = _run_parallel(
+            template,
+            inputs,
+            source_dirs,
+            template_dir,
+            workers,
+            emit,
+            memory,
+            cpc_ctx,
+            should_stop=stop,
         )
         # Workers mutate pickled copies of the memory; merge what they learned back in. (The
         # sequential path shares ``memory`` in-process, so its learned pairs are already there.)
@@ -1707,6 +1748,10 @@ def run_batch(  # noqa: PLR0913 - a clear public entry point with keyword-only o
             memory.apply_learned(result.learned)
     else:
         for source, source_dir in zip(inputs, source_dirs, strict=True):
+            if stop():
+                cancelled = True
+                emit(BatchEvent("info", "Batch cancelled — skipping remaining inputs"))
+                break
             emit(BatchEvent("info", f"▶ {source.name}"))
             result = _process_input(
                 template,
@@ -1727,13 +1772,23 @@ def run_batch(  # noqa: PLR0913 - a clear public entry point with keyword-only o
     succeeded = sum(1 for r in results if r.ok)
     failed = len(results) - succeeded
     elapsed = time.monotonic() - run_start
-    emit(
-        BatchEvent(
-            "success" if failed == 0 else "error",
-            f"Batch complete: {succeeded} succeeded, {failed} failed in {elapsed:.1f}s",
+    if cancelled:
+        skipped = len(inputs) - len(results)
+        emit(
+            BatchEvent(
+                "error" if failed else "info",
+                f"Batch cancelled: {succeeded} succeeded, {failed} failed, "
+                f"{skipped} skipped in {elapsed:.1f}s",
+            )
         )
-    )
-    return BatchResult(succeeded=succeeded, failed=failed, results=results)
+    else:
+        emit(
+            BatchEvent(
+                "success" if failed == 0 else "error",
+                f"Batch complete: {succeeded} succeeded, {failed} failed in {elapsed:.1f}s",
+            )
+        )
+    return BatchResult(succeeded=succeeded, failed=failed, results=results, cancelled=cancelled)
 
 
 # --------------------------------------------------------------------------------------

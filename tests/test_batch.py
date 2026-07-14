@@ -371,6 +371,53 @@ def test_run_batch_parallel_results_in_input_order(tmp_path: Path) -> None:
     assert [r.source for r in result.results] == [str(p) for p in inputs]
 
 
+def test_run_batch_should_stop_after_first_file(tmp_path: Path) -> None:
+    a = tmp_path / "a.xml"
+    b = tmp_path / "b.xml"
+    shutil.copy(FIXTURE, a)
+    shutil.copy(FIXTURE, b)
+    events: list[BatchEvent] = []
+    done = 0
+
+    def on_event(event: BatchEvent) -> None:
+        nonlocal done
+        events.append(event)
+        if event.message.startswith(("✓", "✗")):
+            done += 1
+
+    result = run_batch(
+        _granted_template(),
+        [a, b],
+        tmp_path / "out",
+        timestamp="t7",
+        on_event=on_event,
+        should_stop=lambda: done >= 1,
+    )
+    assert result.cancelled is True
+    assert (result.succeeded, len(result.results)) == (1, 1)
+    assert (tmp_path / "out" / "granted" / "run_t7.log").is_file()  # log still written
+    messages = [e.message for e in events]
+    assert any(m.startswith("Batch cancelled:") for m in messages)
+
+
+def test_run_batch_should_stop_immediately_parallel(tmp_path: Path) -> None:
+    a = tmp_path / "a.xml"
+    b = tmp_path / "b.xml"
+    shutil.copy(FIXTURE, a)
+    shutil.copy(FIXTURE, b)
+    result = run_batch(
+        _granted_template(),
+        [a, b],
+        tmp_path / "out",
+        workers=2,
+        timestamp="t8",
+        should_stop=lambda: True,
+    )
+    assert result.cancelled is True
+    # In-flight files may still finish; only never-started inputs are skipped.
+    assert len(result.results) <= 2
+
+
 def test_needed_tables_skips_flat_when_unused() -> None:
     only_props = BatchTemplate(name="p", steps=[ExportStep(fmt="parquet", tables=["properties"])])
     assert _needed_tables(only_props) == {"properties"}  # flat is skipped at parse
