@@ -12,10 +12,11 @@ pytest.importorskip("PyQt6")
 pytest.importorskip("pytestqt")
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QListWidget
+from PyQt6.QtWidgets import QListWidget, QMessageBox
 
 from uspto_assignments import (
     AggregateStep,
+    BatchEvent,
     BatchTemplate,
     ClassifyStep,
     CompareStep,
@@ -112,7 +113,7 @@ def test_batch_dialog_runs_and_writes_output(qtbot: Any, tmp_path: Path) -> None
     dialog._out_dir.setText(str(out))
     dialog._run()
 
-    qtbot.waitUntil(lambda: "Done." in dialog._console.toPlainText(), timeout=15000)
+    qtbot.waitUntil(lambda: "Done:" in dialog._console.toPlainText(), timeout=15000)
     result = out / "granted" / "sample_assignment" / "properties.parquet"
     assert result.is_file()
     reopened = pq.read_table(result)  # pyright: ignore[reportUnknownMemberType]
@@ -485,7 +486,7 @@ def test_batch_dialog_normalize_run_persists_memory(qtbot: Any, tmp_path: Path) 
     dialog._out_dir.setText(str(tmp_path / "out"))
     dialog._run()
 
-    qtbot.waitUntil(lambda: "Done." in dialog._console.toPlainText(), timeout=15000)
+    qtbot.waitUntil(lambda: "Done:" in dialog._console.toPlainText(), timeout=15000)
     assert (tmp_path / "entities.json").is_file()
     assert EntityMemory.load(tmp_path / "entities.json").counts()[0] >= 1
     assert "normalizing" in dialog._console.toPlainText()
@@ -547,3 +548,209 @@ def test_step_list_shows_warning_badge(qtbot: Any, tmp_path: Path) -> None:
     assert item is not None
     assert "⚠" in item.text()
     assert "nope_col" in item.toolTip()
+
+
+# -- run lifecycle: typed progress, cancel, close guard --------------------
+
+
+def test_progress_driven_by_event_kind_not_message_text(qtbot: Any, tmp_path: Path) -> None:
+    create_app([])
+    dialog = BatchDialog(BatchTemplateStore(tmp_path / "b.json"))
+    qtbot.addWidget(dialog)
+    dialog._progress.setRange(0, 2)
+    dialog._completed = 0
+
+    dialog._on_event(BatchEvent("success", "no marker here", kind="file_done"))
+    assert dialog._progress.value() == 1
+    # regression: a plain message that merely *looks* like a completion line must not count
+    dialog._on_event(BatchEvent("info", "✓ looks done but is only a message"))
+    assert dialog._progress.value() == 1
+
+
+def test_close_blocked_while_running_then_allowed(
+    qtbot: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    create_app([])
+    dialog = BatchDialog(BatchTemplateStore(tmp_path / "b.json"))
+    qtbot.addWidget(dialog)
+    dialog._template_name.setText("granted")
+    dialog._steps = list(_template().steps)
+    dialog._inputs.addItem(str(FIXTURE))
+    dialog._out_dir.setText(str(tmp_path / "out"))
+    dialog.show()
+    dialog._run()
+    assert dialog._thread is not None
+    assert dialog._cancel_btn.isVisible()
+
+    monkeypatch.setattr(
+        QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.StandardButton.No)
+    )
+    dialog.close()
+    assert dialog.isVisible()  # close refused while the run is active
+
+    qtbot.waitUntil(lambda: dialog._thread is None, timeout=15000)
+    assert not dialog._cancel_btn.isVisible()
+    assert dialog._run_btn.isEnabled() and dialog._preview_btn.isEnabled()
+    dialog.close()
+    assert not dialog.isVisible()
+
+
+def test_close_during_run_cancels_and_closes_after(
+    qtbot: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    create_app([])
+    dialog = BatchDialog(BatchTemplateStore(tmp_path / "b.json"))
+    qtbot.addWidget(dialog)
+    dialog._template_name.setText("granted")
+    dialog._steps = list(_template().steps)
+    dialog._inputs.addItem(str(FIXTURE))
+    dialog._out_dir.setText(str(tmp_path / "out"))
+    dialog.show()
+    dialog._run()
+
+    monkeypatch.setattr(
+        QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes)
+    )
+    dialog.reject()  # the Close button path
+    assert dialog._close_after_run is True
+    assert dialog.isVisible()  # still open until the thread stops
+
+    qtbot.waitUntil(lambda: dialog._thread is None and not dialog.isVisible(), timeout=15000)
+
+
+def test_cancel_slot_requests_worker_stop(qtbot: Any, tmp_path: Path) -> None:
+    create_app([])
+    dialog = BatchDialog(BatchTemplateStore(tmp_path / "b.json"))
+    qtbot.addWidget(dialog)
+    dialog._template_name.setText("granted")
+    dialog._steps = list(_template().steps)
+    dialog._inputs.addItem(str(FIXTURE))
+    dialog._out_dir.setText(str(tmp_path / "out"))
+    dialog._run()
+
+    dialog._cancel()
+    assert not dialog._cancel_btn.isEnabled()
+    assert "Cancelling" in dialog._console.toPlainText()
+    qtbot.waitUntil(lambda: dialog._thread is None, timeout=15000)
+    # with a single tiny input the run may already be past the stop check; either way it ends clean
+    assert "Done:" in dialog._console.toPlainText()
+
+
+# -- export dialog state + destructive-action guards -----------------------
+
+
+def test_export_dialog_keeps_edits_when_tables_toggled(qtbot: Any) -> None:
+    create_app([])
+    dialog = ExportStepDialog()
+    qtbot.addWidget(dialog)
+    dialog._customize.setChecked(True)
+    current = dialog._editor._pick.currentText()
+    source_item = dialog._editor._grid.item(0, 0)
+    rename_item = dialog._editor._grid.item(0, 1)
+    assert source_item is not None and rename_item is not None
+    source_name = source_item.text()
+    rename_item.setText("renamed_out")
+
+    # unchecking an unrelated table re-seeds the editor; the in-progress rename must survive
+    for i in range(dialog._tables.count()):
+        item = dialog._tables.item(i)
+        if item is not None and item.text() != current:
+            item.setCheckState(Qt.CheckState.Unchecked)
+            break
+    step = dialog.step()
+    assert step.renames is not None
+    assert step.renames[current][source_name] == "renamed_out"
+
+
+def test_export_dialog_disables_ok_when_no_tables(qtbot: Any) -> None:
+    create_app([])
+    dialog = ExportStepDialog()
+    qtbot.addWidget(dialog)
+    assert dialog._ok is not None and dialog._ok.isEnabled()
+    for i in range(dialog._tables.count()):
+        dialog._tables.item(i).setCheckState(Qt.CheckState.Unchecked)  # type: ignore[union-attr]
+    assert not dialog._ok.isEnabled()
+    assert not dialog._hint.isHidden()
+    dialog._tables.item(0).setCheckState(Qt.CheckState.Checked)  # type: ignore[union-attr]
+    assert dialog._ok.isEnabled()
+    assert dialog._hint.isHidden()
+
+
+def test_delete_template_confirms_and_uses_saved_selection(
+    qtbot: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    create_app([])
+    store = BatchTemplateStore(tmp_path / "b.json")
+    store.add(_template())  # saved as "granted"
+    dialog = BatchDialog(store)
+    qtbot.addWidget(dialog)
+    dialog._saved.setCurrentIndex(1)  # select "granted" (index 0 is the placeholder)
+    dialog._template_name.setText("half-typed new name")  # must NOT decide what gets deleted
+
+    monkeypatch.setattr(
+        QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.StandardButton.No)
+    )
+    dialog._delete_template()
+    assert [t.name for t in store.load()] == ["granted"]  # declined -> untouched
+
+    monkeypatch.setattr(
+        QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes)
+    )
+    dialog._delete_template()
+    assert store.load() == []
+
+
+def test_build_reference_failure_does_not_pollute_path(
+    qtbot: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    create_app([])
+    dialog = ReferenceMatchStepDialog()
+    qtbot.addWidget(dialog)
+    dialog._reference.setText("/existing/ref.parquet")
+
+    def _boom(*_a: Any, **_k: Any) -> int:
+        raise ValueError("bad file")
+
+    monkeypatch.setattr(
+        bd.QFileDialog, "getOpenFileName", staticmethod(lambda *a, **k: ("/tmp/src.tsv", ""))
+    )
+    monkeypatch.setattr(
+        bd.QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: ("/tmp/dst.parquet", ""))
+    )
+    monkeypatch.setattr(bd, "extract_distinct_reference", _boom)
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox, "warning", staticmethod(lambda *a, **k: warnings.append(str(a[2])))
+    )
+    dialog._build_reference()
+    assert dialog._reference.text() == "/existing/ref.parquet"  # error never becomes the path
+    assert warnings and "bad file" in warnings[0]
+
+
+def test_alias_tab_notes_truncation(qtbot: Any, tmp_path: Path) -> None:
+    create_app([])
+    memory = EntityMemory(aliases={f"alias {i:05d}": f"Canon {i % 7}" for i in range(5100)})
+    store = EntityMemoryStore(tmp_path / "entities.json")
+    store.save(memory)
+    dialog = EntityDialog(store)
+    qtbot.addWidget(dialog)
+    assert dialog._alias_model.truncated
+    assert "refine the search" in dialog._alias_note.text()
+
+    dialog._alias_search.setText("alias 00001")
+    dialog._refresh_aliases()  # what the debounce timer fires
+    assert not dialog._alias_model.truncated
+    assert "match(es)" in dialog._alias_note.text()
+
+
+def test_filter_step_dialog_rebuilds_bar_on_table_change(qtbot: Any) -> None:
+    create_app([])
+    dialog = FilterStepDialog()
+    qtbot.addWidget(dialog)
+    original_bar = dialog._filter_bar
+    dialog._table.setCurrentText("assignees")  # must swap in a bar with that table's columns
+    assert dialog._filter_bar is not original_bar
+    columns = [
+        dialog._filter_bar._column.itemText(i) for i in range(dialog._filter_bar._column.count())
+    ]
+    assert "name" in columns  # an assignees column

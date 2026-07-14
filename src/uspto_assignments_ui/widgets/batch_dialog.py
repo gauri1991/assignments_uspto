@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from PyQt6.QtCore import QObject, Qt, QThread
-from PyQt6.QtGui import QAction
+from PyQt6.QtGui import QAction, QCloseEvent
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -44,6 +44,7 @@ from uspto_assignments import (
     STORE_TABLES,
     AggregateStep,
     BatchEvent,
+    BatchResult,
     BatchStep,
     BatchTemplate,
     ClassifyStep,
@@ -231,11 +232,11 @@ class FilterStepDialog(QDialog):
         self._table = QComboBox()
         self._table.addItems(list(STORE_TABLES))
         self._table.currentIndexChanged.connect(self._rebuild_filter_bar)
-        row = QHBoxLayout()
-        row.addWidget(QLabel("Table"))
-        row.addWidget(self._table, 1)
-        layout.addLayout(row)
+        form = QFormLayout()
+        form.addRow("Table", self._table)
+        layout.addLayout(form)
 
+        # Kept a direct child of the top-level VBox: _rebuild_filter_bar swaps it in place there.
         self._filter_bar = FilterBar(_cols(self._table.currentText()))
         layout.addWidget(self._filter_bar)
 
@@ -427,30 +428,38 @@ class ExportStepDialog(QDialog):
             item.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
             self._tables.addItem(item)
         self._tables.itemChanged.connect(self._refresh_editor)
-        layout.addWidget(self._tables)
+        layout.addWidget(self._tables, 1)
 
         self._customize = QCheckBox("Choose final columns (order + rename)")
         self._customize.toggled.connect(self._on_customize_toggled)
         layout.addWidget(self._customize)
         self._editor = _ExportColumnEditor()
         self._editor.setVisible(False)
-        layout.addWidget(self._editor)
+        # Weighted heavier than the tables list so toggling the editor redistributes space
+        # instead of erratically resizing the dialog.
+        layout.addWidget(self._editor, 2)
 
+        self._hint = QLabel("Check at least one table to export.")
+        self._hint.setVisible(False)
+        layout.addWidget(self._hint)
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
+        self._ok = buttons.button(QDialogButtonBox.StandardButton.Ok)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
         self._pending_columns = None if step is None else step.columns
         self._pending_renames = None if step is None else step.renames
+        self._editor_tables: list[str] = []  # tables currently loaded in the column editor
         if step is not None:
             index = self._format.findData(step.fmt)
             if index >= 0:
                 self._format.setCurrentIndex(index)
             if step.columns or step.renames:
                 self._customize.setChecked(True)
+        self._refresh_editor()  # prime the OK/hint state (a legacy step may have tables=[])
 
     def _checked_tables(self) -> list[str]:
         checked: list[str] = []
@@ -466,12 +475,17 @@ class ExportStepDialog(QDialog):
             self._refresh_editor()
 
     def _refresh_editor(self) -> None:
-        if self._customize.isChecked():
-            self._editor.set_tables(
-                self._checked_tables() or list(STORE_TABLES),
-                self._pending_columns,
-                self._pending_renames,
-            )
+        none_checked = not self._checked_tables()
+        if self._ok is not None:
+            self._ok.setEnabled(not none_checked)  # exporting nothing is a mistake, not a request
+        self._hint.setVisible(none_checked)
+        if not self._customize.isChecked():
+            return
+        if self._editor_tables:  # harvest in-progress edits before re-seeding the grid
+            self._pending_columns, self._pending_renames = self._editor.result(self._editor_tables)
+        tables = self._checked_tables() or list(STORE_TABLES)
+        self._editor.set_tables(tables, self._pending_columns, self._pending_renames)
+        self._editor_tables = tables
 
     def step(self) -> ExportStep:
         """Return the configured export step (``tables=None`` when all are selected)."""
@@ -519,8 +533,8 @@ class NormalizeStepDialog(QDialog):
         form.addRow("Split separator", self._separator)
         form.addRow("Match threshold", self._threshold)
         form.addRow("Scorer", self._scorer)
+        form.addRow("", self._learn)  # aligned under the field column
         layout.addLayout(form)
-        layout.addWidget(self._learn)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -591,13 +605,13 @@ class DedupeStepDialog(QDialog):
 
         self._table = QComboBox()
         self._table.addItems(list(STORE_TABLES))
-        table_row = QHBoxLayout()
-        table_row.addWidget(QLabel("Table"))
-        table_row.addWidget(self._table, 1)
-        layout.addLayout(table_row)
+        form = QFormLayout()
+        form.addRow("Table", self._table)
+        layout.addLayout(form)
 
         layout.addWidget(QLabel("Key columns (none checked = whole row)"))
-        # Default: no key columns checked (dedupe on the whole row).
+        # Default: no key columns checked (dedupe on the whole row). Kept a direct child of the
+        # top-level VBox: _rebuild_columns swaps it in place there.
         self._columns = _checkable_columns(_cols(self._table.currentText()), set())
         layout.addWidget(self._columns)
         self._table.currentIndexChanged.connect(self._rebuild_columns)
@@ -640,13 +654,13 @@ class SelectStepDialog(QDialog):
 
         self._table = QComboBox()
         self._table.addItems(list(STORE_TABLES))
-        table_row = QHBoxLayout()
-        table_row.addWidget(QLabel("Table"))
-        table_row.addWidget(self._table, 1)
-        layout.addLayout(table_row)
+        form = QFormLayout()
+        form.addRow("Table", self._table)
+        layout.addLayout(form)
 
         layout.addWidget(QLabel("Columns to keep"))
-        # Default: keep all columns (checked); a new table resets to all-kept.
+        # Default: keep all columns (checked); a new table resets to all-kept. Kept a direct
+        # child of the top-level VBox: _rebuild_columns swaps it in place there.
         self._columns = _checkable_columns(_cols(self._table.currentText()), None)
         layout.addWidget(self._columns)
         self._table.currentIndexChanged.connect(self._rebuild_columns)
@@ -694,8 +708,8 @@ class SortStepDialog(QDialog):
         self._ascending.setChecked(True)
         form.addRow("Table", self._table)
         form.addRow("Column", self._column)
+        form.addRow("", self._ascending)  # aligned under the field column
         layout.addLayout(form)
-        layout.addWidget(self._ascending)
 
         self._table.currentIndexChanged.connect(self._rebuild_columns)
         self._rebuild_columns()
@@ -805,13 +819,13 @@ class AggregateStepDialog(QDialog):
 
         self._table = QComboBox()
         self._table.addItems(list(STORE_TABLES))
-        table_row = QHBoxLayout()
-        table_row.addWidget(QLabel("Table"))
-        table_row.addWidget(self._table, 1)
-        layout.addLayout(table_row)
+        table_form = QFormLayout()
+        table_form.addRow("Table", self._table)
+        layout.addLayout(table_form)
 
         layout.addWidget(QLabel("Group by columns"))
-        # Default: nothing grouped yet; a new table resets to no group-by columns.
+        # Default: nothing grouped yet; a new table resets to no group-by columns. Kept a direct
+        # child of the top-level VBox: _rebuild_columns swaps it in place there.
         self._columns = _checkable_columns(_cols(self._table.currentText()), set())
         layout.addWidget(self._columns)
 
@@ -1199,7 +1213,7 @@ class ReferenceMatchStepDialog(QDialog):
                 id_column=self._id_column.text().strip(),
             )
         except (OSError, ValueError, KeyError) as exc:
-            self._reference.setText(f"Build failed: {exc}")
+            QMessageBox.warning(self, "Build failed", f"Could not build compact reference:\n{exc}")
             return
         self._reference.setText(dst)
         self._name_column.setText("organization")  # the compact file's column names
@@ -1472,6 +1486,7 @@ class BatchDialog(QDialog):
         self._completed = 0  # files finished this run (drives the determinate progress bar)
         self._thread: QThread | None = None
         self._worker: QObject | None = None  # BatchWorker (run) or CallWorker (preview)
+        self._close_after_run = False  # close the dialog once the active run's thread stops
         self._log_emitter = LogEmitter()
         self._log_handler = QtLogHandler(self._log_emitter)
         self._log_emitter.message.connect(self._append_console)
@@ -1525,7 +1540,8 @@ class BatchDialog(QDialog):
         column.addWidget(SectionLabel("Inputs (xml / zip files or dataset folders)"))
         self._inputs = QListWidget()
         self._inputs.setProperty("panel", "true")
-        column.addWidget(self._inputs)
+        # Weighted 1:2:2 with the field tree and steps list — the working areas get the space.
+        column.addWidget(self._inputs, 1)
         column.addLayout(
             self._button_row(
                 ("Add files…", self._add_files),
@@ -1539,18 +1555,17 @@ class BatchDialog(QDialog):
         self._max.setRange(0, _MAX_RECORDS_CAP)
         self._max.setSpecialValueText("All records")
         self._max.setValue(0)
-        max_row = QHBoxLayout()
-        max_row.addWidget(QLabel("Max records"))
-        max_row.addWidget(self._max, 1)
-        column.addLayout(max_row)
+        max_form = QFormLayout()
+        max_form.addRow("Max records", self._max)
+        column.addLayout(max_form)
         self._fields = FieldTree()
-        column.addWidget(self._fields)
+        column.addWidget(self._fields, 2)
 
         column.addWidget(SectionLabel("Steps (double-click to edit)"))
         self._steps_list = QListWidget()
         self._steps_list.setProperty("panel", "true")
         self._steps_list.itemDoubleClicked.connect(self._edit_step)
-        column.addWidget(self._steps_list)
+        column.addWidget(self._steps_list, 2)
 
         add_btn = QPushButton("Add step ▾")
         add_btn.setProperty("primary", "true")
@@ -1594,10 +1609,9 @@ class BatchDialog(QDialog):
         self._workers = QSpinBox()
         self._workers.setRange(1, 32)
         self._workers.setValue(1)
-        workers_row = QHBoxLayout()
-        workers_row.addWidget(QLabel("Workers (1 = sequential)"))
-        workers_row.addWidget(self._workers, 1)
-        column.addLayout(workers_row)
+        workers_form = QFormLayout()
+        workers_form.addRow("Workers (1 = sequential)", self._workers)
+        column.addLayout(workers_form)
 
         # CPC: a per-run network opt-in for fetch_cpc steps, plus quick access to the source config.
         self._allow_network = QCheckBox("Allow network for CPC fetch this run")
@@ -1623,12 +1637,16 @@ class BatchDialog(QDialog):
         self._run_btn = QPushButton("Run batch")
         self._run_btn.setProperty("primary", "true")
         self._run_btn.clicked.connect(self._run)
+        self._cancel_btn = QPushButton("Cancel")
+        self._cancel_btn.setVisible(False)  # only shown while a batch run is active
+        self._cancel_btn.clicked.connect(self._cancel)
         close_btn = QPushButton("Close")
         close_btn.clicked.connect(self.reject)
         run_row = QHBoxLayout()
         run_row.addStretch(1)
         run_row.addWidget(self._preview_btn)
         run_row.addWidget(self._run_btn)
+        run_row.addWidget(self._cancel_btn)
         run_row.addWidget(close_btn)
         column.addLayout(run_row)
         return column
@@ -1713,11 +1731,17 @@ class BatchDialog(QDialog):
         self._append_console(f"Saved template '{template.name}'")
 
     def _delete_template(self) -> None:
-        name = self._template_name.text().strip()
-        if name:
-            self._store.delete(name)
-            self._reload_templates()
-            self._append_console(f"Deleted template '{name}'")
+        # Prefer the selected saved template; the free-typed name is only a fallback so a
+        # half-typed new name can't silently delete an unrelated saved template.
+        name = self._saved.currentData() or self._template_name.text().strip()
+        if not name:
+            return
+        answer = QMessageBox.question(self, "Delete template", f"Delete saved template '{name}'?")
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._store.delete(name)
+        self._reload_templates()
+        self._append_console(f"Deleted template '{name}'")
 
     # -- inputs ------------------------------------------------------------
     def _add_files(self) -> None:
@@ -1748,12 +1772,13 @@ class BatchDialog(QDialog):
     ) -> BatchStep | None:
         """Open a step dialog with the columns available at ``index`` in scope; return new step."""
         global _available_ctx  # noqa: PLW0603 - modal, single-threaded schema context for dialogs
+        previous = _available_ctx
         _available_ctx = columns_after(self._load(), self._steps, index)
         try:
             dialog = dialog_cls(step, parent=self) if step is not None else dialog_cls(parent=self)  # type: ignore[arg-type]
             return dialog.step() if dialog.exec() == QDialog.DialogCode.Accepted else None
         finally:
-            _available_ctx = None
+            _available_ctx = previous
 
     def _add_step(self, dialog_cls: type[_StepDialog]) -> None:
         row = self._steps_list.currentRow()
@@ -1873,6 +1898,9 @@ class BatchDialog(QDialog):
         self._progress.setValue(0)
         self._progress.setVisible(True)
         self._run_btn.setEnabled(False)
+        self._preview_btn.setEnabled(False)
+        self._cancel_btn.setEnabled(True)
+        self._cancel_btn.setVisible(True)
 
         self._memory = self._memory_store.load()
         thread = QThread(self)
@@ -1897,10 +1925,17 @@ class BatchDialog(QDialog):
         self._worker = worker
         thread.start()
 
+    def _cancel(self) -> None:
+        """Request cooperative cancellation of the running batch (takes effect between files)."""
+        if isinstance(self._worker, BatchWorker):
+            self._worker.cancel()
+            self._cancel_btn.setEnabled(False)
+            self._append_console("Cancelling — finishing the file(s) in flight…")
+
     def _on_event(self, event: object) -> None:
         if isinstance(event, BatchEvent):
             self._append_console(event.message, event.level)
-            if event.message.startswith(("✓", "✗")):  # a per-file completion line
+            if event.kind == "file_done":
                 self._completed += 1
                 self._progress.setValue(self._completed)
 
@@ -1910,7 +1945,14 @@ class BatchDialog(QDialog):
             self._memory_store.save(self._memory)
             canonicals, aliases = self._memory.counts()
             self._append_console(f"Entity memory: {canonicals:,} canonicals, {aliases:,} aliases")
-        self._append_console("Done.")
+        if isinstance(result, BatchResult):
+            note = " (cancelled)" if result.cancelled else ""
+            self._append_console(
+                f"Done: {result.succeeded} succeeded, {result.failed} failed{note}.",
+                "error" if result.failed else "success",
+            )
+        else:
+            self._append_console("Done.")
 
     # -- preview -----------------------------------------------------------
     def _preview(self) -> None:
@@ -1972,6 +2014,8 @@ class BatchDialog(QDialog):
     def _finish_run(self) -> None:
         self._progress.setVisible(False)
         self._run_btn.setEnabled(True)
+        self._preview_btn.setEnabled(True)
+        self._cancel_btn.setVisible(False)
         logging.getLogger(_CORE_LOGGER).removeHandler(self._log_handler)
 
     def _cleanup(self) -> None:
@@ -1979,6 +2023,44 @@ class BatchDialog(QDialog):
             self._thread.deleteLater()
         self._thread = None
         self._worker = None
+        if self._close_after_run:
+            self._close_after_run = False
+            self.close()
+
+    # -- lifetime ------------------------------------------------------------
+    def _confirm_close(self) -> bool:
+        """True when it is safe to close now; otherwise offer to cancel and close on finish.
+
+        The dialog must never be destroyed while a worker thread is alive (Qt aborts on a
+        running ``QThread``'s destruction), so a close during a run only *requests* it: the
+        run is cancelled and ``_cleanup`` closes the window once the thread stops.
+        """
+        if self._thread is None:
+            return True
+        answer = QMessageBox.question(
+            self,
+            "Batch running",
+            "A run is in progress. Cancel it and close this window when it stops?",
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self._cancel()
+            self._close_after_run = True
+        return False
+
+    def closeEvent(self, a0: QCloseEvent | None) -> None:
+        """Guard window-manager closes; drop the log handler on a real close."""
+        if not self._confirm_close():
+            if a0 is not None:
+                a0.ignore()
+            return
+        logging.getLogger(_CORE_LOGGER).removeHandler(self._log_handler)  # idempotent
+        super().closeEvent(a0)
+
+    def reject(self) -> None:
+        """Route the Close button and Esc through the same running-batch guard."""
+        if self._confirm_close():
+            logging.getLogger(_CORE_LOGGER).removeHandler(self._log_handler)  # idempotent
+            super().reject()
 
     def _append_console(self, text: str, level: str = "info") -> None:
         color = {"error": "#d9534f", "success": "#4a934a"}.get(level)

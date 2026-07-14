@@ -8,6 +8,7 @@ progress reporting; the window stays responsive and shows a progress indicator.
 from __future__ import annotations
 
 import logging
+import threading
 from collections.abc import Callable
 from pathlib import Path
 
@@ -113,6 +114,11 @@ class BatchWorker(QObject):
         self._timestamp = timestamp
         self._memory = memory
         self._cpc_ctx = cpc_ctx
+        self._stop = threading.Event()
+
+    def cancel(self) -> None:
+        """Request cooperative cancellation (takes effect between files). GUI-thread safe."""
+        self._stop.set()
 
     def run(self) -> None:
         """Run the batch; emit ``finished`` or ``failed``. Runs on the worker thread."""
@@ -126,6 +132,7 @@ class BatchWorker(QObject):
                 memory=self._memory,
                 on_event=self._emit_event,
                 cpc_ctx=self._cpc_ctx,
+                should_stop=self._stop.is_set,
             )
         except Exception as exc:  # thread boundary: report any error via the failed signal
             self.failed.emit(f"{type(exc).__name__}: {exc}")

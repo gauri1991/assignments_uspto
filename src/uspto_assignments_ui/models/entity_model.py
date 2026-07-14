@@ -102,6 +102,6 @@ class EntityAliasModel(QAbstractTableModel):
 
     def delete_aliases(self, rows: list[int]) -> None:
         """Delete the aliases at the given view rows from the memory."""
-        for alias in [self._rows[r][0] for r in rows if 0 <= r < len(self._rows)]:
+        for alias in [a for row in rows if (a := self.alias_at(row)) is not None]:
             self._memory.delete_alias(alias)
         self.refresh()

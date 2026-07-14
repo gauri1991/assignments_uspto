@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import shutil
 import zipfile
+from concurrent.futures import Future
+from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
 from typing import Any
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 
 from uspto_assignments import (
     AggregateStep,
@@ -38,6 +41,7 @@ from uspto_assignments import (
     validate_template,
 )
 from uspto_assignments.batch import (
+    FileResult,
     _apply_aggregate,
     _apply_classify,
     _apply_compare,
@@ -49,6 +53,8 @@ from uspto_assignments.batch import (
     _apply_sort,
     _apply_step,
     _apply_transfer_type,
+    _assign_source_dirs,
+    _future_result,
     _needed_tables,
 )
 from uspto_assignments.filters import filter_sort
@@ -316,6 +322,100 @@ def test_run_batch_parallel_workers(tmp_path: Path) -> None:
     assert any("[b.xml]" in m for m in messages)
     assert any("across" in m and "records" in m for m in messages)
     assert any("pid" in m for m in messages)  # worker PIDs prove real parallel processes
+
+
+def test_assign_source_dirs_disambiguates_same_stem(tmp_path: Path) -> None:
+    inputs = [tmp_path / "a" / "x.xml", tmp_path / "b" / "x.xml", tmp_path / "y.xml"]
+    (tmp_path / "out" / "y").mkdir(parents=True)  # an existing dir must also be skipped
+    dirs = _assign_source_dirs(inputs, tmp_path / "out")
+    assert dirs == [
+        tmp_path / "out" / "x",
+        tmp_path / "out" / "x (1)",
+        tmp_path / "out" / "y (1)",
+    ]
+
+
+def test_future_result_records_failure_and_reraises_broken_pool(tmp_path: Path) -> None:
+    crashed: Future[FileResult] = Future()
+    crashed.set_exception(RuntimeError("boom"))
+    result = _future_result(crashed, tmp_path / "x.xml")
+    assert not result.ok
+    assert result.error == "RuntimeError: boom"
+
+    poisoned: Future[FileResult] = Future()
+    poisoned.set_exception(BrokenProcessPool("pool died"))
+    with pytest.raises(BrokenProcessPool):
+        _future_result(poisoned, tmp_path / "x.xml")
+
+
+def test_run_batch_parallel_same_stem_inputs_get_distinct_dirs(tmp_path: Path) -> None:
+    a = tmp_path / "a" / "x.xml"
+    b = tmp_path / "b" / "x.xml"
+    a.parent.mkdir()
+    b.parent.mkdir()
+    shutil.copy(FIXTURE, a)
+    shutil.copy(FIXTURE, b)
+    result = run_batch(_granted_template(), [a, b], tmp_path / "out", workers=2, timestamp="t5")
+    assert result.succeeded == 2
+    assert (tmp_path / "out" / "granted" / "x" / "properties.parquet").is_file()
+    assert (tmp_path / "out" / "granted" / "x (1)" / "properties.parquet").is_file()
+
+
+def test_run_batch_parallel_results_in_input_order(tmp_path: Path) -> None:
+    inputs: list[Path] = []
+    for name in ("c.xml", "a.xml", "b.xml"):  # deliberately not sorted
+        path = tmp_path / name
+        shutil.copy(FIXTURE, path)
+        inputs.append(path)
+    result = run_batch(_granted_template(), inputs, tmp_path / "out", workers=2, timestamp="t6")
+    assert [r.source for r in result.results] == [str(p) for p in inputs]
+
+
+def test_run_batch_should_stop_after_first_file(tmp_path: Path) -> None:
+    a = tmp_path / "a.xml"
+    b = tmp_path / "b.xml"
+    shutil.copy(FIXTURE, a)
+    shutil.copy(FIXTURE, b)
+    events: list[BatchEvent] = []
+    done = 0
+
+    def on_event(event: BatchEvent) -> None:
+        nonlocal done
+        events.append(event)
+        if event.message.startswith(("✓", "✗")):
+            done += 1
+
+    result = run_batch(
+        _granted_template(),
+        [a, b],
+        tmp_path / "out",
+        timestamp="t7",
+        on_event=on_event,
+        should_stop=lambda: done >= 1,
+    )
+    assert result.cancelled is True
+    assert (result.succeeded, len(result.results)) == (1, 1)
+    assert (tmp_path / "out" / "granted" / "run_t7.log").is_file()  # log still written
+    messages = [e.message for e in events]
+    assert any(m.startswith("Batch cancelled:") for m in messages)
+
+
+def test_run_batch_should_stop_immediately_parallel(tmp_path: Path) -> None:
+    a = tmp_path / "a.xml"
+    b = tmp_path / "b.xml"
+    shutil.copy(FIXTURE, a)
+    shutil.copy(FIXTURE, b)
+    result = run_batch(
+        _granted_template(),
+        [a, b],
+        tmp_path / "out",
+        workers=2,
+        timestamp="t8",
+        should_stop=lambda: True,
+    )
+    assert result.cancelled is True
+    # In-flight files may still finish; only never-started inputs are skipped.
+    assert len(result.results) <= 2
 
 
 def test_needed_tables_skips_flat_when_unused() -> None:
@@ -719,3 +819,15 @@ def test_every_step_kind_survives_a_zeroed_table(tmp_path: Path) -> None:
         tables = {"flat": empty}
         _apply_step(tables, step, EntityMemory(), set(), tmp_path, lambda e: None)
         assert tables["flat"].num_rows == 0
+
+
+def test_apply_export_empty_tables_writes_nothing(tmp_path: Path) -> None:
+    template = BatchTemplate(name="nothing", steps=[ExportStep(fmt="csv", tables=[])])
+    events: list[BatchEvent] = []
+    result = run_batch(
+        template, [FIXTURE], tmp_path / "out", timestamp="t9", on_event=events.append
+    )
+    assert result.succeeded == 1
+    out_dir = tmp_path / "out" / "nothing" / "sample_assignment"
+    assert list(out_dir.glob("*.csv")) == []  # [] is "nothing", not "everything"
+    assert any("no tables selected" in e.message for e in events)
