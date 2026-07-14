@@ -30,3 +30,42 @@ def test_cli_ingest_writes_manifest(tmp_path: Path) -> None:
     assert "assignments.parquet" in paths
     for output in manifest["outputs"]:
         assert (out / output["path"]).is_file()
+
+
+def test_templates_summary_writes_markdown(tmp_path: Path) -> None:
+    templates_dir = tmp_path / "templates"
+    templates_dir.mkdir()
+    (templates_dir / "demo.json").write_text(
+        json.dumps(
+            [
+                {
+                    "name": "demo",
+                    "load": {"limit": None},
+                    "steps": [
+                        {
+                            "kind": "filter",
+                            "table": "flat",
+                            "clauses": [
+                                {
+                                    "column": "nope_col",  # deliberate warning
+                                    "op": "contains",
+                                    "value": "x",
+                                    "value2": "",
+                                    "case_sensitive": False,
+                                }
+                            ],
+                            "combine": "and",
+                        },
+                        {"kind": "export", "fmt": "csv", "tables": ["flat"]},
+                    ],
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    out = tmp_path / "SUMMARY.md"
+    main(["templates-summary", "--templates", str(templates_dir), "--out", str(out)])
+    text = out.read_text(encoding="utf-8")
+    assert "### demo" in text
+    assert "1. Filter · flat · 1 clause(s) · AND" in text
+    assert "⚠" in text and "nope_col" in text

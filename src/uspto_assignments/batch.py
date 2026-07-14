@@ -2290,7 +2290,7 @@ def describe_step(step: BatchStep) -> str:  # noqa: PLR0911, PLR0912 - one line 
         portfolio = Path(step.portfolio_path).name or "(no file)"
         return f"CPC match · {step.table} vs {portfolio} · {step.portfolio_mode} → {step.out_table}"
     tables = "all tables" if step.tables is None else ", ".join(step.tables)
-    return f"Export · {step.fmt}{FORMAT_SUFFIX[step.fmt]} · {tables}"
+    return f"Export · {step.fmt} · {tables}"
 
 
 def run_preview(  # noqa: PLR0913 - a clear public entry point with keyword-only options
