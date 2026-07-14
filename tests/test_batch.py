@@ -819,3 +819,15 @@ def test_every_step_kind_survives_a_zeroed_table(tmp_path: Path) -> None:
         tables = {"flat": empty}
         _apply_step(tables, step, EntityMemory(), set(), tmp_path, lambda e: None)
         assert tables["flat"].num_rows == 0
+
+
+def test_apply_export_empty_tables_writes_nothing(tmp_path: Path) -> None:
+    template = BatchTemplate(name="nothing", steps=[ExportStep(fmt="csv", tables=[])])
+    events: list[BatchEvent] = []
+    result = run_batch(
+        template, [FIXTURE], tmp_path / "out", timestamp="t9", on_event=events.append
+    )
+    assert result.succeeded == 1
+    out_dir = tmp_path / "out" / "nothing" / "sample_assignment"
+    assert list(out_dir.glob("*.csv")) == []  # [] is "nothing", not "everything"
+    assert any("no tables selected" in e.message for e in events)

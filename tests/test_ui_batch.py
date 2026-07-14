@@ -634,3 +634,94 @@ def test_cancel_slot_requests_worker_stop(qtbot: Any, tmp_path: Path) -> None:
     qtbot.waitUntil(lambda: dialog._thread is None, timeout=15000)
     # with a single tiny input the run may already be past the stop check; either way it ends clean
     assert "Done:" in dialog._console.toPlainText()
+
+
+# -- export dialog state + destructive-action guards -----------------------
+
+
+def test_export_dialog_keeps_edits_when_tables_toggled(qtbot: Any) -> None:
+    create_app([])
+    dialog = ExportStepDialog()
+    qtbot.addWidget(dialog)
+    dialog._customize.setChecked(True)
+    current = dialog._editor._pick.currentText()
+    source_item = dialog._editor._grid.item(0, 0)
+    rename_item = dialog._editor._grid.item(0, 1)
+    assert source_item is not None and rename_item is not None
+    source_name = source_item.text()
+    rename_item.setText("renamed_out")
+
+    # unchecking an unrelated table re-seeds the editor; the in-progress rename must survive
+    for i in range(dialog._tables.count()):
+        item = dialog._tables.item(i)
+        if item is not None and item.text() != current:
+            item.setCheckState(Qt.CheckState.Unchecked)
+            break
+    step = dialog.step()
+    assert step.renames is not None
+    assert step.renames[current][source_name] == "renamed_out"
+
+
+def test_export_dialog_disables_ok_when_no_tables(qtbot: Any) -> None:
+    create_app([])
+    dialog = ExportStepDialog()
+    qtbot.addWidget(dialog)
+    assert dialog._ok is not None and dialog._ok.isEnabled()
+    for i in range(dialog._tables.count()):
+        dialog._tables.item(i).setCheckState(Qt.CheckState.Unchecked)  # type: ignore[union-attr]
+    assert not dialog._ok.isEnabled()
+    assert not dialog._hint.isHidden()
+    dialog._tables.item(0).setCheckState(Qt.CheckState.Checked)  # type: ignore[union-attr]
+    assert dialog._ok.isEnabled()
+    assert dialog._hint.isHidden()
+
+
+def test_delete_template_confirms_and_uses_saved_selection(
+    qtbot: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    create_app([])
+    store = BatchTemplateStore(tmp_path / "b.json")
+    store.add(_template())  # saved as "granted"
+    dialog = BatchDialog(store)
+    qtbot.addWidget(dialog)
+    dialog._saved.setCurrentIndex(1)  # select "granted" (index 0 is the placeholder)
+    dialog._template_name.setText("half-typed new name")  # must NOT decide what gets deleted
+
+    monkeypatch.setattr(
+        QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.StandardButton.No)
+    )
+    dialog._delete_template()
+    assert [t.name for t in store.load()] == ["granted"]  # declined -> untouched
+
+    monkeypatch.setattr(
+        QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes)
+    )
+    dialog._delete_template()
+    assert store.load() == []
+
+
+def test_build_reference_failure_does_not_pollute_path(
+    qtbot: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    create_app([])
+    dialog = ReferenceMatchStepDialog()
+    qtbot.addWidget(dialog)
+    dialog._reference.setText("/existing/ref.parquet")
+
+    def _boom(*_a: Any, **_k: Any) -> int:
+        raise ValueError("bad file")
+
+    monkeypatch.setattr(
+        bd.QFileDialog, "getOpenFileName", staticmethod(lambda *a, **k: ("/tmp/src.tsv", ""))
+    )
+    monkeypatch.setattr(
+        bd.QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: ("/tmp/dst.parquet", ""))
+    )
+    monkeypatch.setattr(bd, "extract_distinct_reference", _boom)
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox, "warning", staticmethod(lambda *a, **k: warnings.append(str(a[2])))
+    )
+    dialog._build_reference()
+    assert dialog._reference.text() == "/existing/ref.parquet"  # error never becomes the path
+    assert warnings and "bad file" in warnings[0]

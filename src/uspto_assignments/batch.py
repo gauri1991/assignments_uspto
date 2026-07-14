@@ -1277,8 +1277,15 @@ def _apply_export(
     tables: dict[str, pa.Table], step: ExportStep, source_dir: Path, emit: OnEvent
 ) -> list[str]:
     # Default export order: the known store tables first, then any derived/aggregate tables.
+    # ``tables=[]`` means "nothing" (only reachable via hand-edited templates); ``None`` means all.
     extras = [n for n in tables if n not in STORE_TABLES]
-    names = step.tables or [n for n in STORE_TABLES if n in tables] + extras
+    names = (
+        step.tables
+        if step.tables is not None
+        else [n for n in STORE_TABLES if n in tables] + extras
+    )
+    if not names:
+        emit(BatchEvent("info", "  export: no tables selected — nothing written"))
     written: list[str] = []
     for name in names:
         table = tables.get(name)

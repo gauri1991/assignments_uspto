@@ -437,21 +437,27 @@ class ExportStepDialog(QDialog):
         self._editor.setVisible(False)
         layout.addWidget(self._editor)
 
+        self._hint = QLabel("Check at least one table to export.")
+        self._hint.setVisible(False)
+        layout.addWidget(self._hint)
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
+        self._ok = buttons.button(QDialogButtonBox.StandardButton.Ok)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
         self._pending_columns = None if step is None else step.columns
         self._pending_renames = None if step is None else step.renames
+        self._editor_tables: list[str] = []  # tables currently loaded in the column editor
         if step is not None:
             index = self._format.findData(step.fmt)
             if index >= 0:
                 self._format.setCurrentIndex(index)
             if step.columns or step.renames:
                 self._customize.setChecked(True)
+        self._refresh_editor()  # prime the OK/hint state (a legacy step may have tables=[])
 
     def _checked_tables(self) -> list[str]:
         checked: list[str] = []
@@ -467,12 +473,17 @@ class ExportStepDialog(QDialog):
             self._refresh_editor()
 
     def _refresh_editor(self) -> None:
-        if self._customize.isChecked():
-            self._editor.set_tables(
-                self._checked_tables() or list(STORE_TABLES),
-                self._pending_columns,
-                self._pending_renames,
-            )
+        none_checked = not self._checked_tables()
+        if self._ok is not None:
+            self._ok.setEnabled(not none_checked)  # exporting nothing is a mistake, not a request
+        self._hint.setVisible(none_checked)
+        if not self._customize.isChecked():
+            return
+        if self._editor_tables:  # harvest in-progress edits before re-seeding the grid
+            self._pending_columns, self._pending_renames = self._editor.result(self._editor_tables)
+        tables = self._checked_tables() or list(STORE_TABLES)
+        self._editor.set_tables(tables, self._pending_columns, self._pending_renames)
+        self._editor_tables = tables
 
     def step(self) -> ExportStep:
         """Return the configured export step (``tables=None`` when all are selected)."""
@@ -1200,7 +1211,7 @@ class ReferenceMatchStepDialog(QDialog):
                 id_column=self._id_column.text().strip(),
             )
         except (OSError, ValueError, KeyError) as exc:
-            self._reference.setText(f"Build failed: {exc}")
+            QMessageBox.warning(self, "Build failed", f"Could not build compact reference:\n{exc}")
             return
         self._reference.setText(dst)
         self._name_column.setText("organization")  # the compact file's column names
@@ -1719,11 +1730,17 @@ class BatchDialog(QDialog):
         self._append_console(f"Saved template '{template.name}'")
 
     def _delete_template(self) -> None:
-        name = self._template_name.text().strip()
-        if name:
-            self._store.delete(name)
-            self._reload_templates()
-            self._append_console(f"Deleted template '{name}'")
+        # Prefer the selected saved template; the free-typed name is only a fallback so a
+        # half-typed new name can't silently delete an unrelated saved template.
+        name = self._saved.currentData() or self._template_name.text().strip()
+        if not name:
+            return
+        answer = QMessageBox.question(self, "Delete template", f"Delete saved template '{name}'?")
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._store.delete(name)
+        self._reload_templates()
+        self._append_console(f"Deleted template '{name}'")
 
     # -- inputs ------------------------------------------------------------
     def _add_files(self) -> None:
@@ -1754,12 +1771,13 @@ class BatchDialog(QDialog):
     ) -> BatchStep | None:
         """Open a step dialog with the columns available at ``index`` in scope; return new step."""
         global _available_ctx  # noqa: PLW0603 - modal, single-threaded schema context for dialogs
+        previous = _available_ctx
         _available_ctx = columns_after(self._load(), self._steps, index)
         try:
             dialog = dialog_cls(step, parent=self) if step is not None else dialog_cls(parent=self)  # type: ignore[arg-type]
             return dialog.step() if dialog.exec() == QDialog.DialogCode.Accepted else None
         finally:
-            _available_ctx = None
+            _available_ctx = previous
 
     def _add_step(self, dialog_cls: type[_StepDialog]) -> None:
         row = self._steps_list.currentRow()
