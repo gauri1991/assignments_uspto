@@ -517,7 +517,7 @@ class NormalizeStepDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Normalize step")
-        self.setMinimumWidth(440)
+        self.setMinimumWidth(560)  # wide enough for the long "Learn new canonicals…" checkbox label
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 16, 20, 16)
         layout.setSpacing(10)
