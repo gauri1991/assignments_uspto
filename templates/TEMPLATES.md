@@ -10,10 +10,10 @@ warnings for each template. Regenerate after any template change.
 ### 01 - Firm-to-firm transactions (clean, enriched)
 
 1. Filter · flat · 4 clause(s) · AND
-2. Reference match · flat.assignor_names vs reference.parquet · keep_matched
+2. Reference match · flat.assignor_names vs reference.parquet · keep_matched · score · review<95
 3. Classify · flat.assignee_names → assignee_names_type (rules)
 4. Filter · flat · 2 clause(s) · OR
-5. Reference match · flat.assignee_names vs reference.parquet · flag
+5. Reference match · flat.assignee_names vs reference.parquet · flag · score · review<95
 6. Compare · flat · assignor_names_assignee_id vs assignee_names_assignee_id · exact · drop_matches
 7. Normalize · flat.assignor_names → assignor_names_canonical (≥90)
 8. Normalize · flat.assignee_names → assignee_names_canonical (≥90)

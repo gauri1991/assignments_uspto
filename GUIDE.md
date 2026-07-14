@@ -774,6 +774,27 @@ raw PatentsView `.tsv`) the step fails and its table empties.
 > On Windows: create the `reference/` folder yourself (it's the only git-ignored input you must supply —
 > output folders like `out/`, `dictionary/` are auto-created). See the README's Windows section.
 
+### "reference file has no column '…'" — reference/step column mismatch
+
+Pre-run validation now checks that the reference file **actually contains** the configured
+`name_column`/`id_column`. The classic trigger: a compact `reference.parquet` built via
+**Build compact…** with the *Reference id column* field left blank has only an `organization`
+column, while the bundled templates configure `id_column: "assignee_id"`. Running anyway fails
+that file with a clear error naming the missing column and the columns the file does have.
+
+**Fixes:** rebuild the compact file with the id column filled in (`assignee_id`) — recommended,
+since the id powers the id-based self-transfer check — or clear the step's *Reference id column*
+to skip ids.
+
+### Reviewing marginal fuzzy matches (the review queue)
+
+Fuzzy accepts are not all equal: a name that scored 90 against the gazetteer deserves a look; a
+100 doesn't. Turn on **Add match-score column** and **Flag review below 95** on the fuzzy steps
+(see [Match confidence](#match-confidence--the-review-band)), filter `*_review = "true"` in the
+output, and work the **Entity memory ▸ Aliases** review queue (*Only aliases learned below N* →
+**Mark reviewed** / reassign / delete). Template **10 - Dropped sellers audit** is the ready-made
+audit view of what template 01's gazetteer gate excluded.
+
 ### `cpc_match` aborts with "CPC hit-rate … below the floor"
 
 The patent numbers and your CPC source's key format don't line up, so almost nothing joined — the

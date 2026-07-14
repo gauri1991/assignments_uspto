@@ -68,11 +68,11 @@ producing step can reference them:
 
 | Step | New column(s) on its `table` |
 |---|---|
-| `normalize` on `column` | `<column>_canonical` |
+| `normalize` on `column` | `<column>_canonical`; with `emit_score`: `<target>_score` (int 0–100); with `review_threshold>0`: `<target>_review` (`"true"`/`"false"`) |
 | `classify` on `column` | `<column>_type` (values `company` / `individual` / `unknown`) |
 | `derive` from `source` with `op` | `<source>_<op>` |
-| `compare` with `action: "flag"` | `<left>_matches_<right>` (values `"true"` / `"false"`) |
-| `reference_match` on `column` | `<column>_disambiguated`, `<column>_matched` (`"true"`/`"false"`), and `<column>_assignee_id` (only if `id_column` set) |
+| `compare` with `action: "flag"` | `<left>_matches_<right>` (values `"true"` / `"false"`); with `emit_score`: `<target>_score`; with `review_threshold>0`: `<target>_review` (added before any drop/keep filtering) |
+| `reference_match` on `column` | `<column>_disambiguated`, `<column>_matched` (`"true"`/`"false"`), `<column>_assignee_id` (only if `id_column` set); with `emit_score`: `<column>_match_score`; with `review_threshold>0`: `<column>_match_review` |
 | `fetch_cpc` | `cpc_codes` (list), `cpc_subclasses` (list), `cpc_lookup_status` |
 | `cpc_match` | creates **two new tables**: `matched_buyers_by_portfolio_patent` and `matched_buyers_overall` |
 | `aggregate` | creates a **new table** named `<table>_by_<group_by joined by _>` with columns = the group-by columns + `count` (+ `<count_distinct>_distinct` if set) |
@@ -203,13 +203,17 @@ omitted) **auto-derives** the name per §2a — prefer leaving it blank so names
 ### `normalize` — fuzzy-clean a name column to a canonical form
 ```json
 { "kind": "normalize", "table": "flat", "column": "assignor_names",
-  "target": "", "threshold": 90, "separator": "", "learn": true, "scorer": "wratio" }
+  "target": "", "threshold": 90, "separator": "", "learn": true, "scorer": "wratio",
+  "emit_score": false, "review_threshold": 0 }
 ```
 - `column` — the name column (e.g. `assignor_names`, `assignee_names`, or `name` on assignors/assignees).
 - `target` *(optional)* — output column; blank → `<column>_canonical`.
 - `threshold` *(optional)* — fuzzy match cutoff (default 90). `separator` *(optional)* — blank
   auto-uses `"; "` for `*_names` columns. `learn` *(optional)* — `true` grows the shared entity
   memory; `false` = match-only. `scorer` *(optional)* — see enum table.
+- `emit_score` *(optional)* — adds `<target>_score` (weakest party confidence, 0–100).
+  `review_threshold` *(optional, 0 = off)* — adds `<target>_review` flagging fuzzy accepts
+  scoring below it (exact 100 / unmatched 0 never flag).
 
 ### `classify` — label a name column company / individual / unknown
 ```json
@@ -221,11 +225,14 @@ omitted) **auto-derives** the name per §2a — prefer leaving it blank so names
 ### `compare` — compare two columns row-wise; flag or drop/keep matches
 ```json
 { "kind": "compare", "table": "flat", "left": "assignor_names_canonical", "right": "assignee_names_canonical",
-  "target": "", "method": "exact", "scorer": "wratio", "threshold": 90, "action": "flag" }
+  "target": "", "method": "exact", "scorer": "wratio", "threshold": 90, "action": "flag",
+  "emit_score": false, "review_threshold": 0 }
 ```
 - `left`/`right` — columns to compare (often the two `*_canonical` columns). `method` `exact`
   (fast) or `fuzzy` (uses `scorer`/`threshold`). `action` `flag` adds `<left>_matches_<right>`;
   `drop_matches`/`keep_matches` filter rows. Use to remove self-transfers (assignor == assignee).
+- `emit_score`/`review_threshold` *(optional)* — add `<target>_score` / `<target>_review`
+  (appended **before** drop/keep filtering, so surviving rows keep their score).
 
 ### `transfer_type` — keep only a chosen assignor→assignee pairing (preset)
 ```json
@@ -242,7 +249,8 @@ omitted) **auto-derives** the name per §2a — prefer leaving it blank so names
   "reference_path": "reference/g_assignee_disambiguated.tsv",
   "name_column": "disambig_assignee_organization", "id_column": "assignee_id",
   "target": "", "matched_target": "", "id_target": "",
-  "threshold": 90, "scorer": "wratio", "separator": "", "mode": "any", "delimiter": "", "action": "flag" }
+  "threshold": 90, "scorer": "wratio", "separator": "", "mode": "any", "delimiter": "", "action": "flag",
+  "emit_score": false, "review_threshold": 0 }
 ```
 - `reference_path` — path to a `.tsv`/`.csv`/`.parquet` on the machine that imports/runs the
   template (e.g. USPTO/PatentsView `g_assignee_disambiguated.tsv`, or a compact extract). **This
@@ -252,6 +260,10 @@ omitted) **auto-derives** the name per §2a — prefer leaving it blank so names
   `assignee_id`); leave `""` to skip. `delimiter` *(optional)* — blank auto-detects (`.tsv`→tab,
   `.csv`→comma). Outputs `<column>_disambiguated`, `<column>_matched`, and (if `id_column`)
   `<column>_assignee_id`. `mode` `any`/`all`; `action` `flag`/`keep_matched`/`drop_matched`.
+- `emit_score`/`review_threshold` *(optional)* — add `<column>_match_score` /
+  `<column>_match_review`. Validation now also checks the reference file actually **has** the
+  configured `name_column`/`id_column` (a compact parquet built without an id has only
+  `organization`), warning before the run instead of failing mid-run.
 
 ### `fetch_cpc` — attach CPC codes to a patent-number column (exact grant join)
 ```json
@@ -359,7 +371,13 @@ template → how to verify with the tool**.
 > `examples.json` (general recipes), and the single-purpose `01_…`–`07_…` set. **Scale note:** the
 > reviewed/original/examples templates point `reference_match` at the full multi-GB
 > `reference/g_assignee_disambiguated.tsv`, while the `0N_…` set uses a compact
-> `reference/reference.parquet` (build it once with **Build compact…**). Either is **safe at scale**
+> `reference/reference.parquet` (build it once with **Build compact…**), plus
+> `10_dropped_sellers_audit.json` — the audit companion to `01`: same firm-to-firm gate but it
+> *flags* assignors and exports only the unmatched sellers with their best gazetteer score, so you
+> can see exactly what `01`'s `keep_matched` gate excluded. **Confidence policy:** row-level output
+> templates (`01`, `05`, `10`) emit `*_match_score`/`*_match_review` columns; leaderboard/bridge
+> templates (`02`–`04`, `07`–`08`) aggregate afterwards, so score columns would be dropped and are
+> deliberately not enabled there. Either is **safe at scale**
 > now — the fuzzy blocking is capped/re-split (§4b) — but a template still re-scans its reference per
 > input file. For repeated, cross-run-stable buyer/seller identity at bulk scale, prefer the **ledger
 > CLI** (§9): it resolves once against a build-once dictionary. Rule of thumb: **templates = fast

@@ -77,7 +77,10 @@ read straight from the archive, so there's no need to unzip a multi-GB file firs
 ```
 
 Outputs: `out/assignments.parquet`, `out/assignors.parquet`, `out/assignees.parquet`,
-`out/properties.parquet`, and `out/assignments.xlsx` (with a `flat` sheet).
+`out/properties.parquet`, and `out/assignments.xlsx` (with a `flat` sheet) — plus a
+`manifest.json` audit record (command, input, duration, every output file with row counts).
+`uspto-assign templates-summary` regenerates `templates/TEMPLATES.md`, the reviewable numbered
+steps summary + validation warnings for every bundled template.
 
 ## Desktop UI (PyQt6, Metro style)
 
@@ -107,12 +110,18 @@ A native desktop viewer explores the parsed data interactively:
   final columns; a **Preview** runs the pipeline on a ~1,000-row sample and shows each step's result +
   row/column deltas; templates **duplicate / import / export** and ship with **example presets**.
   Point them at many `.xml`/`.zip` files or dataset folders and run in the background with a
-  **colour-coded live console** and a **determinate progress bar**, per-file error isolation, a run
-  log, and **folder-per-source** outputs (`<out>/<template>/run_<timestamp>/<source>/<table>.<ext>`, with `manifest.json` + `run.log` per run). Sequential by
-  default; *Workers > 1*
-  processes files in parallel (the console shows distinct worker PIDs + interleaved per-file
-  progress + a combined total). The parser **skips building unused tables** (notably the wide
-  `flat` table) for speed.
+  **colour-coded live console**, a **determinate progress bar**, a **Cancel** button (per-file
+  granularity; closing the window mid-run prompts and closes safely once the run stops), and
+  per-file error isolation. **Every run is a self-contained, audit-ready folder**
+  (`<out>/<template>/run_<timestamp>/`): `manifest.json` (template + step summaries, validation
+  warnings, per-file **per-step row deltas**, output paths), `summary.xlsx` (the same as
+  run/steps/outputs sheets), `run.log`, and the per-source outputs — plus a rolling
+  `runs_index.csv` at the output root (one line per run, across all templates). Templates are
+  **validated before every run** (warnings continue by default; `run_batch(strict=True)` aborts).
+  The output folder defaults to your last-used dir (or `data/out`) and file dialogs remember where
+  you last picked. Sequential by default; *Workers > 1* processes files in parallel (the console
+  shows distinct worker PIDs + interleaved per-file progress + a combined total). The parser
+  **skips building unused tables** (notably the wide `flat` table) for speed.
   - **Analysis steps**: *Deduplicate* (keep-first, by chosen key columns), *Select columns*,
     *Sort*, *Derive column* (year/month of a date, first split part, upper/lower case), and
     *Aggregate* — group by columns and **count** rows (plus an optional distinct count) into a new
@@ -126,8 +135,10 @@ A native desktop viewer explores the parsed data interactively:
   - **Match against reference** — *Match against reference* fuzzy-matches a name column against an
     external **USPTO/PatentsView disambiguated-assignee** file (a company gazetteer). A match
     normalizes the raw name to the disambiguated organization and captures its `assignee_id`
-    (adding `<col>_disambiguated` / `<col>_matched` / `<col>_assignee_id`); *keep-matched* drops the
-    rest (presumed individuals). Point it at the raw `g_assignee_disambiguated.tsv` (configurable
+    (adding `<col>_disambiguated` / `<col>_matched` / `<col>_assignee_id`, and optionally
+    `<col>_match_score` / `<col>_match_review` — see match confidence below); *keep-matched* drops
+    the rest (presumed individuals). Validation checks the reference file exists **and actually
+    has** the configured name/id columns before the run. Point it at the raw `g_assignee_disambiguated.tsv` (configurable
     name/id column + delimiter, streamed) or use **Build compact…** to pre-extract distinct
     organizations into a small reusable Parquet. Blocked fuzzy matching keeps it fast (millions of
     rows in seconds).
@@ -138,12 +149,18 @@ A native desktop viewer explores the parsed data interactively:
   *split separator* (auto-suggested `"; "` for concatenated `*_names` columns) normalizes each
   part; a *match-only* toggle uses a curated memory without adding new canonicals; and a *scorer*
   choice selects the rapidfuzz algorithm (WRatio, token-set, token-sort, partial, Jaro-Winkler…).
+  **Match confidence & review**: the fuzzy steps (normalize / reference match / compare) can emit a
+  `*_score` column (0–100, weakest party) and a `*_review` flag for matches accepted below a chosen
+  bar — the clerical-review band (typical setup: threshold 90, review below 95).
   The **learnable entity memory** (**Settings ▸ Entity memory**) is deduplicated, seeds from a
-  CSV/JSON file, and is stored in a **relocatable project file** (default `entities.json` in the
-  working folder), so it is portable, versionable, and reusable. Its dialog is a **full editor** —
-  searchable **Canonicals** (add / rename / merge / delete) and **Aliases** (reassign / delete)
-  tabs, with *Save*/*Cancel* (edits rebuild the fuzzy block index); plus Import / Export / *Change
-  location…* / *Clear*.
+  CSV/JSON file **or a multi-GB disambiguated-assignee reference** (*Seed from reference…*,
+  streamed off the GUI thread), and is stored in a **relocatable project file** (default
+  `entities.json`; fuzzy-learned aliases carry their learn-time score — v1 files load unchanged).
+  Its dialog is a **full editor** — searchable **Canonicals** (add / rename / merge / delete) and
+  **Aliases** tabs with a **Score column** and a **review queue** (*Only aliases learned below N* →
+  *Mark reviewed* / reassign / delete), with *Save*/*Cancel* (edits rebuild the fuzzy block index);
+  plus Import / Export / *Change location…* / *Clear*. The memory file is only rewritten when a run
+  actually learned something.
 
 Parsing runs on a background thread with a progress indicator, so multi-GB files never freeze the
 window, and data is held in a **memory-mapped Arrow store** for low, flat RAM use. Subtle 1px
