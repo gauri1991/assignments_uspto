@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Final
 
 import pyarrow as pa
+import pyarrow.compute as _pc
 import pyarrow.parquet as pq
 
 from .model import (
@@ -26,6 +27,9 @@ from .model import (
     schema_for,
 )
 from .parser import iter_records
+
+# pyarrow.compute is under-typed in the stubs; route through Any (see filters.py for rationale).
+pc: Any = _pc
 
 # Ordered table names in the store: the four normalized tables plus the wide flat view.
 STORE_TABLES: Final[list[str]] = [*TABLE_TYPES, "flat"]
@@ -113,8 +117,10 @@ class TableStore:
 
     @property
     def names(self) -> list[str]:
-        """Table names in canonical order."""
-        return [n for n in STORE_TABLES if n in self.tables]
+        """Table names — the five canonical tables first, then any extra tables (e.g. a viewer)."""
+        canonical = [n for n in STORE_TABLES if n in self.tables]
+        extras = [n for n in self.tables if n not in STORE_TABLES]
+        return canonical + extras
 
     def table(self, name: str) -> pa.Table:
         """Return one table by name (raises ``KeyError`` if absent)."""
@@ -311,3 +317,55 @@ def open_dataset(store_dir: Path) -> TableStore:
     if any((store_dir / f"{name}.parquet").is_file() for name in STORE_TABLES):
         return open_parquet_store(store_dir)
     raise FileNotFoundError(f"no Arrow (.arrow) or Parquet (.parquet) tables in {store_dir}")
+
+
+TABLE_FILE_SUFFIXES: Final = (".parquet", ".arrow", ".feather", ".csv")
+
+
+def _stringify_column(column: Any) -> Any:
+    """Cast one column to string for the generic viewer (lists joined with ``"; "``)."""
+    col: Any = column.combine_chunks()
+    if pa.types.is_string(col.type):
+        return col
+    if pa.types.is_list(col.type) or pa.types.is_large_list(col.type):
+        joined = [
+            None if value is None else "; ".join("" if v is None else str(v) for v in value)
+            for value in col.to_pylist()
+        ]
+        return pa.array(joined, type=pa.string())
+    try:
+        return pc.cast(col, pa.string())
+    except (pa.ArrowInvalid, pa.ArrowNotImplementedError):  # structs/maps/etc. → Python str
+        return pa.array([None if v is None else str(v) for v in col.to_pylist()], type=pa.string())
+
+
+def read_table_file(path: Path) -> pa.Table:
+    """Read a single ``.parquet``/``.arrow``/``.feather``/``.csv`` file into an all-string table.
+
+    Every column is cast to string so the interactive viewer's filter/sort/model (built for text)
+    work uniformly; values render and export exactly as shown. Type-preserving round-trips are not
+    the goal — this is for viewing arbitrary files and converting them to CSV/JSON/Excel/etc.
+
+    Raises:
+        ValueError: For an unsupported file extension.
+        FileNotFoundError: If ``path`` does not exist.
+    """
+    if not path.is_file():
+        raise FileNotFoundError(f"file not found: {path}")
+    suffix = path.suffix.lower()
+    table: Any  # pyarrow readers are under-typed in the stubs; route the result through Any
+    if suffix == ".parquet":
+        table = pq.read_table(str(path))  # pyright: ignore[reportUnknownMemberType]
+    elif suffix in (".arrow", ".feather"):
+        with pa.OSFile(str(path), "rb") as handle:
+            table = pa.ipc.open_file(handle).read_all()  # Arrow IPC (Feather v2)
+    elif suffix == ".csv":
+        import pyarrow.csv as pa_csv  # noqa: PLC0415 - lazy; only for CSV
+
+        table = pa_csv.read_csv(str(path))
+    else:
+        raise ValueError(f"unsupported file type {suffix!r} (use {', '.join(TABLE_FILE_SUFFIXES)})")
+    result: pa.Table = pa.table(
+        {name: _stringify_column(table.column(name)) for name in table.column_names}
+    )
+    return result

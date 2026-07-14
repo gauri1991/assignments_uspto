@@ -102,6 +102,7 @@ from .tables import (
     open_parquet_store,
     open_store,
     parse_to_store,
+    read_table_file,
     rows_to_table,
 )
 from .writers import write_excel, write_parquet
@@ -203,6 +204,7 @@ __all__ = [
     "open_store",
     "parse_to_store",
     "query",
+    "read_table_file",
     "reconcile_cpc",
     "reference_columns",
     "resolve_mentions",
