@@ -103,8 +103,9 @@ A native desktop viewer explores the parsed data interactively:
   a `_filtered`/`_selected` suffix for subsets) and never overwrite — a ` (n)` counter is added.
 - **Batch processing** (**Settings ▸ Batch processing**) — a Power-Query-style **Applied-Steps**
   pipeline builder: reusable **templates** of atomic steps (**filter**, **normalize**, **classify**,
-  **compare**, **transfer type**, **reference match**, **deduplicate**, **select**, **sort**,
-  **derive**, **aggregate**, **export**) that you **reorder / duplicate / enable-disable / insert**,
+  **compare**, **transfer type**, **reference match**, **fetch CPC**, **attach CPC from file**,
+  **CPC match**, **deduplicate**, **select**, **sort**, **derive**, **aggregate**, **export**) that
+  you **reorder / duplicate / enable-disable / insert**,
   **double-click to edit**, and validate (⚠ badges for missing columns). Dialogs are **schema-aware**
   (they offer columns added by earlier steps); the **Export** step can pick, **order, and rename** the
   final columns; a **Preview** runs the pipeline on a ~1,000-row sample and shows each step's result +
@@ -119,7 +120,10 @@ A native desktop viewer explores the parsed data interactively:
   `runs_index.csv` at the output root (one line per run, across all templates). Templates are
   **validated before every run** (warnings continue by default; `run_batch(strict=True)` aborts).
   The output folder defaults to your last-used dir (or `data/out`) and file dialogs remember where
-  you last picked. Sequential by default; *Workers > 1* processes files in parallel (the console
+  you last picked. **Save each step's output** (a per-run checkbox) additionally writes every
+  enabled step's resulting table to `<source>/steps/NN_<table>.parquet` — one lossless, reopenable
+  file per step — so you can open and validate each intermediate (best on a shortlisted set).
+  Sequential by default; *Workers > 1* processes files in parallel (the console
   shows distinct worker PIDs + interleaved per-file progress + a combined total). The parser
   **skips building unused tables** (notably the wide `flat` table) for speed.
   - **Analysis steps**: *Deduplicate* (keep-first, by chosen key columns), *Select columns*,
@@ -142,6 +146,15 @@ A native desktop viewer explores the parsed data interactively:
     name/id column + delimiter, streamed) or use **Build compact…** to pre-extract distinct
     organizations into a small reusable Parquet. Blocked fuzzy matching keeps it fast (millions of
     rows in seconds).
+  - **CPC enrichment & portfolio matching** — *Fetch CPC* attaches classification codes to a
+    patent-number column (`cpc_codes` / `cpc_subclasses` / `cpc_lookup_status`) via the live
+    **USPTO Open Data Portal API** (`api.uspto.gov`, `X-API-KEY`; configure it in
+    **Settings ▸ CPC / USPTO API data source**, which has a **Test connection** button and is
+    **offline by default** — fetch needs an exported `USPTO_ODP_API_KEY`, the network posture set
+    to allow, and a per-run *Allow network* tick). *Attach CPC from file* does the same join
+    **fully offline from an uploaded PatSeer/CSV/Parquet export** (a separator splits multi-code
+    cells) — no key, no network. *CPC match* then ranks buyers per sales-package patent by CPC
+    overlap. Bundled templates `08`–`11` cover the enrich → match → file-attach flows.
 - **Name normalization** — a normalize step fuzzy-matches (rapidfuzz) an assignor/assignee name
   column to canonical forms, adding a `<column>_canonical` column (auto-derived, so multiple
   normalize steps never clobber each other). Matching is **exact-alias-first then fuzzy**, and

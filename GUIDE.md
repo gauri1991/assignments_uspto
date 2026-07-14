@@ -465,7 +465,7 @@ to the buyers most likely to want it — is done with two dedicated batch steps:
 are **exact joins on the normalized grant number**, so they get their own step kinds (pointing
 `reference_match` at patent numbers would silently corrupt them).
 
-**Configure the source once — *Settings ▸ CPC data source*.** The dialog edits a project config file
+**Configure the source once — *Settings ▸ CPC / USPTO API data source*.** The dialog edits a project config file
 (`cpc_config.json`, saved in the working folder, shareable — it holds **no secret**) covering:
 
 - **Source**: **USPTO ODP / PatentSearch API** (default) or a **local bulk file**
@@ -729,7 +729,7 @@ The end-to-end "who should I sell this patent to?" flow. It ships as two importa
 they contain, so you can also build them by hand. See [CPC matching](#95-cpc-matching-fetch--rank-buyers)
 for the config.
 
-*One-time setup:* open *Settings ▸ CPC data source*. Either set **Source = Local bulk file** and point
+*One-time setup:* open *Settings ▸ CPC / USPTO API data source*. Either set **Source = Local bulk file** and point
 it at a PatentsView `g_cpc_current.tsv` (fully offline), **or** keep **Source = USPTO ODP / PatentSearch
 API** and `export USPTO_ODP_API_KEY=…` in your shell. Import both templates via
 *Settings ▸ Batch processing*.
@@ -749,8 +749,26 @@ API** and `export USPTO_ODP_API_KEY=…` in your shell. Import both templates vi
 
 Output: per portfolio patent, a ranked buyer shortlist (overlap strength, in-domain patent count, last
 acquisition date, off-gazetteer flag), plus a cross-portfolio buyer summary. Tune grain / metric /
-threshold / ranking weights in *Settings ▸ CPC data source*. A low `cpc_hit_rate` **aborts** the match
+threshold / ranking weights in *Settings ▸ CPC / USPTO API data source*. A low `cpc_hit_rate` **aborts** the match
 (a patent-number-format mismatch — see [Troubleshooting](#11-troubleshooting--known-issues)).
+
+**F. Attach CPC from a PatSeer/CSV export — offline, no API (template `11`)**
+
+When you already have CPC codes in a spreadsheet (a PatSeer export, or any patent→CPC CSV/TSV/Parquet),
+the **Attach CPC from file** step joins them on without the network. Ships as
+`11_attach_cpc_from_file.json`:
+
+1. **Filter** the firm-to-firm gate **and** `doc_kind = B2` (CPC is grant-only, so shortlist to grants
+   first — this is the "shortlist, then CPC" pattern).
+2. **Attach CPC from file** on `doc_number`: browse to your export, set **File patent column**
+   (`Publication Number`), **File CPC column** (`CPC`), and the **separator** — `;` splits a cell that
+   packs several CPC codes (typical PatSeer), blank = one code per row. Adds
+   `cpc_codes`/`cpc_subclasses`/`cpc_lookup_status`, exactly like *Fetch CPC* but fully offline.
+3. **Derive** `year`, then **Export** the CPC-tagged rows.
+
+Put your export where the step points (`cpc/patseer_export.csv`) or re-point the step; no key, no
+network, no cache. Ideal after you've filtered down to the records you care about. Tip: turn on
+**Save each step's output** to drop each step's table into `steps/` and eyeball the join.
 
 ---
 
