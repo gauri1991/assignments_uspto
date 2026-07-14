@@ -531,6 +531,8 @@ Each template is applied to **each input independently**. Inputs can be USPTO `.
    **double-click a step to edit** it; *Remove*.
 5. **Output** — defaults to your last-used folder (or `data/out`); **Workers** (1 = sequential;
    >1 processes files in parallel). File dialogs remember where you last picked.
+   **Save each step's output** (checkbox) writes every enabled step's resulting table to
+   `<source>/steps/NN_<table>.parquet` so you can open and check each intermediate — see below.
 6. **Run batch** — watch the live **console** and the per-file progress bar; a run log is written
    too. A **Cancel** button appears while a run is active (cancellation is per-file: the file in
    flight finishes, the rest are skipped, and the summary notes what was cancelled). Closing the
@@ -550,6 +552,26 @@ Each template is applied to **each input independently**. Inputs can be USPTO `.
 ```
 
 Re-running never mixes with earlier outputs (a duplicate timestamp gets a `` (1)`` suffix).
+
+**Save each step's output (step-by-step review).** Tick the checkbox to trace the pipeline: every
+enabled step's resulting table(s) are written under each source's `steps/` folder as
+`NN_<table>.parquet` (`NN` = step number), so you can open any intermediate and check exactly what
+that step produced — filter → normalize → match, one file each:
+
+```
+<source-stem>/
+├── steps/
+│   ├── 01_flat.parquet        ← after step 1 (e.g. Filter)
+│   ├── 02_flat.parquet        ← after step 2 (e.g. Normalize)
+│   └── 03_flat.parquet        ← after step 3 (e.g. Attach CPC)
+└── <table>.<ext>              ← the final Export outputs
+```
+
+The files are **Parquet** (lossless, list columns like `cpc_codes` intact) — reopen any of them
+in the app via *Open dataset folder* (point at a folder holding one). Steps that create a new table
+(Aggregate, CPC match) trace that table too; the Export step writes the real exports, not a trace.
+The manifest lists every trace file. Leave the box **off** for normal runs — tracing multiplies the
+files written, so it's meant for reviewing/validating on a **shortlisted** set, not bulk runs.
 
 **Parallel runs** — with *Workers > 1* and multiple inputs, files are processed in separate
 processes; the console shows distinct worker **PIDs**, interleaved per-file progress, and a combined
@@ -620,6 +642,17 @@ Source/cache/offline behavior come from the project CPC config, **not** the step
 join on the normalized grant number — deliberately *not* the fuzzy `reference_match` step (which,
 pointed at patent numbers, would silently corrupt them). **Offline by default**: uncached numbers are
 fetched only when *Allow network* is checked for the run.
+
+#### Attach CPC from file
+Same output as *Fetch CPC* (`cpc_codes`, `cpc_subclasses`, `cpc_lookup_status`), but the codes come
+from an **uploaded file** — a PatSeer export, or any CSV/TSV/Parquet of patent→CPC — instead of the
+API. **Fully offline, no cache, no key.** Fields: `table`, `column` (the table's patent-number
+column) + `kind_column`, `source_path` (browse to the file), `patent_column` (the file's
+patent-number column, default `Publication Number`), `code_column` (the file's CPC column, default
+`CPC`), and `separator` — set it (e.g. `;` or `|`) to split a cell that packs **several CPC codes**
+(typical PatSeer), or leave it blank for one code per row (USPTO `g_cpc_current` bulk layout). The
+join normalizes the same grant numbers as *Fetch CPC*, so it's exact and grant-only. Ideal after
+shortlisting records — attach CPC from a targeted export without touching the network.
 
 #### CPC match
 Match a sales-package portfolio against buyers' CPC footprints and rank buyers per portfolio patent
