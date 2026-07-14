@@ -11,6 +11,7 @@ import tempfile
 from collections.abc import Callable
 from pathlib import Path
 
+import pyarrow as pa
 from PyQt6.QtCore import QObject, QThread
 from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import (
@@ -28,11 +29,13 @@ from PyQt6.QtWidgets import (
 
 from uspto_assignments import (
     FORMAT_SUFFIX,
+    TABLE_FILE_SUFFIXES,
     ExportFormat,
     Query,
     TableStore,
     exporters,
     open_dataset,
+    read_table_file,
     scope_suffix,
     unique_path,
 )
@@ -46,6 +49,7 @@ from .settings import (
     UiStateStore,
 )
 from .widgets.batch_dialog import BatchDialog
+from .widgets.column_editor import ColumnEditorDialog
 from .widgets.cpc_settings_dialog import CpcSettingsDialog
 from .widgets.entity_dialog import EntityDialog
 from .widgets.export_dialog import ExportDialog
@@ -58,6 +62,10 @@ from .widgets.table_panel import TablePanel
 from .workers import CallWorker, ParseWorker
 
 _OPEN_FILTER = "USPTO assignment (*.xml *.zip);;All files (*)"
+_TABLE_FILE_FILTER = (
+    "Data files (*.parquet *.arrow *.feather *.csv);;Parquet (*.parquet);;"
+    "Arrow/Feather (*.arrow *.feather);;CSV (*.csv);;All files (*)"
+)
 _SAVE_FILTERS: dict[ExportFormat, str] = {
     "parquet": "Parquet (*.parquet)",
     "xlsx": "Excel (*.xlsx)",
@@ -102,6 +110,7 @@ class MainWindow(QMainWindow):
         self._landing = LandingPage()
         self._landing.open_file_requested.connect(self._choose_file)
         self._landing.open_folder_requested.connect(self._choose_folder)
+        self._landing.open_table_requested.connect(self._choose_table_file)
         self._landing.open_recent_requested.connect(self._open_recent)
         self._landing.clear_recent_requested.connect(self._clear_recent)
         self._tabs = QTabWidget()
@@ -129,11 +138,15 @@ class MainWindow(QMainWindow):
     def _build_actions(self) -> None:
         self._act_open = self._make_action("&Open XML/ZIP…", self._choose_file, "Ctrl+O")
         self._act_open_ds = self._make_action("Open &dataset folder…", self._choose_folder)
+        self._act_open_table = self._make_action(
+            "View &Parquet / data file…", self._choose_table_file
+        )
         self._act_save = self._make_action("&Save processed…", self._save_processed, "Ctrl+S")
         self._act_export = self._make_action(
             "&Export current table…", self._export_current, "Ctrl+E"
         )
         self._act_export_all = self._make_action("Export &all tables…", self._export_all)
+        self._act_columns = self._make_action("Edit c&olumns…", self._edit_columns)
         self._act_close = self._make_action("&Close dataset", self._close_dataset, "Ctrl+W")
         self._act_exit = self._make_action("E&xit", self.close)
         self._act_save_query = self._make_action("&Save current query…", self._save_query)
@@ -146,6 +159,7 @@ class MainWindow(QMainWindow):
             self._act_save,
             self._act_export,
             self._act_export_all,
+            self._act_columns,
             self._act_close,
             self._act_save_query,
             self._act_manage_queries,
@@ -167,7 +181,9 @@ class MainWindow(QMainWindow):
             return
         file_menu.addAction(self._act_open)
         file_menu.addAction(self._act_open_ds)
+        file_menu.addAction(self._act_open_table)
         file_menu.addSeparator()
+        file_menu.addAction(self._act_columns)
         file_menu.addAction(self._act_save)
         file_menu.addAction(self._act_export)
         file_menu.addAction(self._act_export_all)
@@ -240,6 +256,26 @@ class MainWindow(QMainWindow):
         self._source_stem = path.name
         self._record_recent(path, "dataset")
 
+    def _choose_table_file(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "View Parquet / data file", self._ui_state.last_dir("input"), _TABLE_FILE_FILTER
+        )
+        if not path:
+            return
+        self._ui_state.set_last_dir("input", str(Path(path).parent))
+        self._open_table_file(Path(path))
+
+    def _open_table_file(self, path: Path) -> None:
+        """Load a single Parquet/Arrow/Feather/CSV file into the viewer as a one-table dataset."""
+        try:
+            table = read_table_file(path)
+        except (FileNotFoundError, OSError, ValueError, pa.ArrowInvalid) as exc:
+            self._set_status(f"Could not open {path.name}: {exc}")
+            return
+        self.load_store(TableStore({path.stem: table}))
+        self._source_stem = path.stem
+        self._record_recent(path, "table")
+
     def _open_recent(self, raw_path: str) -> None:
         path = Path(raw_path)
         if not path.exists():
@@ -247,6 +283,8 @@ class MainWindow(QMainWindow):
             return
         if path.is_dir():
             self._open_dataset_folder(path, LoadTemplate())
+        elif path.suffix.lower() in TABLE_FILE_SUFFIXES:
+            self._open_table_file(path)
         else:
             self._start_parse(path, LoadTemplate())
 
@@ -467,6 +505,27 @@ class MainWindow(QMainWindow):
         if self._store is not None and 0 <= index < len(self._store.names):
             return self._store.names[index]
         return "table"
+
+    # -- edit columns ------------------------------------------------------
+    def _edit_columns(self) -> None:
+        """Keep / reorder / rename / drop the current table's columns, then reload the view."""
+        panel = self.current_panel()
+        if panel is None or self._store is None:
+            return
+        name = self._current_table_name()
+        dialog = ColumnEditorDialog(list(panel.table.column_names), parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        kept, renames = dialog.column_plan()
+        if not kept:
+            self._set_status("Keep at least one column.")
+            return
+        reshaped = panel.table.select(kept)
+        reshaped = reshaped.rename_columns([renames.get(c, c) for c in reshaped.column_names])
+        tables = dict(self._store.tables)
+        tables[name] = reshaped
+        self.load_store(TableStore(tables))
+        self._set_status(f"'{name}': kept {len(kept)} column(s)")
 
     # -- saved queries -----------------------------------------------------
     def _save_query(self) -> None:

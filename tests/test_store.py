@@ -4,16 +4,20 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 from uspto_assignments import (
     STORE_TABLES,
+    TableStore,
     columns_for,
     export_store,
     open_dataset,
     open_parquet_store,
     open_store,
     parse_to_store,
+    read_table_file,
 )
 from uspto_assignments_ui.settings import UiStateStore
 
@@ -137,3 +141,42 @@ def test_ui_state_store_roundtrip_and_corrupt_file(tmp_path: Path) -> None:
 
     (tmp_path / "ui_state.json").write_text("{not json", encoding="utf-8")
     assert UiStateStore(tmp_path / "ui_state.json").last_dir("input") == ""  # corrupt -> ""
+
+
+def _write_parquet(path: Path, table: pa.Table) -> None:
+    pq.write_table(table, str(path))  # pyright: ignore[reportUnknownMemberType]
+
+
+def test_read_table_file_stringifies_all_types(tmp_path: Path) -> None:
+    table = pa.table(
+        {
+            "id": pa.array([1, 2], pa.int64()),
+            "name": ["ACME", "GLOBEX"],
+            "codes": pa.array([["H04L", "G06F"], ["A61F"]], pa.list_(pa.string())),
+            "flag": [True, False],
+        }
+    )
+    _write_parquet(tmp_path / "f.parquet", table)
+    out = read_table_file(tmp_path / "f.parquet")
+    assert all(isinstance(v, str) for v in out.column("id").to_pylist())  # everything is text now
+    assert out.column("id").to_pylist() == ["1", "2"]
+    assert out.column("codes").to_pylist() == ["H04L; G06F", "A61F"]  # list joined
+    assert out.column("flag").to_pylist() == ["true", "false"]
+
+
+def test_read_table_file_csv_and_unsupported(tmp_path: Path) -> None:
+    (tmp_path / "g.csv").write_text("a,b\n1,hi\n2,yo\n", encoding="utf-8")
+    assert read_table_file(tmp_path / "g.csv").to_pylist() == [
+        {"a": "1", "b": "hi"},
+        {"a": "2", "b": "yo"},
+    ]
+    (tmp_path / "x.txt").write_text("nope", encoding="utf-8")
+    with pytest.raises(ValueError, match="unsupported file type"):
+        read_table_file(tmp_path / "x.txt")  # extension not supported
+    with pytest.raises(FileNotFoundError):
+        read_table_file(tmp_path / "missing.parquet")
+
+
+def test_table_store_names_include_non_canonical(tmp_path: Path) -> None:
+    store = TableStore({"my_export": pa.table({"x": ["1"]})})
+    assert store.names == ["my_export"]  # a viewer table (not one of the 5) is still listed

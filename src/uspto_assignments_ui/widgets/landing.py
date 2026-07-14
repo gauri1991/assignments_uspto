@@ -18,6 +18,7 @@ class LandingPage(QWidget):
 
     open_file_requested = pyqtSignal()
     open_folder_requested = pyqtSignal()
+    open_table_requested = pyqtSignal()  # a single Parquet/Arrow/Feather/CSV file to view
     open_recent_requested = pyqtSignal(str)  # the recent path
     clear_recent_requested = pyqtSignal()
 
@@ -33,8 +34,11 @@ class LandingPage(QWidget):
         open_xml.clicked.connect(lambda _checked=False: self.open_file_requested.emit())
         open_folder = Tile("Open\ndataset\nfolder", variant="neutral")
         open_folder.clicked.connect(lambda _checked=False: self.open_folder_requested.emit())
+        open_table = Tile("View\nParquet /\ndata file", variant="neutral")
+        open_table.clicked.connect(lambda _checked=False: self.open_table_requested.emit())
         grid.add_tile(open_xml)
         grid.add_tile(open_folder)
+        grid.add_tile(open_table)
         layout.addWidget(grid)
 
         layout.addWidget(
