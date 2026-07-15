@@ -102,6 +102,70 @@ def test_batch_dialog_builds_template_from_ui(qtbot: Any, tmp_path: Path) -> Non
     assert isinstance(template.steps[1], ExportStep)
 
 
+def test_add_folder_expands_xml_zip_recursively(
+    qtbot: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    create_app([])
+    dialog = BatchDialog(BatchTemplateStore(tmp_path / "batch.json"))
+    qtbot.addWidget(dialog)
+    folder = tmp_path / "dumps"
+    (folder / "sub").mkdir(parents=True)
+    (folder / "a.xml").write_text("<x/>", encoding="utf-8")
+    (folder / "b.zip").write_text("", encoding="utf-8")
+    (folder / "sub" / "c.XML").write_text("<x/>", encoding="utf-8")  # nested, mixed case
+    (folder / "notes.txt").write_text("skip me", encoding="utf-8")  # ignored
+
+    monkeypatch.setattr(
+        bd.QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: str(folder))
+    )
+    dialog._add_folder()
+    added = sorted(
+        Path(dialog._inputs.item(i).text()).name  # type: ignore[union-attr]
+        for i in range(dialog._inputs.count())
+    )
+    assert added == ["a.xml", "b.zip", "c.XML"]  # every .xml/.zip, recursive; the .txt is skipped
+
+
+def test_add_folder_adds_parsed_dataset_folder_as_single_input(
+    qtbot: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    create_app([])
+    dialog = BatchDialog(BatchTemplateStore(tmp_path / "batch.json"))
+    qtbot.addWidget(dialog)
+    dataset = tmp_path / "dataset"
+    dataset.mkdir()
+    (dataset / "flat.parquet").write_text("", encoding="utf-8")  # looks like a parsed dataset
+
+    monkeypatch.setattr(
+        bd.QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: str(dataset))
+    )
+    dialog._add_folder()
+    paths = [
+        dialog._inputs.item(i).text()  # type: ignore[union-attr]
+        for i in range(dialog._inputs.count())
+    ]
+    assert paths == [str(dataset)]  # the dataset folder itself is the single input
+
+
+def test_add_folder_with_nothing_usable_adds_no_inputs(
+    qtbot: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    create_app([])
+    dialog = BatchDialog(BatchTemplateStore(tmp_path / "batch.json"))
+    qtbot.addWidget(dialog)
+    empty = tmp_path / "empty"
+    empty.mkdir()
+
+    monkeypatch.setattr(
+        bd.QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: str(empty))
+    )
+    monkeypatch.setattr(  # suppress the "nothing to add" popup
+        bd.QMessageBox, "information", staticmethod(lambda *a, **k: QMessageBox.StandardButton.Ok)
+    )
+    dialog._add_folder()
+    assert dialog._inputs.count() == 0
+
+
 def test_batch_dialog_runs_and_writes_output(qtbot: Any, tmp_path: Path) -> None:
     create_app([])
     store = BatchTemplateStore(tmp_path / "batch.json")
