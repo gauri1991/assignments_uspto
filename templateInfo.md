@@ -350,6 +350,10 @@ omitted) **auto-derives** the name per §2a — prefer leaving it blank so names
 - Prefer `parquet`/`csv` for large outputs; `xlsx` is slow above ~100k rows.
 - Outputs are written to `<output-folder>/<template-name>/run_<timestamp>/<source-stem>/<table>.<ext>` (each run also gets a `manifest.json` audit record and `run.log`) (the output
   folder and inputs are chosen in the app, **not** in the template).
+- **Convert mode** (a per-run checkbox in the batch dialog, *not* a template field): outputs land
+  directly in the chosen folder named `<source-stem>_<table>.<ext>`, with no run subfolder and no
+  manifest/summary. The bundled **12 - Convert to Parquet** template (a single `export` step,
+  `fmt:"parquet"`, no `tables` → all five) is the intended pairing for bulk XML/ZIP → Parquet.
 
 ---
 
