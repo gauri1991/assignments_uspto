@@ -106,7 +106,7 @@ Example: after `{"kind":"normalize","table":"flat","column":"assignor_names"}`, 
 | filter clause | `op` | `contains`, `equals`, `not_equals` (null-safe exclusion), `starts_with`, `not_empty`, `is_empty`, `in_range` |
 | filter | `combine` | `and`, `or` |
 | normalize / compare / reference_match | `scorer` | `wratio` (default), `token_set`, `token_sort`, `partial`, `qratio`, `ratio`, `jaro_winkler` |
-| classify / transfer_type | `method` | `rules` (default), `probablepeople` (ML; in the default install, falls back to rules if absent) |
+| classify / transfer_type | `method` | `rules` (default), `probablepeople` (ML; opt-in `pip install ".[ml]"`, falls back to rules if absent) |
 | classify | `mode` | `all` (default), `any`, `first`, `majority` |
 | classify output / transfer_type types | entity type | `company`, `individual`, `unknown` |
 | compare | `method` | `exact` (default), `fuzzy` |
@@ -150,7 +150,7 @@ so a crowded prefix never slows a match — this cap is shared by `normalize`, `
 the ledger pipeline, so full-`g_assignee_disambiguated.tsv` runs are safe at scale.
 
 **`classify`** — `method: "rules"` (default; legal-suffix + org keywords, and the `LAST, FIRST`
-person form) or `probablepeople` (ML; in the default install, falls back to rules if absent). `mode` combines
+person form) or `probablepeople` (ML; opt-in `pip install ".[ml]"`, falls back to rules if absent). `mode` combines
 a multi-party `*_names` value: `all` (one agreed type across every party, else `unknown`), `any`
 (company if any party is), `first`, `majority`.
 

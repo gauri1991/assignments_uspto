@@ -17,7 +17,14 @@ numpy>=1.26
 openpyxl>=3.1
 rapidfuzz>=3
 duckdb>=1.0
-probablepeople>=0.5  # CRF name classifier for the ML classify method (rules fallback if ever absent)
+
+# --- optional ML classify backend (opt in — NOT installed by default) ---
+# Uncomment to enable the probablepeople ML classifier. It pulls C extensions
+# (python-crfsuite, doublemetaphone) that lack wheels for the newest Pythons (e.g. 3.14 as of
+# mid-2026) and usually fail to build there — enable it only on Python 3.12/3.13 (which have wheels)
+# or where a C++ build toolchain is present. The rule-based classifier is the default and needs none
+# of this: classify falls back to rules (with a one-time note) if a step selects it while absent.
+# probablepeople>=0.5
 
 # --- desktop UI ---
 PyQt6>=6.6
