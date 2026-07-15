@@ -69,6 +69,7 @@ from uspto_assignments import (
     dump_templates,
     extract_distinct_reference,
     load_templates,
+    probablepeople_available,
     reference_columns,
     run_preview,
     scorer_names,
@@ -104,10 +105,18 @@ _DERIVE_OPS: list[tuple[str, str]] = [
     ("Uppercase", "upper"),
     ("Lowercase", "lower"),
 ]
-_CLASSIFY_METHODS: list[tuple[str, str]] = [
-    ("Rules (fast, no dependency)", "rules"),
-    ("ML (probablepeople, if installed)", "probablepeople"),
-]
+
+
+def _classify_methods() -> list[tuple[str, str]]:
+    """Classify method options; the ML label reflects whether ``probablepeople`` is installed."""
+    ml_label = (
+        "ML (probablepeople)"
+        if probablepeople_available()
+        else "ML (probablepeople — not installed)"
+    )
+    return [("Rules (fast, no dependency)", "rules"), (ml_label, "probablepeople")]
+
+
 _COMBINE_MODES: list[tuple[str, str]] = [
     ("All parties agree", "all"),
     ("Any party", "any"),
@@ -929,7 +938,7 @@ class ClassifyStepDialog(QDialog):
         self._target = QLineEdit()
         self._target.setPlaceholderText("(auto: <column>_type)")
         self._method = QComboBox()
-        for label, value in _CLASSIFY_METHODS:
+        for label, value in _classify_methods():
             self._method.addItem(label, value)
         self._mode = QComboBox()
         for label, value in _COMBINE_MODES:
@@ -1099,7 +1108,7 @@ class TransferTypeStepDialog(QDialog):
         self._assignee_type = QComboBox()
         self._assignee_type.addItems(_ENTITY_TYPES)
         self._method = QComboBox()
-        for label, value in _CLASSIFY_METHODS:
+        for label, value in _classify_methods():
             self._method.addItem(label, value)
         form.addRow("Table", self._table)
         form.addRow("Assignor column", self._assignor_col)
@@ -2266,7 +2275,7 @@ class BatchDialog(QDialog):
             super().reject()
 
     def _append_console(self, text: str, level: str = "info") -> None:
-        color = {"error": "#d9534f", "success": "#4a934a"}.get(level)
+        color = {"error": "#d9534f", "success": "#4a934a", "warning": "#c77d29"}.get(level)
         if color:
             self._console.appendHtml(f'<span style="color:{color};">{html.escape(text)}</span>')
         else:

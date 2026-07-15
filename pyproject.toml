@@ -15,6 +15,7 @@ dependencies = [
     "openpyxl>=3.1",   # streaming (write_only) Excel output
     "rapidfuzz>=3",    # fast fuzzy matching for entity-name normalization
     "duckdb>=1.0",     # query layer over Arrow/Parquet (transaction ledger + leaderboards)
+    "probablepeople>=0.5",  # CRF name classifier for the ML classify method (rules fallback if absent)
 ]
 
 [project.optional-dependencies]
@@ -22,8 +23,9 @@ dependencies = [
 ui = [
     "PyQt6>=6.6",
 ]
-# Optional ML backend for entity-type classification. Rules work without it; classify falls back
-# to rules (with a logged note) if a step selects "probablepeople" and it isn't installed.
+# ML backend for entity-type classification. Now part of the default install (above); this extra is
+# kept as a non-breaking alias. Rules still work without it: classify falls back to rules (with a
+# note) if a step selects "probablepeople" and the package is somehow absent.
 ml = [
     "probablepeople>=0.5",
 ]
