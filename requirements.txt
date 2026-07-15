@@ -19,12 +19,19 @@ rapidfuzz>=3
 duckdb>=1.0
 
 # --- optional ML classify backend (opt in — NOT installed by default) ---
-# Uncomment to enable the probablepeople ML classifier. It pulls C extensions
-# (python-crfsuite, doublemetaphone) that lack wheels for the newest Pythons (e.g. 3.14 as of
-# mid-2026) and usually fail to build there — enable it only on Python 3.12/3.13 (which have wheels)
-# or where a C++ build toolchain is present. The rule-based classifier is the default and needs none
-# of this: classify falls back to rules (with a one-time note) if a step selects it while absent.
+# The rule-based classifier is the default and needs none of this; classify falls back to rules
+# (with a one-time note) if a step selects ML while it is absent. To enable the probablepeople ML
+# classifier:
+#
+#   * Python <=3.13 — uncomment both lines (wheels exist for everything, incl. the C doublemetaphone):
 # probablepeople>=0.5
+# Metaphone>=0.6
+#
+#   * Python 3.14 — the C doublemetaphone has no wheel, so install probablepeople without its deps
+#     and let the tool use the pure-Python metaphone instead (classify.py substitutes it
+#     automatically). Run these two commands instead of uncommenting above:
+#         pip install python-crfsuite probableparsing Metaphone
+#         pip install --no-deps probablepeople
 
 # --- desktop UI ---
 PyQt6>=6.6

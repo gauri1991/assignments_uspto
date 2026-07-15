@@ -141,8 +141,11 @@ A native desktop viewer explores the parsed data interactively:
     chosen pairing (**firm→firm**, individual→firm, …). Classification is rule-based by default
     (legal-suffix/org-keyword detection + `LAST, FIRST` person patterns); an optional `probablepeople`
     ML backend is selectable per step (falls back to rules if absent). It is opt-in
-    (`pip install ".[ml]"`) because it pulls C-extension deps that lack wheels for the newest Pythons
-    (e.g. 3.14) — install it on Python 3.12/3.13, or just use the default rules classifier.
+    (`pip install ".[ml]"` on Python ≤3.13). On **Python 3.14** the C `doublemetaphone` dep has no
+    wheel yet, so install the backend without it and let the tool use the pure-Python `metaphone`
+    instead: `pip install python-crfsuite probableparsing Metaphone` then
+    `pip install --no-deps probablepeople` (classify substitutes `metaphone` automatically). Or just
+    use the default rules classifier, which needs none of this.
   - **Match against reference** — *Match against reference* fuzzy-matches a name column against an
     external **USPTO/PatentsView disambiguated-assignee** file (a company gazetteer). A match
     normalizes the raw name to the disambiguated organization and captures its `assignee_id`

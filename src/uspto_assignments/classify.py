@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import importlib.util
 import logging
+import sys
+import types
 from collections.abc import Callable
 from functools import cache
 from typing import Any, Literal
@@ -173,9 +175,35 @@ def _classify_rules(name: str) -> EntityType:
     return "unknown"
 
 
+def _install_doublemetaphone_shim() -> None:
+    """Let ``probablepeople`` import on Pythons that have no ``doublemetaphone`` C wheel.
+
+    ``probablepeople`` hard-imports ``from doublemetaphone import doublemetaphone`` — a compiled
+    C++ package whose newest release has no wheel for the latest CPython (e.g. 3.14), so a plain
+    install tries to build it from source and fails. When the real package is absent but the
+    pure-Python ``metaphone`` package is installed, register a stand-in ``doublemetaphone`` module
+    backed by ``metaphone.doublemetaphone`` — same ``(primary, secondary)`` two-tuple contract
+    ``probablepeople`` reads — so the import resolves without a compiler. A no-op when the real
+    package is present (it wins) or when ``metaphone`` is not installed (the caller then falls back
+    to rules). See the ``ml`` extra in ``pyproject.toml`` for the Python-3.14 install recipe.
+    """
+    if "doublemetaphone" in sys.modules or importlib.util.find_spec("doublemetaphone") is not None:
+        return
+    try:
+        # pure-Python; installs on any CPython including 3.14
+        import metaphone  # type: ignore[import-untyped]  # noqa: PLC0415 - optional backend
+    except ImportError:
+        return
+    shim: Any = types.ModuleType("doublemetaphone")
+    shim.doublemetaphone = metaphone.doublemetaphone
+    sys.modules["doublemetaphone"] = shim
+    logger.debug("registered pure-Python doublemetaphone shim (metaphone) for probablepeople")
+
+
 @cache
 def _load_probablepeople() -> Any | None:
     """Import the optional ``probablepeople`` backend once (cached); ``None`` when not installed."""
+    _install_doublemetaphone_shim()  # satisfy probablepeople's doublemetaphone import on 3.14+
     try:
         import probablepeople  # type: ignore[import-untyped]  # noqa: PLC0415 - optional backend
     except ImportError:

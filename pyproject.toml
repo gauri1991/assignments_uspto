@@ -27,13 +27,23 @@ ui = [
     "PyQt6>=6.6",
 ]
 # Optional ML backend for entity-type classification — opt in with `pip install ".[ml]"`.
-# It is NOT installed by default because probablepeople pulls C extensions (python-crfsuite,
-# doublemetaphone) that have no wheels for the newest Pythons (e.g. 3.14 as of mid-2026), where the
-# source build usually fails. Enable ML only on a Python that has wheels (3.12/3.13) or where a C++
-# build toolchain is available. Rules is the default and always works: classify falls back to rules
-# (with a one-time note) whenever a step selects "probablepeople" but the package is absent.
+# It is NOT installed by default because probablepeople pulls a C extension (doublemetaphone) with
+# no wheel for the newest CPython (e.g. 3.14 as of mid-2026), so a plain install tries to build it
+# from source. `Metaphone` is a pure-Python double-metaphone that classify.py auto-substitutes for
+# it when the C package is absent (see _install_doublemetaphone_shim), so ML works with no compiler.
+#
+#   * Python <=3.13:  `pip install ".[ml]"`  (wheels exist for everything, including doublemetaphone)
+#   * Python 3.14:    the C doublemetaphone has no wheel, so install probablepeople WITHOUT its deps
+#                     and use the pure-Python metaphone instead:
+#                         pip install python-crfsuite probableparsing Metaphone
+#                         pip install --no-deps probablepeople
+#                     (python-crfsuite ships a 3.14 wheel; probableparsing/Metaphone are pure Python)
+#
+# Rules is the default and always works: classify falls back to rules (with a one-time note)
+# whenever a step selects "probablepeople" but the package is absent.
 ml = [
     "probablepeople>=0.5",
+    "Metaphone>=0.6",  # pure-Python doublemetaphone stand-in — lets ML run without the C wheel
 ]
 # Dev tooling + type stubs (the stubs are what let `pyright` strict pass on lxml/pyarrow).
 dev = [
