@@ -35,6 +35,7 @@ from .classify import ClassifyMethod, classify_column, classify_value, probablep
 from .classify import CombineMode as ClassifyCombineMode
 from .cpcconfig import CPC_CONFIG_FILENAME, load_config
 from .cpcmatch import (
+    CLASS_MATCH_COLUMNS,
     OVERALL_COLUMNS,
     PER_COLUMNS,
     assert_hit_rate,
@@ -528,6 +529,8 @@ class CpcMatchStep:
     date_column: str = "transaction_date"
     out_table: str = "matched_buyers_by_portfolio_patent"
     overall_table: str = "matched_buyers_overall"
+    emit_class_matches: bool = False  # also emit the per-class match table (many-to-many evidence)
+    class_match_table: str = "matched_cpc_classes"
     enabled: bool = True
 
     def to_dict(self) -> dict[str, Any]:
@@ -542,6 +545,8 @@ class CpcMatchStep:
             "date_column": self.date_column,
             "out_table": self.out_table,
             "overall_table": self.overall_table,
+            "emit_class_matches": self.emit_class_matches,
+            "class_match_table": self.class_match_table,
         }
 
 
@@ -726,6 +731,8 @@ def _decode_step(data: dict[str, Any]) -> BatchStep:  # noqa: PLR0911, PLR0912 -
             date_column=str(data.get("date_column", "transaction_date")),
             out_table=str(data.get("out_table", "matched_buyers_by_portfolio_patent")),
             overall_table=str(data.get("overall_table", "matched_buyers_overall")),
+            emit_class_matches=bool(data.get("emit_class_matches", False)),
+            class_match_table=str(data.get("class_match_table", "matched_cpc_classes")),
         )
     raw_sort = data.get("sort")
     sort: SortSpec | None = (str(raw_sort[0]), bool(raw_sort[1])) if raw_sort else None
@@ -852,6 +859,8 @@ def columns_after(  # noqa: PLR0912 - one branch per step kind
         elif isinstance(step, CpcMatchStep):
             cols[step.out_table] = list(PER_COLUMNS)
             cols[step.overall_table] = list(OVERALL_COLUMNS)
+            if step.emit_class_matches:
+                cols[step.class_match_table] = list(CLASS_MATCH_COLUMNS)
         # Dedupe / Sort / TransferType / Export: columns unchanged
     return cols
 
@@ -1635,7 +1644,7 @@ def _apply_cpc_match(
     )
     if step.portfolio_mode == "patent_list":
         assert_hit_rate(pstats, match_cfg.hit_rate_floor, side="portfolio patents")
-    per, overall, report = match_portfolio(
+    per, overall, class_table, report = match_portfolio(
         table,
         footprints,
         config=match_cfg,
@@ -1643,15 +1652,20 @@ def _apply_cpc_match(
         number_column=step.number_column,
         kind_column=step.kind_column,
         date_column=step.date_column,
+        emit_class_matches=step.emit_class_matches,
     )
     tables[step.out_table] = per
     tables[step.overall_table] = overall
+    class_note = ""
+    if step.emit_class_matches:
+        tables[step.class_match_table] = class_table
+        class_note = f"; {class_table.num_rows:,} class match(es) → {step.class_match_table}"
     emit(
         BatchEvent(
             "info",
             f"  cpc_match: {report.portfolio_patents} portfolio patent(s), buyer hit-rate "
             f"{report.buyer_stats.hit_rate:.0%}; {report.matched_pairs} matched pair(s) → "
-            f"{per.num_rows:,} ranked rows across {report.buyers_out} buyer(s)",
+            f"{per.num_rows:,} ranked rows across {report.buyers_out} buyer(s){class_note}",
         )
     )
 
@@ -2532,7 +2546,11 @@ def describe_step(step: BatchStep) -> str:  # noqa: PLR0911, PLR0912 - one line 
         return f"Attach CPC file · {step.table}.{step.column} vs {src} → cpc_codes"
     if isinstance(step, CpcMatchStep):
         portfolio = Path(step.portfolio_path).name or "(no file)"
-        return f"CPC match · {step.table} vs {portfolio} · {step.portfolio_mode} → {step.out_table}"
+        classes = " + class matches" if step.emit_class_matches else ""
+        return (
+            f"CPC match · {step.table} vs {portfolio} · {step.portfolio_mode} → "
+            f"{step.out_table}{classes}"
+        )
     tables = "all tables" if step.tables is None else ", ".join(step.tables)
     return f"Export · {step.fmt} · {tables}"
 

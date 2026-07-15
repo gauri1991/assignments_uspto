@@ -359,19 +359,29 @@ def _rarity(buyer_patents: _BuyerPatents) -> dict[str, float]:
     return {code: total / count for code, count in doc_freq.items()}
 
 
-def _rank_buyers(
+def _rank_buyers(  # noqa: PLR0913 - the match knobs are clearer as flat params than bundled
     portfolio_patent: str,
     footprint: set[str],
     buyer_patents: _BuyerPatents,
     rarity: dict[str, float],
     config: CpcMatchConfig,
-) -> tuple[list[dict[str, Any]], int]:
-    """Rank buyers for one portfolio patent; returns (output rows, matched-pair count)."""
+    *,
+    collect_classes: bool = False,
+) -> tuple[list[dict[str, Any]], int, list[dict[str, Any]]]:
+    """Rank buyers for one portfolio patent.
+
+    Returns ``(ranked rows, matched-pair count, class rows)``. ``class rows`` is populated only when
+    ``collect_classes`` is set: one row per ``(kept buyer, buyer patent, shared CPC class)`` — the
+    many-to-many evidence — emitted for exactly the buyers that survive the ranking filters, so the
+    class table never disagrees with the ranked table.
+    """
     if not footprint:
-        return [], 0
+        return [], 0, []
     agg: dict[str, dict[str, Any]] = {}
+    # buyer -> [(buyer_patent, shared grain codes, year)] — kept only when collect_classes is on.
+    evidence: dict[str, list[tuple[str, list[str], int]]] = {}
     matched_pairs = 0
-    for buyer, grain_set, year in buyer_patents.values():
+    for (buyer, pid), (_buyer, grain_set, year) in buyer_patents.items():
         score, shared = _overlap_score(footprint, grain_set, config.overlap_metric, rarity)
         if score < config.overlap_threshold or not shared:
             continue
@@ -381,6 +391,8 @@ def _rank_buyers(
         bucket["patents"] += 1
         bucket["year"] = max(bucket["year"], year)
         bucket["shared"].update(shared)
+        if collect_classes:
+            evidence.setdefault(buyer, []).append((pid, shared, year))
     ranked = [(b, d) for b, d in agg.items() if d["patents"] >= config.min_in_domain_patents]
     for _buyer, data in ranked:
         recency = max(data["year"] - _RECENCY_BASE_YEAR, 0)
@@ -404,7 +416,23 @@ def _rank_buyers(
         }
         for rank, (buyer, data) in enumerate(ranked, start=1)
     ]
-    return rows, matched_pairs
+    class_rows: list[dict[str, Any]] = []
+    if collect_classes:
+        for buyer, _data in ranked:  # only buyers that survived min_in_domain_patents
+            off_gazetteer = "true" if buyer.startswith("prov-") else "false"
+            for pid, shared, year in evidence.get(buyer, []):
+                class_rows.extend(
+                    {
+                        "portfolio_patent": portfolio_patent,
+                        "buyer": buyer,
+                        "buyer_patent": pid,
+                        "cpc_class": code,
+                        "year": _year_str(year),
+                        "is_off_gazetteer": off_gazetteer,
+                    }
+                    for code in shared
+                )
+    return rows, matched_pairs, class_rows
 
 
 def match_portfolio(  # noqa: PLR0913 - a clear entry point threading the match knobs
@@ -416,11 +444,14 @@ def match_portfolio(  # noqa: PLR0913 - a clear entry point threading the match 
     number_column: str,
     kind_column: str,
     date_column: str,
-) -> tuple[pa.Table, pa.Table, MatchReport]:
+    emit_class_matches: bool = False,
+) -> tuple[pa.Table, pa.Table, pa.Table, MatchReport]:
     """Match each portfolio patent's footprint against buyer patents; rank buyers per patent.
 
     Reads CPC already attached to ``table`` (``cpc_codes`` column, from a prior ``fetch_cpc`` step).
-    Returns ``(per_portfolio_patent_table, cross_portfolio_table, report)``.
+    Returns ``(per_portfolio_patent_table, cross_portfolio_table, class_match_table, report)``. The
+    class-match table (one row per portfolio patent × buyer patent × shared CPC class) is only
+    populated when ``emit_class_matches`` is set — otherwise it is an empty, correctly-typed table.
     """
     if _CPC_CODES_COLUMN not in table.column_names:
         raise ValueError(
@@ -448,14 +479,24 @@ def match_portfolio(  # noqa: PLR0913 - a clear entry point threading the match 
     rarity = _rarity(buyer_patents)
 
     per_rows: list[dict[str, Any]] = []
+    class_rows: list[dict[str, Any]] = []
     matched_pairs = 0
     for portfolio_patent, footprint in footprints.items():
-        rows, pairs = _rank_buyers(portfolio_patent, footprint, buyer_patents, rarity, config)
+        rows, pairs, classes = _rank_buyers(
+            portfolio_patent,
+            footprint,
+            buyer_patents,
+            rarity,
+            config,
+            collect_classes=emit_class_matches,
+        )
         per_rows.extend(rows)
+        class_rows.extend(classes)
         matched_pairs += pairs
 
     per_table = _rows_to_table(per_rows, _PER_SCHEMA)
     overall_table = _aggregate_overall(per_rows)
+    class_table = _rows_to_table(class_rows, _CLASS_SCHEMA)
     report = MatchReport(
         buyer_stats=buyer_stats,
         portfolio_stats=CpcStats(0, 0, 0, 0),  # filled in by the caller (it owns portfolio resolve)
@@ -465,7 +506,7 @@ def match_portfolio(  # noqa: PLR0913 - a clear entry point threading the match 
         buyers_out=len({row["buyer"] for row in per_rows}),
         config_snapshot=config.to_dict(),
     )
-    return per_table, overall_table, report
+    return per_table, overall_table, class_table, report
 
 
 def _year_str(year: int) -> str:
@@ -497,9 +538,22 @@ _OVERALL_SCHEMA = pa.schema(
     ]
 )
 
+# Many-to-many class matches: one row per (portfolio patent × buyer patent × shared CPC class).
+_CLASS_SCHEMA = pa.schema(
+    [
+        pa.field("portfolio_patent", pa.string()),
+        pa.field("buyer", pa.string()),
+        pa.field("buyer_patent", pa.string()),
+        pa.field("cpc_class", pa.string()),  # the shared grain-reduced CPC code
+        pa.field("year", pa.string()),  # acquisition year of the buyer patent's deal
+        pa.field("is_off_gazetteer", pa.string()),
+    ]
+)
+
 
 PER_COLUMNS: list[str] = list(_PER_SCHEMA.names)  # columns of the per-portfolio-patent output
 OVERALL_COLUMNS: list[str] = list(_OVERALL_SCHEMA.names)  # columns of the cross-portfolio output
+CLASS_MATCH_COLUMNS: list[str] = list(_CLASS_SCHEMA.names)  # columns of the class-match output
 
 
 def _rows_to_table(rows: list[dict[str, Any]], schema: pa.Schema) -> pa.Table:
