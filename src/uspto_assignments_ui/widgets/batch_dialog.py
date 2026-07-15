@@ -1794,6 +1794,15 @@ class BatchDialog(QDialog):
         )
         column.addWidget(self._save_steps)
 
+        # Convert mode: write outputs directly into the chosen folder, named by source file.
+        self._flat_output = QCheckBox("Convert mode: one folder, files named by source")
+        self._flat_output.setToolTip(
+            "Write outputs straight into the output folder as <source>_<table>.parquet "
+            "(no timestamped run subfolder, no manifest/summary). Re-runs overwrite same-named "
+            "files. Ideal with the 'Convert to Parquet' template."
+        )
+        column.addWidget(self._flat_output)
+
         column.addWidget(SectionLabel("Console"))
         self._console = QPlainTextEdit()
         self._console.setReadOnly(True)
@@ -2094,6 +2103,7 @@ class BatchDialog(QDialog):
             memory=self._memory,
             cpc_ctx=self._cpc_ctx(),
             trace_steps=self._save_steps.isChecked(),
+            flat_output=self._flat_output.isChecked(),
         )
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
