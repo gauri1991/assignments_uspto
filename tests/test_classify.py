@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import importlib.util
+import sys
+import types
+
 import pyarrow as pa
 import pytest
 
@@ -9,6 +13,7 @@ from uspto_assignments import (
     BatchEvent,
     ClassifyStep,
     EntityMemory,
+    classify,
     classify_column,
     classify_name,
     classify_value,
@@ -103,6 +108,32 @@ def test_probablepeople_tags_real_names_when_installed() -> None:
     # With the CRF model present, unambiguous corporation/person names classify correctly.
     assert classify_name("QUALCOMM INCORPORATED", method="probablepeople") == "company"
     assert classify_name("SMITH, JOHN A", method="probablepeople") == "individual"
+
+
+def test_doublemetaphone_shim_backs_probablepeople_with_metaphone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # On Pythons without a doublemetaphone C wheel (e.g. 3.14), the shim registers a stand-in
+    # module backed by the pure-Python `metaphone` package so probablepeople can import.
+    # Make any real/stale doublemetaphone absent so the shim runs its registration path.
+    # (monkeypatch.delitem records the old value and restores it at teardown.)
+    monkeypatch.delitem(sys.modules, "doublemetaphone", raising=False)
+    try:
+        real_installed = importlib.util.find_spec("doublemetaphone") is not None
+    except ValueError:  # a spec-less module lingered under the name
+        real_installed = False
+    if real_installed:
+        pytest.skip("real doublemetaphone installed — the shim is a no-op here")
+
+    fake_metaphone = types.ModuleType("metaphone")
+    fake_metaphone.doublemetaphone = lambda token: ("TEST", "")  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "metaphone", fake_metaphone)
+
+    classify._install_doublemetaphone_shim()
+
+    registered = sys.modules.get("doublemetaphone")
+    assert registered is not None
+    assert registered.doublemetaphone("x") == ("TEST", "")  # type: ignore[attr-defined]
 
 
 def test_apply_classify_warns_once_when_ml_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
