@@ -37,6 +37,15 @@ def test_build_reference_dedupes_and_skips_individuals(tmp_path: Path) -> None:
     assert gaz.match("ADOBE SYSTEMS INCORPORATED") == ("ADOBE SYSTEMS INCORPORATED", "A1", 100)
 
 
+def test_build_reference_tags_all_orgs_as_company(tmp_path: Path) -> None:
+    tsv = tmp_path / "ref.tsv"
+    _write_tsv(tsv)
+    gaz = build_reference(tsv, "disambig_assignee_organization")
+    # every gazetteer org is a company by definition — the seeded memory carries that tag for free
+    assert gaz.memory.entity_type("ADOBE SYSTEMS INCORPORATED") == "company"
+    assert all(t == "company" for t in gaz.memory.types.values())
+
+
 def test_reference_match_exact_fuzzy_and_miss(tmp_path: Path) -> None:
     tsv = tmp_path / "ref.tsv"
     _write_tsv(tsv)

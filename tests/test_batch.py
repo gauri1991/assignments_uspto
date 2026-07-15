@@ -105,6 +105,18 @@ def test_columns_after_propagates_derived_columns() -> None:
     assert "assignor_names_type" not in columns_after(LoadConfig(), steps, upto=1)["flat"]
 
 
+def test_normalize_emit_type_column_and_roundtrip(tmp_path: Path) -> None:
+    step = NormalizeStep(table="flat", column="assignor_names", emit_type=True)
+    # columns_after advertises the <target>_type column so later Filter/Export steps can use it
+    cols = columns_after(LoadConfig(), [step], upto=1)["flat"]
+    assert "assignor_names_canonical_type" in cols
+    # emit_type survives a JSON template roundtrip
+    path = tmp_path / "t.json"
+    dump_templates([BatchTemplate(name="t", steps=[step])], path)
+    reloaded = load_templates(path)[0].steps[0]
+    assert isinstance(reloaded, NormalizeStep) and reloaded.emit_type is True
+
+
 def test_columns_after_aggregate_creates_summary_table() -> None:
     steps = [AggregateStep(table="assignees", group_by=["name"], count_distinct="name")]
     cols = columns_after(LoadConfig(), steps, upto=1)

@@ -68,7 +68,7 @@ producing step can reference them:
 
 | Step | New column(s) on its `table` |
 |---|---|
-| `normalize` on `column` | `<column>_canonical`; with `emit_score`: `<target>_score` (int 0–100); with `review_threshold>0`: `<target>_review` (`"true"`/`"false"`) |
+| `normalize` on `column` | `<column>_canonical`; with `emit_score`: `<target>_score` (int 0–100); with `review_threshold>0`: `<target>_review` (`"true"`/`"false"`); with `emit_type`: `<target>_type` (`company`/`individual`/`unknown`/`""`, from the entity memory's stored tags) |
 | `classify` on `column` | `<column>_type` (values `company` / `individual` / `unknown`) |
 | `derive` from `source` with `op` | `<source>_<op>` |
 | `compare` with `action: "flag"` | `<left>_matches_<right>` (values `"true"` / `"false"`); with `emit_score`: `<target>_score`; with `review_threshold>0`: `<target>_review` (added before any drop/keep filtering) |
@@ -204,7 +204,7 @@ omitted) **auto-derives** the name per §2a — prefer leaving it blank so names
 ```json
 { "kind": "normalize", "table": "flat", "column": "assignor_names",
   "target": "", "threshold": 90, "separator": "", "learn": true, "scorer": "wratio",
-  "emit_score": false, "review_threshold": 0 }
+  "emit_score": false, "review_threshold": 0, "emit_type": false }
 ```
 - `column` — the name column (e.g. `assignor_names`, `assignee_names`, or `name` on assignors/assignees).
 - `target` *(optional)* — output column; blank → `<column>_canonical`.
@@ -214,6 +214,11 @@ omitted) **auto-derives** the name per §2a — prefer leaving it blank so names
 - `emit_score` *(optional)* — adds `<target>_score` (weakest party confidence, 0–100).
   `review_threshold` *(optional, 0 = off)* — adds `<target>_review` flagging fuzzy accepts
   scoring below it (exact 100 / unmatched 0 never flag).
+- `emit_type` *(optional)* — adds `<target>_type` from the entity memory's **stored** company/
+  individual/unknown tags (tag entities once in *Settings ▸ Entity memory ▸ Tag all*, reuse them
+  here — no re-classification per run). Untagged canonicals yield `""`; a multi-party value reports
+  the single agreed type across its parts, else `unknown`. A later Filter on `<target>_type equals
+  company` keeps only firm buyers/sellers.
 
 ### `classify` — label a name column company / individual / unknown
 ```json
