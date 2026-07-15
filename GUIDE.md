@@ -607,6 +607,28 @@ CSV/Excel). Steps that create a new table
 The manifest lists every trace file. Leave the box **off** for normal runs — tracing multiplies the
 files written, so it's meant for reviewing/validating on a **shortlisted** set, not bulk runs.
 
+**Convert mode (one folder, files named by source).** Tick **Convert mode: one folder, files named
+by source** to bypass the timestamped run folder entirely: outputs land **directly in the folder you
+picked**, named `<source-stem>_<table>.parquet`, all side by side. No per-source subfolder, no
+`manifest.json` / `summary.xlsx` / `runs_index.csv`. A re-run **overwrites** same-named files (two
+inputs that share a stem get a `` (1)`` suffix so they never clobber each other). This is the
+fast path for bulk **XML/ZIP → Parquet** conversion — pair it with the bundled **12 - Convert to
+Parquet** template (a single Export-Parquet step, all 5 tables):
+
+```
+<chosen folder>/
+├── ad20260101_assignments.parquet
+├── ad20260101_assignors.parquet
+├── ad20260101_assignees.parquet
+├── ad20260101_properties.parquet
+├── ad20260101_flat.parquet
+├── ad20260102_assignments.parquet
+└── …
+```
+
+Workflow: **Settings ▸ Batch ▸ Import…** template 12 → **Add files…** (multi-select `.xml`/`.zip`)
+→ pick the output folder → tick **Convert mode** → **Run**. (Step tracing is ignored in convert mode.)
+
 **Parallel runs** — with *Workers > 1* and multiple inputs, files are processed in separate
 processes; the console shows distinct worker **PIDs**, interleaved per-file progress, and a combined
 total. Sequential mode streams live per-step progress (`X of Y` for parse/normalize/classify/match).

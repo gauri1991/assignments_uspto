@@ -1077,6 +1077,50 @@ def test_run_batch_filter_missing_column_fails_with_clear_message(tmp_path: Path
     assert "KeyError" not in error  # the opaque pyarrow error is no longer surfaced
 
 
+def _convert_template() -> BatchTemplate:
+    return BatchTemplate(name="Convert", load=LoadConfig(), steps=[ExportStep(fmt="parquet")])
+
+
+def test_run_batch_flat_output_names_files_by_source_in_one_folder(tmp_path: Path) -> None:
+    a = tmp_path / "a.xml"
+    b = tmp_path / "b.xml"
+    shutil.copy(FIXTURE, a)
+    shutil.copy(FIXTURE, b)
+    out = tmp_path / "converted"
+    result = run_batch(_convert_template(), [a, b], out, timestamp="cv", flat_output=True)
+
+    assert Path(result.run_dir) == out  # no template/run subfolder — straight into the chosen dir
+    names = sorted(p.name for p in out.iterdir())
+    # all 5 tables per source, named by source, side by side in one folder
+    for stem in ("a", "b"):
+        for table in ("assignments", "assignors", "assignees", "properties", "flat"):
+            assert f"{stem}_{table}.parquet" in names, f"{stem}_{table}.parquet"
+    # the audit artifacts are intentionally skipped in convert mode
+    assert not (out / "manifest.json").exists()
+    assert not (out / "summary.xlsx").exists()
+    assert not (out / "runs_index.csv").exists()
+    assert not any(p.is_dir() and p.name.startswith("run_") for p in out.iterdir())
+    # the parquet reloads with the same rows a plain parse would produce
+    flat = pq.read_table(out / "a_flat.parquet")  # pyright: ignore[reportUnknownMemberType]
+    assert flat.num_rows > 0
+
+
+def test_run_batch_flat_output_dedupes_same_stem_sources(tmp_path: Path) -> None:
+    d1 = tmp_path / "one"
+    d2 = tmp_path / "two"
+    d1.mkdir()
+    d2.mkdir()
+    x1 = d1 / "x.xml"
+    x2 = d2 / "x.xml"
+    shutil.copy(FIXTURE, x1)
+    shutil.copy(FIXTURE, x2)
+    out = tmp_path / "converted"
+    run_batch(_convert_template(), [x1, x2], out, timestamp="cv", flat_output=True)
+    names = sorted(p.name for p in out.iterdir())
+    assert "x_flat.parquet" in names
+    assert "x (1)_flat.parquet" in names  # second same-stem source deduped, not overwritten
+
+
 def test_run_batch_writes_manifest(tmp_path: Path) -> None:
     result = run_batch(_granted_template(), [FIXTURE], tmp_path / "out", timestamp="mf")
     run_dir = Path(result.run_dir)

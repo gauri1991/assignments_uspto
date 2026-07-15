@@ -173,6 +173,14 @@ warnings for each template. Regenerate after any template change.
 **Warnings:**
 - ⚠ Step 2 (AttachCpcFile): CPC file not found: cpc/patseer_export.csv
 
+## 12_convert_to_parquet.json
+
+### 12 - Convert to Parquet (all tables)
+
+1. Export · parquet · all tables
+
+**Warnings:** none
+
 ## buyer_identification_templates.json
 
 ### Buyers - firm-to-firm transactions (clean, enriched)
