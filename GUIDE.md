@@ -74,7 +74,7 @@ Optional dependency extras:
 | Extra | Adds | Needed for |
 |---|---|---|
 | `ui` | `PyQt6` | the desktop app |
-| `ml` | `probablepeople` | alias for the ML classifier — now part of the default install (rules still work if absent) |
+| `ml` | `probablepeople` | opt-in ML classifier — `pip install ".[ml]"` (not in the default install; needs C-ext wheels, so use Python 3.12/3.13; rules still work if absent) |
 | `dev` | `pytest`, `pytest-qt`, `ruff`, `pyright`, `lxml-stubs`, `pyarrow-stubs` | development |
 
 Entry points (installed as console scripts, or run the shims directly):

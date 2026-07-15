@@ -139,8 +139,10 @@ A native desktop viewer explores the parsed data interactively:
     unknown**), *Compare columns* (match assignor vs assignee — flag, or **drop / keep** matching
     rows, e.g. remove self-transfers), and *Transfer type* — a one-click preset that keeps only a
     chosen pairing (**firm→firm**, individual→firm, …). Classification is rule-based by default
-    (legal-suffix/org-keyword detection + `LAST, FIRST` person patterns); a `probablepeople` ML
-    backend ships in the default install and is selectable per step (falls back to rules if absent).
+    (legal-suffix/org-keyword detection + `LAST, FIRST` person patterns); an optional `probablepeople`
+    ML backend is selectable per step (falls back to rules if absent). It is opt-in
+    (`pip install ".[ml]"`) because it pulls C-extension deps that lack wheels for the newest Pythons
+    (e.g. 3.14) — install it on Python 3.12/3.13, or just use the default rules classifier.
   - **Match against reference** — *Match against reference* fuzzy-matches a name column against an
     external **USPTO/PatentsView disambiguated-assignee** file (a company gazetteer). A match
     normalizes the raw name to the disambiguated organization and captures its `assignee_id`

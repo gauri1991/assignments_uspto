@@ -15,7 +15,10 @@ dependencies = [
     "openpyxl>=3.1",   # streaming (write_only) Excel output
     "rapidfuzz>=3",    # fast fuzzy matching for entity-name normalization
     "duckdb>=1.0",     # query layer over Arrow/Parquet (transaction ledger + leaderboards)
-    "probablepeople>=0.5",  # CRF name classifier for the ML classify method (rules fallback if absent)
+    # NOTE: probablepeople (the optional ML classify backend) is intentionally NOT here — it pulls
+    # C-extension deps (python-crfsuite, doublemetaphone) that lack wheels for newer Pythons (e.g.
+    # 3.14), so a hard dependency would break `pip install` on those. It lives in the `ml` extra
+    # below; the rule-based classifier is the default and needs no compiled deps.
 ]
 
 [project.optional-dependencies]
@@ -23,9 +26,12 @@ dependencies = [
 ui = [
     "PyQt6>=6.6",
 ]
-# ML backend for entity-type classification. Now part of the default install (above); this extra is
-# kept as a non-breaking alias. Rules still work without it: classify falls back to rules (with a
-# note) if a step selects "probablepeople" and the package is somehow absent.
+# Optional ML backend for entity-type classification — opt in with `pip install ".[ml]"`.
+# It is NOT installed by default because probablepeople pulls C extensions (python-crfsuite,
+# doublemetaphone) that have no wheels for the newest Pythons (e.g. 3.14 as of mid-2026), where the
+# source build usually fails. Enable ML only on a Python that has wheels (3.12/3.13) or where a C++
+# build toolchain is available. Rules is the default and always works: classify falls back to rules
+# (with a one-time note) whenever a step selects "probablepeople" but the package is absent.
 ml = [
     "probablepeople>=0.5",
 ]
