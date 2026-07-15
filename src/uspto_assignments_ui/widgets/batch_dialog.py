@@ -1506,6 +1506,10 @@ class CpcMatchStepDialog(QDialog):
         self._date_column = QComboBox()
         self._date_column.setEditable(True)
 
+        self._emit_class_matches = QCheckBox(
+            "Also output per-class matches (portfolio × buyer patent × CPC class)"
+        )
+
         form.addRow("Table", self._table)
         form.addRow("Portfolio input", self._mode)
         form.addRow("Portfolio file", pf_row)
@@ -1513,12 +1517,14 @@ class CpcMatchStepDialog(QDialog):
         form.addRow("Patent-number column", self._number_column)
         form.addRow("Kind-code column", self._kind_column)
         form.addRow("Date column", self._date_column)
+        form.addRow("", self._emit_class_matches)
         layout.addLayout(form)
 
         note = QLabel(
             "Run a Fetch CPC step first. Match knobs (grain, metric, threshold, ranking, hit-rate"
             " floor) come from Settings ▸ CPC data source. Output tables:"
-            " matched_buyers_by_portfolio_patent + matched_buyers_overall."
+            " matched_buyers_by_portfolio_patent + matched_buyers_overall"
+            " (+ matched_cpc_classes when per-class matches is on)."
         )
         note.setWordWrap(True)
         layout.addWidget(note)
@@ -1540,6 +1546,7 @@ class CpcMatchStepDialog(QDialog):
             self._number_column.setCurrentText(step.number_column)
             self._kind_column.setCurrentText(step.kind_column)
             self._date_column.setCurrentText(step.date_column)
+            self._emit_class_matches.setChecked(step.emit_class_matches)
 
     def _rebuild_columns(self) -> None:
         cols = _cols(self._table.currentText())
@@ -1571,6 +1578,7 @@ class CpcMatchStepDialog(QDialog):
             number_column=self._number_column.currentText() or "doc_number",
             kind_column=self._kind_column.currentText() or "doc_kind",
             date_column=self._date_column.currentText() or "transaction_date",
+            emit_class_matches=self._emit_class_matches.isChecked(),
         )
 
 

@@ -493,6 +493,10 @@ individuals), or `drop_matched`. **Mode**: `any` (matched if any party is a know
 
 ### 9.5 CPC matching (fetch → rank buyers)
 
+> **See [`CPCmatching.md`](CPCmatching.md)** for the complete CPC reference: all CPC templates, how
+> matching works, the fully offline **13 → 14** chain, the many-to-many **`matched_cpc_classes`** table,
+> file formats, and config knobs. This section is the quick version.
+
 The final step of the strategy — matching a **sales package** (a portfolio of patents you're selling)
 to the buyers most likely to want it — is done with two dedicated batch steps: **Fetch CPC** and
 **CPC match**. These are *not* the fuzzy `reference_match` step: attaching CPC and computing overlap

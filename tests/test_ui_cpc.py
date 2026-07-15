@@ -64,6 +64,17 @@ def test_cpc_match_dialog_roundtrip(qtbot: Any) -> None:
     assert step.portfolio_mode == "footprint_file"
     assert step.portfolio_path == "/tmp/pf.csv"
     assert step.buyer_column == "assignee_names"
+    assert step.emit_class_matches is False  # default off
+
+
+def test_cpc_match_dialog_roundtrips_class_matches(qtbot: Any) -> None:
+    create_app([])
+    dialog = CpcMatchStepDialog(
+        CpcMatchStep(table="flat", portfolio_path="/tmp/pf.csv", emit_class_matches=True)
+    )
+    qtbot.addWidget(dialog)
+    assert dialog._emit_class_matches.isChecked()
+    assert dialog.step().emit_class_matches is True
 
 
 def test_cpc_settings_dialog_saves_config(qtbot: Any, tmp_path: Path) -> None:

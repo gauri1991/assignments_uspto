@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import re
 import urllib.error
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,7 @@ from uspto_assignments import (
 from uspto_assignments.batch import _step_from_dict
 from uspto_assignments.cpcconfig import CpcConfig, load_config, save_config
 from uspto_assignments.cpcmatch import (
+    CLASS_MATCH_COLUMNS,
     HitRateError,
     attach_cpc,
     attach_cpc_from_file,
@@ -392,7 +394,7 @@ def test_match_portfolio_ranks_buyers(tmp_path: Path) -> None:
     enriched = _attach(table, tsv, tmp_path)
     footprints = {"9000001": {"H04L"}}  # the sales-package patent is in H04L
     config = CpcConfig().match
-    per, overall, report = match_portfolio(
+    per, overall, class_table, report = match_portfolio(
         enriched,
         footprints,
         config=config,
@@ -408,6 +410,78 @@ def test_match_portfolio_ranks_buyers(tmp_path: Path) -> None:
     assert acme["last_acquisition_date"] == "2025"
     assert report.buyer_stats.found == 3
     assert overall.num_rows == 1
+    assert class_table.num_rows == 0  # not requested → empty class table
+
+
+def test_match_portfolio_emits_class_matches(tmp_path: Path) -> None:
+    # ACME holds two grants; the portfolio patent's footprint is {G06F, H04L}. The class table must
+    # record one row per (portfolio patent × buyer patent × shared class), grain-reduced.
+    tsv = tmp_path / "cpc.tsv"
+    _write_cpc_tsv(
+        tsv,
+        {
+            "10000001": ["G06F16/00", "H04L9/32"],  # ACME — shares BOTH classes
+            "10000002": ["H04L1/00"],  # ACME — shares only H04L
+            "10000003": ["A61K31/00"],  # BETA — shares nothing with this portfolio patent
+        },
+    )
+    table = _flat(
+        ["10000001", "10000002", "10000003"],
+        ["B2", "B2", "B2"],
+        assignee_names_canonical=["ACME CORP", "ACME CORP", "BETA PHARMA"],
+        transaction_date=["20190101", "20200101", "20230101"],
+    )
+    enriched = _attach(table, tsv, tmp_path)
+    footprints = {"9000001": {"G06F", "H04L"}}
+    _per, _overall, class_table, _report = match_portfolio(
+        enriched,
+        footprints,
+        config=CpcConfig().match,
+        buyer_column="assignee_names_canonical",
+        number_column="doc_number",
+        kind_column="doc_kind",
+        date_column="transaction_date",
+        emit_class_matches=True,
+    )
+    assert class_table.column_names == CLASS_MATCH_COLUMNS
+    got = {
+        (r["portfolio_patent"], r["buyer"], r["buyer_patent"], r["cpc_class"], r["year"])
+        for r in class_table.to_pylist()
+    }
+    assert got == {
+        ("9000001", "ACME CORP", "10000001", "G06F", "2019"),
+        ("9000001", "ACME CORP", "10000001", "H04L", "2019"),
+        ("9000001", "ACME CORP", "10000002", "H04L", "2020"),
+    }  # BETA never appears — it shares no class
+
+
+def test_class_matches_honor_min_in_domain_filter(tmp_path: Path) -> None:
+    # With min_in_domain_patents=2, a buyer with only ONE matching patent is dropped from the ranked
+    # table — and must therefore also produce NO class rows (the two outputs never disagree).
+    tsv = tmp_path / "cpc.tsv"
+    _write_cpc_tsv(
+        tsv, {"10000001": ["H04L9/32"], "10000002": ["H04L1/00"], "10000003": ["H04L9/00"]}
+    )
+    table = _flat(
+        ["10000001", "10000002", "10000003"],
+        ["B2", "B2", "B2"],
+        assignee_names_canonical=["ACME CORP", "ACME CORP", "SOLO INC"],  # SOLO has just one
+        transaction_date=["20190101", "20200101", "20210101"],
+    )
+    enriched = _attach(table, tsv, tmp_path)
+    config = replace(CpcConfig().match, min_in_domain_patents=2)
+    per, _overall, class_table, _report = match_portfolio(
+        enriched,
+        {"9000001": {"H04L"}},
+        config=config,
+        buyer_column="assignee_names_canonical",
+        number_column="doc_number",
+        kind_column="doc_kind",
+        date_column="transaction_date",
+        emit_class_matches=True,
+    )
+    assert {r["buyer"] for r in per.to_pylist()} == {"ACME CORP"}  # SOLO dropped from ranking
+    assert {r["buyer"] for r in class_table.to_pylist()} == {"ACME CORP"}  # and from class rows
 
 
 def test_match_portfolio_requires_attached_cpc() -> None:
@@ -450,15 +524,26 @@ def test_match_portfolio_aborts_on_low_hit_rate(tmp_path: Path) -> None:
 
 
 def test_cpc_steps_roundtrip() -> None:
-    for step in (FetchCpcStep(), CpcMatchStep(portfolio_path="p.txt")):
+    for step in (
+        FetchCpcStep(),
+        CpcMatchStep(portfolio_path="p.txt"),
+        CpcMatchStep(
+            portfolio_path="fp.csv", portfolio_mode="footprint_file", emit_class_matches=True
+        ),
+    ):
         assert _step_from_dict(step.to_dict()).to_dict() == step.to_dict()
 
 
 def test_cpc_steps_in_columns_after() -> None:
-    steps = [FetchCpcStep(table="flat"), CpcMatchStep(table="flat")]
+    steps = [FetchCpcStep(table="flat"), CpcMatchStep(table="flat", emit_class_matches=True)]
     cols = columns_after(LoadConfig(), steps, upto=2)
     assert {"cpc_codes", "cpc_subclasses", "cpc_lookup_status"} <= set(cols["flat"])
     assert "portfolio_patent" in cols["matched_buyers_by_portfolio_patent"]
+    # the class-match output table is advertised only when emit_class_matches is on
+    assert "cpc_class" in cols["matched_cpc_classes"]
+    assert "matched_cpc_classes" not in columns_after(
+        LoadConfig(), [CpcMatchStep(table="flat")], upto=1
+    )
 
 
 def test_cpc_match_step_validates_portfolio_file(tmp_path: Path) -> None:
@@ -522,6 +607,66 @@ def test_end_to_end_fetch_then_match(tmp_path: Path) -> None:
     assert "WIDGET CORP" in buyers  # bought H04L grant 10987654
     assert "ZORPTECH SYSTEMS INCORPORATED" not in buyers  # only A61K — off-domain, excluded
     assert all(row["rank"] >= 1 for row in ranked)
+
+
+def test_offline_attach_then_match_with_class_matches(tmp_path: Path) -> None:
+    """The offline 13→14 chain in one run: attach CPC from a file, match a footprint, no network."""
+    patseer = tmp_path / "patseer.csv"  # PatSeer-style export: Publication Number, CPC (;-joined)
+    patseer.write_text(
+        "Publication Number,CPC\n"
+        "10987654,G06F16/00;H04L9/32\n"
+        "11222333,H04L9/32\n"
+        "9555444,A61K31/00\n",
+        encoding="utf-8",
+    )
+    footprint = tmp_path / "footprint.csv"  # positional patent,cpc — one code per row
+    footprint.write_text(
+        "patent,cpc\n9111111,G06F16/00\n9111111,H04L9/32\n9222222,A61K31/00\n", encoding="utf-8"
+    )
+    template = BatchTemplate(
+        name="offline",
+        steps=[
+            AttachCpcFileStep(
+                table="flat",
+                column="doc_number",
+                kind_column="doc_kind",
+                source_path=str(patseer),
+                patent_column="Publication Number",
+                code_column="CPC",
+                separator=";",
+            ),
+            CpcMatchStep(
+                table="flat",
+                portfolio_mode="footprint_file",
+                portfolio_path=str(footprint),
+                buyer_column="assignee_names",
+                number_column="doc_number",
+                kind_column="doc_kind",
+                date_column="transaction_date",
+                emit_class_matches=True,
+            ),
+            ExportStep(fmt="csv", tables=["matched_cpc_classes"]),
+        ],
+    )
+    # local_file ctx (never fetched in footprint_file mode) guarantees no network path is taken.
+    empty_tsv = tmp_path / "src.tsv"
+    empty_tsv.write_text("patent_id\tcpc_group\n", encoding="utf-8")
+    tables, _stats = run_preview(
+        template, FIXTURE, limit=100, cpc_ctx=_local_ctx(tmp_path, empty_tsv)
+    )
+
+    classes = tables["matched_cpc_classes"]
+    assert classes.column_names == CLASS_MATCH_COLUMNS
+    triples = {
+        (r["portfolio_patent"], r["buyer_patent"], r["cpc_class"]) for r in classes.to_pylist()
+    }
+    assert {
+        ("9111111", "10987654", "G06F"),  # grant 10987654 shares both G06F and H04L
+        ("9111111", "10987654", "H04L"),
+        ("9111111", "11222333", "H04L"),  # grant 11222333 shares only H04L
+        ("9222222", "9555444", "A61K"),  # the A61K portfolio patent matches the A61K grant
+    } <= triples
+    assert ("9111111", "9555444", "A61K") not in triples  # A61K grant ≠ G06F/H04L portfolio patent
 
 
 def test_list_columns_export_to_csv(tmp_path: Path) -> None:
