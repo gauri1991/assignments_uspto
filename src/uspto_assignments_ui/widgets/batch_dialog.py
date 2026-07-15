@@ -68,6 +68,7 @@ from uspto_assignments import (
     columns_for,
     dump_templates,
     extract_distinct_reference,
+    is_dataset_dir,
     load_templates,
     probablepeople_available,
     reference_columns,
@@ -98,6 +99,7 @@ _FORMATS: list[tuple[str, ExportFormat]] = [
     ("Feather (Arrow)", "feather"),
 ]
 _CORE_LOGGER = "uspto_assignments"
+_INPUT_SUFFIXES = (".xml", ".zip")  # raw batch inputs a folder scan picks up
 _DERIVE_OPS: list[tuple[str, str]] = [
     ("Year (YYYY of a date)", "year"),
     ("Month (MM of a date)", "month"),
@@ -1951,12 +1953,36 @@ class BatchDialog(QDialog):
             self._ui_state.set_last_dir("input", str(Path(paths[0]).parent))
 
     def _add_folder(self) -> None:
+        """Add a folder: a parsed dataset folder is one input; else scan it for .xml/.zip files.
+
+        A pre-parsed dataset folder (``flat.parquet`` / ``flat.arrow`` …) is added as a single
+        input for :func:`open_dataset`. Any other folder is walked **recursively** for ``.xml`` /
+        ``.zip`` files, each added as its own input — so a folder of USPTO dumps converts in one go.
+        """
         path = QFileDialog.getExistingDirectory(
-            self, "Add dataset folder", self._ui_state.last_dir("input")
+            self,
+            "Add dataset folder or a folder of XML/ZIP files",
+            self._ui_state.last_dir("input"),
         )
-        if path:
+        if not path:
+            return
+        folder = Path(path)
+        if is_dataset_dir(folder):
             self._inputs.addItem(path)
-            self._ui_state.set_last_dir("input", path)
+        else:
+            files = sorted(
+                p for p in folder.rglob("*") if p.is_file() and p.suffix.lower() in _INPUT_SUFFIXES
+            )
+            if not files:
+                QMessageBox.information(
+                    self,
+                    "Nothing to add",
+                    f"No .xml/.zip files and no parsed dataset were found in:\n{folder}",
+                )
+                return
+            for file in files:
+                self._inputs.addItem(str(file))
+        self._ui_state.set_last_dir("input", path)
 
     def _remove_input(self) -> None:
         for item in self._inputs.selectedItems():

@@ -559,7 +559,11 @@ Each template is applied to **each input independently**. Inputs can be USPTO `.
 **Building & running (left → right in the dialog):**
 
 1. **Template** — name it; **Save** / **Delete**; reload a saved template from the dropdown.
-2. **Inputs** — *Add files…* (`.xml`/`.zip`) and/or *Add folder…* (dataset folders); *Remove*.
+2. **Inputs** — *Add files…* (multi-select `.xml`/`.zip`) and/or *Add folder…*; *Remove*. **Add
+   folder…** is smart: point it at an already-parsed **dataset folder** (has `flat.parquet` /
+   `flat.arrow` …) and it's added as one dataset input; point it at any **other folder** and it's
+   scanned **recursively** for every `.xml`/`.zip`, each added as its own input — so a whole folder
+   of daily/annual dumps queues in one click.
 3. **Load** — an optional max-record cap and a field/table selection tree (loads only what you need).
 4. **Steps** — *Add step ▾* (menu below), reorder isn't needed (they run top-to-bottom);
    **double-click a step to edit** it; *Remove*.

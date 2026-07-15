@@ -13,6 +13,7 @@ from uspto_assignments import (
     TableStore,
     columns_for,
     export_store,
+    is_dataset_dir,
     open_dataset,
     open_parquet_store,
     open_store,
@@ -45,6 +46,22 @@ def test_store_files_written_and_reopenable(tmp_path: Path) -> None:
     assert reopened.row_counts()["properties"] == 4
     # leading zeros preserved through the Arrow round-trip
     assert reopened.table("assignments").column("reel_no").to_pylist() == ["012345", "054321"]
+
+
+def test_is_dataset_dir_distinguishes_dataset_from_raw_input_folder(tmp_path: Path) -> None:
+    arrow_ds = tmp_path / "arrow"
+    parse_to_store(FIXTURE, arrow_ds)  # writes <table>.arrow files
+    assert is_dataset_dir(arrow_ds) is True
+
+    parquet_ds = tmp_path / "parquet"
+    export_store(open_store(arrow_ds), parquet_ds, "parquet")  # writes <table>.parquet files
+    assert is_dataset_dir(parquet_ds) is True
+
+    raw = tmp_path / "raw"  # a folder of source files is NOT a dataset
+    raw.mkdir()
+    (raw / "a.xml").write_text("<x/>", encoding="utf-8")
+    assert is_dataset_dir(raw) is False
+    assert is_dataset_dir(tmp_path / "does_not_exist") is False
 
 
 def test_flat_table_columns_and_rollups(tmp_path: Path) -> None:

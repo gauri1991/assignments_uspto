@@ -304,6 +304,19 @@ def open_parquet_store(store_dir: Path) -> TableStore:
     return TableStore(tables)
 
 
+def is_dataset_dir(store_dir: Path) -> bool:
+    """Whether ``store_dir`` holds a saved dataset (Arrow or Parquet store tables).
+
+    True when :func:`open_dataset` could open it, False for any other folder (e.g. one holding raw
+    XML/ZIP files) — lets a caller tell "already-parsed dataset" from "folder of inputs to parse".
+    """
+    return any(
+        (store_dir / f"{name}{_STORE_SUFFIX}").is_file()
+        or (store_dir / f"{name}.parquet").is_file()
+        for name in STORE_TABLES
+    )
+
+
 def open_dataset(store_dir: Path) -> TableStore:
     """Open a saved dataset directory, auto-detecting Arrow (``.arrow``) or Parquet (``.parquet``).
 
