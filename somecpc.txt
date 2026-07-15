@@ -1,0 +1,73 @@
+I have everything. Here's the walkthrough — but first a heads-up: the two bundled templates need two small edits to actually chain offline (11 exports CSV + raw buyer names; 09 defaults to network patent-list mode). I'll flag exactly what to change.
+
+The two files you prepare
+
+File A — your CPC source (for template 11): the PatSeer/CSV export, one row per patent:
+
+┌────────────────────┬─────────────────────┐
+│ Publication Number │         CPC         │
+├────────────────────┼─────────────────────┤
+│ 10123456           │ G06F16/00; H04L9/32 │
+├────────────────────┼─────────────────────┤
+│ 10234567           │ A61K31/00           │
+└────────────────────┴─────────────────────┘
+
+Columns are configurable in the step (patent_column / code_column); the ; separator splits multi-code cells.
+
+File B — your portfolio footprint (for template 09, offline mode): a CSV/TSV, first column = patent, second column = CPC, one code per row (matched by position, not header name):
+
+patent,cpc
+9111111,G06F16/00
+9111111,G06F16/2455
+9222222,H04L9/32
+
+Step 1 — Run template 11 (attach your CPC codes)
+
+One edit first: template 11 exports CSV, but cpc_codes is a list column — CSV flattens it and the output isn't a dataset template 09 can read. Change the export step's format to parquet. (Double-click the Export step → format → Parquet.)
+
+Then run:
+- Import template 11, Add files… → your USPTO assignment .xml/.zip.
+- Open the Attach CPC from file step and set:
+  - CPC file (source_path) → Browse to File A (your PatSeer CSV)
+  - File patent column = Publication Number, File CPC column = CPC, separator = ;
+- Pick an output folder → Run.
+
+Output: <out>/11 - Attach CPC…/run_<ts>/<source>/flat.parquet, with cpc_codes / cpc_subclasses / cpc_lookup_status attached.
+
+▎ Check before moving on: open that flat.parquet (landing page → View Parquet) and look at cpc_lookup_status. If most rows say not_found, your PatSeer file didn't cover those patents — fix coverage first, because step 2 aborts if too few patents carry CPC (a built-in hit-rate floor).
+
+Step 2 — Run template 09 (match against your portfolio)
+
+Two edits first (double-click the CPC match step):
+1. Portfolio mode: patent_list → footprint_file (this is what makes it fully offline — patent_list mode would try to resolve the portfolio's CPCs via the API).
+2. Portfolio file (portfolio_path) → Browse to File B (your footprint CSV).
+3. Buyer column: 09 defaults to assignee_names_canonical, but template 11 exports the raw assignee_names. Set buyer column = assignee_names (or add a Normalize step to template 11 first — see note).
+
+Then run:
+- Import template 09.
+- Add folder… → select the run folder from step 1 (the one containing flat.parquet). Thanks to the fix we just shipped, that folder is auto-detected as a dataset and added as one input. ✅
+- Pick an output folder → Run.
+
+Output — two tables:
+- matched_buyers_by_portfolio_patent — per portfolio patent, the buyers holding CPC-overlapping patents, ranked.
+- matched_buyers_overall — each buyer rolled up across the whole portfolio.
+
+The full offline flow
+
+your PatSeer CSV (File A)                 your footprint CSV (File B)
+        │                                          │
+        ▼                                          ▼
+[Template 11]  attach_cpc_file  →  flat.parquet  →  [Template 09]  cpc_match (footprint_file)
+   (edit: export = parquet)         (Add folder)     (edits: footprint_file + your file
+                                                              + buyer_column = assignee_names)
+        │                                                              │
+   XML/ZIP in                                          matched_buyers_* tables out
+No network touched at any point.
+
+Two notes
+
+- File paths: relative paths in a template (like cpc/patseer_export.csv) resolve from wherever you launch the app; safest is to Browse in the dialogs so absolute paths are stored.
+- Cleaner buyers (optional): matching on raw assignee_names won't merge spelling variants of the same buyer. If you want that, add a Normalize step on assignee_names in template 11 (producing assignee_names_canonical), include it in 11's export columns, and leave 09's buyer column at its default.
+
+---
+Those template edits are fiddly to do by hand every time. Want me to create two ready-to-run offline variants — e.g. 11b_attach_cpc_parquet.json and 09b_cpc_match_footprint_offline.json — pre-wired (parquet export, footprint_file mode, matching buyer columns) so you just set the two file paths and run? I can build and test them.
