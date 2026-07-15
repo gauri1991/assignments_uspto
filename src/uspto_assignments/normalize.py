@@ -185,6 +185,7 @@ class EntityMemory:
         self,
         canonicals: list[str] | None = None,
         aliases: dict[str, str] | None = None,
+        types: dict[str, str] | None = None,
     ) -> None:
         self._canonicals: list[str] = []
         self._canon_keys: list[str] = []
@@ -196,12 +197,19 @@ class EntityMemory:
         # Fuzzy score at learn time, keyed like _aliases. Missing key = 100 (exact/curated), so
         # only fuzzy-learned aliases carry an entry and the JSON stays compact.
         self._alias_scores: dict[str, int] = {}
+        # Optional per-canonical entity type ("company"/"individual"/"unknown"), keyed by canonical
+        # NAME (not index) so it survives _rebuild(). Absent key = untagged. A plain str, not
+        # classify's EntityType, because classify imports this module (would be a circular import).
+        self._types: dict[str, str] = {}
         self._learned: list[tuple[str, str, int]] = []
         for name in canonicals or []:
             self._add_canonical(name)
         for alias_key, canonical in (aliases or {}).items():
             self._add_canonical(canonical)
             self._aliases[alias_key] = canonical
+        for name, entity_type in (types or {}).items():
+            if name in self._canon_set and entity_type:
+                self._types[name] = entity_type
 
     # -- reads --------------------------------------------------------------
     @property
@@ -224,6 +232,20 @@ class EntityMemory:
     def counts(self) -> tuple[int, int]:
         """Return ``(canonical_count, alias_count)``."""
         return len(self._canonicals), len(self._aliases)
+
+    @property
+    def types(self) -> dict[str, str]:
+        """Per-canonical entity type map (canonical name → type); only tagged entities appear."""
+        return dict(self._types)
+
+    def entity_type(self, name: str) -> str | None:
+        """The stored entity type for canonical ``name`` (``None`` when untagged)."""
+        return self._types.get(name)
+
+    def set_type(self, name: str, entity_type: str) -> None:
+        """Tag canonical ``name`` with ``entity_type`` (no-op if the canonical is unknown)."""
+        if name in self._canon_set and entity_type:
+            self._types[name] = entity_type
 
     # -- mutation -----------------------------------------------------------
     def _add_canonical(self, name: str) -> None:
@@ -315,7 +337,7 @@ class EntityMemory:
                 self._alias_scores[alias_key] = score
 
     def merge(self, other: EntityMemory) -> None:
-        """Absorb another memory's canonicals, aliases, and learn-time scores."""
+        """Absorb another memory's canonicals, aliases, learn-time scores, and type tags."""
         for name in other._canonicals:
             self._add_canonical(name)
         for alias_key, canonical in other._aliases.items():
@@ -324,6 +346,8 @@ class EntityMemory:
             score = other._alias_scores.get(alias_key)
             if score is not None:
                 self._alias_scores[alias_key] = score
+        for name, entity_type in other._types.items():
+            self._types.setdefault(name, entity_type)  # keep an existing local tag on collision
 
     # -- editing ------------------------------------------------------------
     def _rebuild(self) -> None:
@@ -350,6 +374,8 @@ class EntityMemory:
             return
         self._canonicals = [new if c == old else c for c in self._canonicals]
         self._aliases = {k: (new if v == old else v) for k, v in self._aliases.items()}
+        if old in self._types:  # carry the tag onto the new name
+            self._types[new] = self._types.pop(old)
         self._rebuild()
 
     def delete_canonical(self, name: str) -> None:
@@ -359,6 +385,7 @@ class EntityMemory:
         self._canonicals = [c for c in self._canonicals if c != name]
         self._aliases = {k: v for k, v in self._aliases.items() if v != name}
         self._alias_scores = {k: s for k, s in self._alias_scores.items() if k in self._aliases}
+        self._types.pop(name, None)
         self._rebuild()
 
     def merge_canonicals(self, source: str, target: str) -> None:
@@ -369,6 +396,9 @@ class EntityMemory:
         self._canonicals = [c for c in self._canonicals if c != source]
         self._aliases = {k: (target if v == source else v) for k, v in self._aliases.items()}
         self._aliases[clean(source)] = target  # the old canonical key now resolves to the target
+        source_type = self._types.pop(source, None)
+        if source_type is not None:
+            self._types.setdefault(target, source_type)  # tag the target if it had none
         self._rebuild()
 
     def set_alias(self, alias_key: str, canonical: str) -> None:
@@ -389,11 +419,17 @@ class EntityMemory:
     # -- persistence --------------------------------------------------------
     def to_dict(self) -> dict[str, Any]:
         # v2: alias values are [canonical, score]; a plain string (v1) means score 100.
+        # v3: adds an optional "types" map (canonical name -> type); omitted keys are untagged.
         aliases: dict[str, Any] = {}
         for key, canonical in self._aliases.items():
             score = self._alias_scores.get(key)
             aliases[key] = canonical if score is None else [canonical, score]
-        return {"version": 2, "canonicals": self._canonicals, "aliases": aliases}
+        return {
+            "version": 3,
+            "canonicals": self._canonicals,
+            "aliases": aliases,
+            "types": dict(self._types),
+        }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> EntityMemory:
@@ -412,7 +448,9 @@ class EntityMemory:
                         scores[key] = score
             else:  # v1: bare canonical string (treated as curated: score 100)
                 aliases[key] = str(value)
-        memory = cls(canonicals=canonicals, aliases=aliases)
+        raw_types = cast("dict[str, Any]", data.get("types", {}))  # absent in v1/v2 files
+        types = {str(k): str(v) for k, v in raw_types.items() if v}
+        memory = cls(canonicals=canonicals, aliases=aliases, types=types)
         memory._alias_scores = scores
         return memory
 
@@ -480,6 +518,7 @@ def normalize_column(  # noqa: PLR0913 - a clear public entry point with keyword
     score_target: str = "",
     review_target: str = "",
     review_threshold: int = 0,
+    type_target: str = "",
     on_progress: OnProgress | None = None,
 ) -> pa.Table:
     """Return ``table`` with a ``target`` column of canonical values for ``column``.
@@ -495,9 +534,20 @@ def normalize_column(  # noqa: PLR0913 - a clear public entry point with keyword
     weakest part-confidence (100 = exact/identity, 0 = a part had no match); ``review_target``
     adds a "true"/"false" column flagging values accepted via a fuzzy match scoring below
     ``review_threshold`` — the clerical-review band. ``review_threshold=0`` disables flagging.
+
+    ``type_target`` (optional) adds a string column with the resolved canonical's stored **entity
+    type** (from :meth:`EntityMemory.entity_type`) — reusing tags applied once in the entity editor.
+    Untagged canonicals yield ``""``; multi-party values report the single agreed type across their
+    parts, else ``"unknown"``. Requires no re-classification at run time.
     """
 
-    def resolve_value(value: str) -> tuple[str, int]:
+    def combine_types(canonicals: list[str]) -> str:
+        tags = {t for t in (memory.entity_type(c) for c in canonicals) if t}
+        if not tags:
+            return ""  # no part is tagged
+        return next(iter(tags)) if len(tags) == 1 else "unknown"  # agreement, else ambiguous
+
+    def resolve_value(value: str) -> tuple[str, int, str]:
         parts = [p.strip() for p in value.split(separator) if p.strip()] if separator else [value]
         canonicals: list[str] = []
         min_score = 100
@@ -507,7 +557,8 @@ def normalize_column(  # noqa: PLR0913 - a clear public entry point with keyword
             )
             canonicals.append(canonical)
             min_score = min(min_score, score)
-        return (separator.join(canonicals) if separator else canonicals[0]), min_score
+        joined = separator.join(canonicals) if separator else canonicals[0]
+        return joined, min_score, (combine_types(canonicals) if type_target else "")
 
     # Route the column through Any (pyarrow-stubs under-type dictionary_encode / take).
     source: Any = table.column(column).combine_chunks()
@@ -516,14 +567,17 @@ def normalize_column(  # noqa: PLR0913 - a clear public entry point with keyword
     total = len(distinct)
     mapped: list[str | None] = []
     scores: list[int | None] = []
+    kinds: list[str | None] = []
     for index, value in enumerate(distinct):
         if value is None:
             mapped.append(None)
             scores.append(None)
+            kinds.append(None)
         else:
-            canonical, score = resolve_value(value)
+            canonical, score, kind = resolve_value(value)
             mapped.append(canonical)
             scores.append(score)
+            kinds.append(kind)
         if on_progress is not None and (index + 1) % _PROGRESS_EVERY == 0:
             on_progress(index + 1, total)
     if on_progress is not None:
@@ -540,4 +594,6 @@ def normalize_column(  # noqa: PLR0913 - a clear public entry point with keyword
     if review_target:
         flags = review_flags(scores, review_threshold)
         result = put(result, review_target, pa.array(flags, type=pa.string()))
+    if type_target:
+        result = put(result, type_target, pa.array(kinds, type=pa.string()))
     return result

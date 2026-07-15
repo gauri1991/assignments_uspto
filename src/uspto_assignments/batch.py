@@ -152,6 +152,7 @@ class NormalizeStep:
     scorer: str = DEFAULT_SCORER  # rapidfuzz algorithm (see normalize.scorer_names())
     emit_score: bool = False  # add a {target}_score column (weakest part-confidence, 0–100)
     review_threshold: int = 0  # >0: add {target}_review flagging fuzzy accepts scoring below it
+    emit_type: bool = False  # add a {target}_type column from the memory's stored entity tags
     enabled: bool = True
 
     def resolved_target(self) -> str:
@@ -165,6 +166,10 @@ class NormalizeStep:
     def resolved_review(self) -> str:
         """The review-flag column name (added only when ``review_threshold`` > 0)."""
         return f"{self.resolved_target()}_review"
+
+    def resolved_type(self) -> str:
+        """The entity-type column name (added only when ``emit_type`` is set)."""
+        return f"{self.resolved_target()}_type"
 
     def effective_separator(self) -> str:
         """The split separator, defaulting to ``"; "`` for concatenated ``*_names`` columns."""
@@ -184,6 +189,7 @@ class NormalizeStep:
             "scorer": self.scorer,
             "emit_score": self.emit_score,
             "review_threshold": self.review_threshold,
+            "emit_type": self.emit_type,
         }
 
 
@@ -609,6 +615,7 @@ def _decode_step(data: dict[str, Any]) -> BatchStep:  # noqa: PLR0911, PLR0912 -
             scorer=str(data.get("scorer", DEFAULT_SCORER)),
             emit_score=bool(data.get("emit_score", False)),
             review_threshold=int(data.get("review_threshold", 0)),
+            emit_type=bool(data.get("emit_type", False)),
         )
     if kind == "classify":
         return ClassifyStep(
@@ -815,6 +822,8 @@ def columns_after(  # noqa: PLR0912 - one branch per step kind
             if isinstance(step, NormalizeStep):
                 for name in _confidence_columns(step):
                     add(step.table, name)
+                if step.emit_type:
+                    add(step.table, step.resolved_type())
         elif isinstance(step, CompareStep):
             if step.action == "flag":
                 add(step.table, step.resolved_target())
@@ -1148,6 +1157,7 @@ def _apply_normalize(
         score_target=f"{target}_score" if step.emit_score else "",
         review_target=f"{target}_review" if step.review_threshold > 0 else "",
         review_threshold=step.review_threshold,
+        type_target=f"{target}_type" if step.emit_type else "",
         on_progress=on_progress,
     )
 
@@ -2417,9 +2427,10 @@ def describe_step(step: BatchStep) -> str:  # noqa: PLR0911, PLR0912 - one line 
     if isinstance(step, NormalizeStep):
         split = f" · split '{step.separator}'" if step.separator else ""
         learn = "" if step.learn else " · match-only"
+        type_marker = " · type" if step.emit_type else ""
         return (
             f"Normalize · {step.table}.{step.column} → {step.resolved_target()} "
-            f"(≥{step.threshold}){split}{learn}{_confidence_suffix(step)}"
+            f"(≥{step.threshold}){split}{learn}{_confidence_suffix(step)}{type_marker}"
         )
     if isinstance(step, DedupeStep):
         key = ", ".join(step.subset) if step.subset else "whole row"

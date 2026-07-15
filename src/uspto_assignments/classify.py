@@ -19,7 +19,7 @@ from typing import Any, Literal
 import pyarrow as pa
 import pyarrow.compute as _pc_module
 
-from .normalize import clean
+from .normalize import EntityMemory, clean
 
 # pyarrow.compute is under-typed in pyarrow-stubs; route through Any (see filters.py for rationale).
 pc: Any = _pc_module
@@ -195,6 +195,34 @@ def classify_name(name: str, *, method: ClassifyMethod = "rules") -> EntityType:
     if method == "probablepeople":
         return _probablepeople_classify(name)
     return _classify_rules(name)
+
+
+def tag_memory(
+    memory: EntityMemory,
+    *,
+    method: ClassifyMethod = "rules",
+    only_missing: bool = False,
+    on_progress: OnProgress | None = None,
+) -> int:
+    """Tag an :class:`EntityMemory`'s canonicals with an entity type in place; return the count set.
+
+    Each canonical name is classified with :func:`classify_name` (``method`` = ``"rules"`` or
+    ``"probablepeople"``) and stored via :meth:`EntityMemory.set_type`. With ``only_missing`` set,
+    already-tagged canonicals are left untouched (cheap re-runs after seeding). ``on_progress`` is
+    called as ``(done, total)`` over the canonicals considered.
+    """
+    canonicals = memory.canonicals
+    total = len(canonicals)
+    tagged = 0
+    for index, name in enumerate(canonicals):
+        if not (only_missing and memory.entity_type(name) is not None):
+            memory.set_type(name, classify_name(name, method=method))
+            tagged += 1
+        if on_progress is not None and (index + 1) % _PROGRESS_EVERY == 0:
+            on_progress(index + 1, total)
+    if on_progress is not None:
+        on_progress(total, total)
+    return tagged
 
 
 def _combine(types: list[EntityType], mode: CombineMode) -> EntityType:  # noqa: PLR0911 - per mode
