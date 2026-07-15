@@ -1487,7 +1487,11 @@ def _project_for_export(table: pa.Table, step: ExportStep, name: str) -> pa.Tabl
 
 
 def _apply_export(
-    tables: dict[str, pa.Table], step: ExportStep, source_dir: Path, emit: OnEvent
+    tables: dict[str, pa.Table],
+    step: ExportStep,
+    source_dir: Path,
+    emit: OnEvent,
+    export_prefix: str = "",
 ) -> list[str]:
     # Default export order: the known store tables first, then any derived/aggregate tables.
     # ``tables=[]`` means "nothing" (only reachable via hand-edited templates); ``None`` means all.
@@ -1506,7 +1510,10 @@ def _apply_export(
             continue
 
         table = _project_for_export(table, step, name)
-        path = unique_path(source_dir / f"{name}{FORMAT_SUFFIX[step.fmt]}")
+        # Flat "convert" mode (export_prefix set) names files by source (<stem>_<table>.<ext>) in a
+        # shared folder and overwrites on re-run; normal mode keeps <table>.<ext> non-clobbering.
+        dest = source_dir / f"{export_prefix}{name}{FORMAT_SUFFIX[step.fmt]}"
+        path = dest if export_prefix else unique_path(dest)
         export(table, path, step.fmt)
         written.append(str(path))
         emit(BatchEvent("info", f"  export {name} → {path.name} ({table.num_rows:,} rows)"))
@@ -1639,6 +1646,7 @@ def _apply_step(  # noqa: PLR0912, PLR0913 - one branch per step kind
     source_dir: Path,
     emit: OnEvent,
     cpc_ctx: CpcRunContext | None = None,
+    export_prefix: str = "",
 ) -> list[str]:
     """Apply one step in place; returns written paths (only an ExportStep writes anything)."""
     if isinstance(step, FilterStep):
@@ -1670,7 +1678,7 @@ def _apply_step(  # noqa: PLR0912, PLR0913 - one branch per step kind
     elif isinstance(step, CpcMatchStep):
         _apply_cpc_match(tables, step, _resolve_cpc_ctx(cpc_ctx), emit)
     else:
-        return _apply_export(tables, step, source_dir, emit)
+        return _apply_export(tables, step, source_dir, emit, export_prefix)
     return []
 
 
@@ -1741,6 +1749,7 @@ def _process_input(  # noqa: PLR0913 - threads collaborators; one branch per kin
     memory: EntityMemory | None = None,
     cpc_ctx: CpcRunContext | None = None,
     trace_steps: bool = False,
+    export_prefix: str = "",
 ) -> FileResult:
     memory = memory if memory is not None else EntityMemory()
     learned_before = len(memory.learned)
@@ -1768,7 +1777,9 @@ def _process_input(  # noqa: PLR0913 - threads collaborators; one branch per kin
             )
             before_tables = set(tables)
             outputs.extend(
-                _apply_step(tables, step, memory, used_targets, source_dir, emit, cpc_ctx)
+                _apply_step(
+                    tables, step, memory, used_targets, source_dir, emit, cpc_ctx, export_prefix
+                )
             )
             note = _warn_if_emptied(tables, step, index, table_name, before, emit)
             after_table = tables.get(table_name)
@@ -1827,6 +1838,7 @@ def _process_one(  # noqa: PLR0913 - picklable worker threading the run's collab
     memory: EntityMemory,
     cpc_ctx: CpcRunContext | None = None,
     trace_steps: bool = False,
+    export_prefix: str = "",
 ) -> FileResult:
     """Picklable process-pool worker: streams events/progress live via ``event_queue``.
 
@@ -1845,6 +1857,7 @@ def _process_one(  # noqa: PLR0913 - picklable worker threading the run's collab
         memory=memory,
         cpc_ctx=cpc_ctx,
         trace_steps=trace_steps,
+        export_prefix=export_prefix,
     )
 
 
@@ -1867,6 +1880,27 @@ def _assign_source_dirs(inputs: Sequence[Path], template_dir: Path) -> list[Path
         claimed.add(candidate)
         dirs.append(candidate)
     return dirs
+
+
+def _assign_export_prefixes(inputs: Sequence[Path]) -> list[str]:
+    """One distinct filename prefix per input (flat convert mode), so files are named by source.
+
+    Mirrors :func:`_assign_source_dirs`: same-stem inputs from different folders would collide on
+    ``<stem>_<table>.parquet`` in the shared flat folder, so each gets a serial ``<stem> (n)_``
+    prefix decided up front (parallel-safe — every worker targets a distinct filename).
+    """
+    claimed: set[str] = set()
+    prefixes: list[str] = []
+    for source in inputs:
+        stem = source.stem
+        candidate = stem
+        counter = 1
+        while candidate in claimed:
+            candidate = f"{stem} ({counter})"
+            counter += 1
+        claimed.add(candidate)
+        prefixes.append(f"{candidate}_")
+    return prefixes
 
 
 def _future_result(future: Future[FileResult], source: Path) -> FileResult:
@@ -1904,7 +1938,7 @@ def _cancel_pending(pending: set[Future[FileResult]], emit: OnEvent) -> set[Futu
     return remaining
 
 
-def _run_parallel(  # noqa: PLR0913 - internal helper threading the run's collaborators
+def _run_parallel(  # noqa: PLR0913, PLR0915 - internal helper threading the run's collaborators
     template: BatchTemplate,
     inputs: list[Path],
     source_dirs: Sequence[Path],
@@ -1915,6 +1949,7 @@ def _run_parallel(  # noqa: PLR0913 - internal helper threading the run's collab
     cpc_ctx: CpcRunContext | None = None,
     should_stop: Callable[[], bool] = _never_stop,
     trace_steps: bool = False,
+    export_prefixes: Sequence[str] | None = None,
 ) -> tuple[list[FileResult], bool]:
     """Process inputs across a worker pool, emitting each file's events plus a combined total.
 
@@ -1926,6 +1961,7 @@ def _run_parallel(  # noqa: PLR0913 - internal helper threading the run's collab
     completed = 0
     total = len(inputs)
     last_emit = 0.0
+    prefixes: Sequence[str] = export_prefixes if export_prefixes is not None else [""] * len(inputs)
 
     with mp.Manager() as manager:
         event_queue: Any = manager.Queue()
@@ -1976,8 +2012,9 @@ def _run_parallel(  # noqa: PLR0913 - internal helper threading the run's collab
                     memory,
                     cpc_ctx,
                     trace_steps,
+                    prefix,
                 ): src
-                for src, src_dir in zip(inputs, source_dirs, strict=True)
+                for src, src_dir, prefix in zip(inputs, source_dirs, prefixes, strict=True)
             }
             pending = set(futures)
             cancelled = False
@@ -2232,7 +2269,7 @@ def _append_runs_index(  # noqa: PLR0913 - one ledger line per run
         )
 
 
-def run_batch(  # noqa: PLR0913 - a clear public entry point with keyword-only options
+def run_batch(  # noqa: PLR0913, PLR0912, PLR0915 - clear public entry point, keyword-only options
     template: BatchTemplate,
     inputs: list[Path],
     out_root: Path,
@@ -2245,6 +2282,7 @@ def run_batch(  # noqa: PLR0913 - a clear public entry point with keyword-only o
     should_stop: Callable[[], bool] | None = None,
     strict: bool = False,
     trace_steps: bool = False,
+    flat_output: bool = False,
 ) -> BatchResult:
     """Run ``template`` over ``inputs``, writing outputs under ``out_root``.
 
@@ -2253,7 +2291,8 @@ def run_batch(  # noqa: PLR0913 - a clear public entry point with keyword-only o
         inputs: Files (``.xml``/``.zip``) and/or dataset folders to process.
         out_root: Root output directory. Each run gets its own self-contained folder:
             ``<out_root>/<template-name>/run_<timestamp>/`` holding ``manifest.json``,
-            ``run.log``, and one subfolder per source.
+            ``run.log``, and one subfolder per source. In ``flat_output`` mode this structure is
+            bypassed (see below).
         workers: Number of parallel worker processes (``1`` = sequential with live per-step events).
         timestamp: Stamp naming the run folder (defaults to the current local time).
         memory: Entity memory for any normalize steps; new aliases learned during the run are
@@ -2267,6 +2306,10 @@ def run_batch(  # noqa: PLR0913 - a clear public entry point with keyword-only o
             warnings as error events and continues.
         trace_steps: When True, each enabled step's resulting table(s) are written to
             ``<source-stem>/steps/NN_<table>.parquet`` for manual review of every intermediate.
+        flat_output: "Convert" mode. When True, outputs land **directly in ``out_root``** named by
+            source (``<source-stem>_<table>.<ext>``) instead of per-source subfolders under a
+            timestamped run folder, and the manifest / summary / runs-index / run-log audit
+            artifacts are skipped. Re-runs overwrite same-named files. ``trace_steps`` is ignored.
 
     Returns:
         A :class:`BatchResult` summarizing successes, failures, and per-file details;
@@ -2282,10 +2325,20 @@ def run_batch(  # noqa: PLR0913 - a clear public entry point with keyword-only o
     memory = memory if memory is not None else EntityMemory()
     run_start = time.monotonic()
     timestamp = timestamp or datetime.now().strftime("%Y%m%d_%H%M%S")
-    template_dir = out_root / _safe_name(template.name)
-    run_dir = unique_path(template_dir / f"run_{timestamp}")  # same stamp twice -> " (1)"
-    run_dir.mkdir(parents=True, exist_ok=True)
-    source_dirs = _assign_source_dirs(inputs, run_dir)
+    if flat_output:
+        if trace_steps:
+            emit(BatchEvent("info", "Convert mode: step-output tracing is ignored (no run folder)"))
+        out_root.mkdir(parents=True, exist_ok=True)
+        run_dir = out_root  # everything lands directly here, no template/run subfolders
+        source_dirs = [out_root] * len(inputs)
+        export_prefixes = _assign_export_prefixes(inputs)  # <source-stem>_ per file, deduped
+        trace_steps = False
+    else:
+        template_dir = out_root / _safe_name(template.name)
+        run_dir = unique_path(template_dir / f"run_{timestamp}")  # same stamp twice -> " (1)"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        source_dirs = _assign_source_dirs(inputs, run_dir)
+        export_prefixes = [""] * len(inputs)
     results: list[FileResult] = []
     cancelled = False
 
@@ -2302,13 +2355,16 @@ def run_batch(  # noqa: PLR0913 - a clear public entry point with keyword-only o
             cpc_ctx,
             should_stop=stop,
             trace_steps=trace_steps,
+            export_prefixes=export_prefixes,
         )
         # Workers mutate pickled copies of the memory; merge what they learned back in. (The
         # sequential path shares ``memory`` in-process, so its learned pairs are already there.)
         for result in results:
             memory.apply_learned(result.learned)
     else:
-        for source, source_dir in zip(inputs, source_dirs, strict=True):
+        for source, source_dir, export_prefix in zip(
+            inputs, source_dirs, export_prefixes, strict=True
+        ):
             if stop():
                 cancelled = True
                 emit(BatchEvent("info", "Batch cancelled — skipping remaining inputs"))
@@ -2326,11 +2382,13 @@ def run_batch(  # noqa: PLR0913 - a clear public entry point with keyword-only o
                 memory=memory,
                 cpc_ctx=cpc_ctx,
                 trace_steps=trace_steps,
+                export_prefix=export_prefix,
             )
             _emit_file_done(result, emit)
             results.append(result)
 
-    _write_run_log(run_dir, template, results)
+    if not flat_output:
+        _write_run_log(run_dir, template, results)
     succeeded = sum(1 for r in results if r.ok)
     failed = len(results) - succeeded
     elapsed = time.monotonic() - run_start
@@ -2350,39 +2408,40 @@ def run_batch(  # noqa: PLR0913 - a clear public entry point with keyword-only o
                 f"Batch complete: {succeeded} succeeded, {failed} failed in {elapsed:.1f}s",
             )
         )
-    _write_manifest(
-        run_dir,
-        template,
-        validation_warnings,
-        results,
-        timestamp=timestamp,
-        workers=workers,
-        cancelled=cancelled,
-        strict=strict,
-        elapsed=elapsed,
-        inputs=inputs,
-    )
-    _write_summary_xlsx(
-        run_dir,
-        template,
-        validation_warnings,
-        results,
-        timestamp=timestamp,
-        workers=workers,
-        cancelled=cancelled,
-        elapsed=elapsed,
-        inputs=inputs,
-    )
-    _append_runs_index(
-        out_root,
-        timestamp=timestamp,
-        template_name=template.name,
-        inputs=len(inputs),
-        succeeded=succeeded,
-        failed=failed,
-        cancelled=cancelled,
-        run_dir=run_dir,
-    )
+    if not flat_output:  # "convert" mode intentionally writes only the parquet files
+        _write_manifest(
+            run_dir,
+            template,
+            validation_warnings,
+            results,
+            timestamp=timestamp,
+            workers=workers,
+            cancelled=cancelled,
+            strict=strict,
+            elapsed=elapsed,
+            inputs=inputs,
+        )
+        _write_summary_xlsx(
+            run_dir,
+            template,
+            validation_warnings,
+            results,
+            timestamp=timestamp,
+            workers=workers,
+            cancelled=cancelled,
+            elapsed=elapsed,
+            inputs=inputs,
+        )
+        _append_runs_index(
+            out_root,
+            timestamp=timestamp,
+            template_name=template.name,
+            inputs=len(inputs),
+            succeeded=succeeded,
+            failed=failed,
+            cancelled=cancelled,
+            run_dir=run_dir,
+        )
     return BatchResult(
         succeeded=succeeded,
         failed=failed,
