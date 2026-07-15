@@ -45,7 +45,7 @@ from .batch import (
     run_preview,
     validate_template,
 )
-from .classify import classify_column, classify_name, classify_value
+from .classify import classify_column, classify_name, classify_value, tag_memory
 from .conveyance import classify_conveyance, conveyance_type_column
 from .cpcconfig import (
     CpcCacheConfig,
@@ -217,6 +217,7 @@ __all__ = [
     "schema_for",
     "scope_suffix",
     "scorer_names",
+    "tag_memory",
     "top_buyers",
     "unique_path",
     "validate_template",

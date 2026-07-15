@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import pyarrow as pa
 
-from uspto_assignments import classify_column, classify_name, classify_value
+from uspto_assignments import (
+    EntityMemory,
+    classify_column,
+    classify_name,
+    classify_value,
+    tag_memory,
+)
 
 
 def test_company_names_by_legal_suffix() -> None:
@@ -62,3 +68,21 @@ def test_probablepeople_method_falls_back_to_rules_when_absent() -> None:
         "individual",
         "unknown",
     }
+
+
+def test_tag_memory_tags_all_canonicals_by_rules() -> None:
+    memory = EntityMemory(canonicals=["ACME INC", "SMITH, JOHN", "SONY"])
+    tagged = tag_memory(memory, method="rules")
+    assert tagged == 3
+    assert memory.entity_type("ACME INC") == "company"
+    assert memory.entity_type("SMITH, JOHN") == "individual"
+    assert memory.entity_type("SONY") == "unknown"
+
+
+def test_tag_memory_only_missing_preserves_existing_tags() -> None:
+    memory = EntityMemory(canonicals=["ACME INC", "SMITH, JOHN"])
+    memory.set_type("ACME INC", "individual")  # a deliberate manual override
+    tagged = tag_memory(memory, method="rules", only_missing=True)
+    assert tagged == 1  # only the untagged "SMITH, JOHN" was classified
+    assert memory.entity_type("ACME INC") == "individual"  # manual tag left intact
+    assert memory.entity_type("SMITH, JOHN") == "individual"

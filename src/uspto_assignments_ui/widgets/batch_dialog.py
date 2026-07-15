@@ -540,6 +540,7 @@ class NormalizeStepDialog(QDialog):
         self._learn = QCheckBox("Learn new canonicals (uncheck to match a curated memory only)")
         self._learn.setChecked(True)
         self._emit_score = QCheckBox("Add match-score column (confidence 0–100)")
+        self._emit_type = QCheckBox("Add entity-type column (from the memory's stored tags)")
         self._review = QSpinBox()
         self._review.setRange(0, 100)
         self._review.setSpecialValueText("Off")  # 0 = no review flagging
@@ -551,6 +552,7 @@ class NormalizeStepDialog(QDialog):
         form.addRow("Scorer", self._scorer)
         form.addRow("", self._learn)  # aligned under the field column
         form.addRow("", self._emit_score)
+        form.addRow("", self._emit_type)
         form.addRow("Flag review below", self._review)
         layout.addLayout(form)
 
@@ -579,6 +581,7 @@ class NormalizeStepDialog(QDialog):
             self._scorer.setCurrentText(step.scorer)
             self._learn.setChecked(step.learn)
             self._emit_score.setChecked(step.emit_score)
+            self._emit_type.setChecked(step.emit_type)
             self._review.setValue(step.review_threshold)
 
     def _rebuild_columns(self) -> None:
@@ -609,6 +612,7 @@ class NormalizeStepDialog(QDialog):
             learn=self._learn.isChecked(),
             scorer=self._scorer.currentText(),
             emit_score=self._emit_score.isChecked(),
+            emit_type=self._emit_type.isChecked(),
             review_threshold=self._review.value(),
         )
 

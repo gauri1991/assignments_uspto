@@ -221,7 +221,7 @@ def test_entities_json_v2_roundtrip_and_v1_legacy_load(tmp_path: Path) -> None:
     path = tmp_path / "entities.json"
     memory.save(path)
     raw = json.loads(path.read_text(encoding="utf-8"))
-    assert raw["version"] == 2
+    assert raw["version"] == 3  # current schema; alias [canonical, score] format unchanged from v2
     fuzzy_values: list[list[Any]] = [
         cast("list[Any]", v) for v in raw["aliases"].values() if isinstance(v, list)
     ]
@@ -241,6 +241,85 @@ def test_entities_json_v2_roundtrip_and_v1_legacy_load(tmp_path: Path) -> None:
     old = EntityMemory.load(legacy)
     assert old.aliases == {"acme corp": "ACME CORPORATION"}
     assert old.alias_score("acme corp") == 100
+
+
+def test_entity_type_set_get_and_v3_roundtrip(tmp_path: Path) -> None:
+    memory = EntityMemory(canonicals=["ACME CORPORATION", "SMITH, JOHN"])
+    memory.set_type("ACME CORPORATION", "company")
+    memory.set_type("SMITH, JOHN", "individual")
+    memory.set_type("NOT A CANONICAL", "company")  # ignored: not a canonical
+    assert memory.entity_type("ACME CORPORATION") == "company"
+    assert memory.entity_type("SMITH, JOHN") == "individual"
+    assert memory.entity_type("NOT A CANONICAL") is None
+    assert memory.types == {"ACME CORPORATION": "company", "SMITH, JOHN": "individual"}
+
+    path = tmp_path / "entities.json"
+    memory.save(path)
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    assert raw["version"] == 3
+    assert raw["types"] == {"ACME CORPORATION": "company", "SMITH, JOHN": "individual"}
+    reloaded = EntityMemory.load(path)
+    assert reloaded.types == memory.types
+
+
+def test_v2_file_without_types_loads_with_empty_types(tmp_path: Path) -> None:
+    legacy = tmp_path / "v2.json"
+    legacy.write_text(
+        json.dumps({"version": 2, "canonicals": ["ACME CORPORATION"], "aliases": {}}),
+        encoding="utf-8",
+    )
+    memory = EntityMemory.load(legacy)
+    assert memory.types == {}
+    assert memory.entity_type("ACME CORPORATION") is None
+
+
+def test_entity_type_stays_in_sync_with_canonical_edits() -> None:
+    memory = EntityMemory(canonicals=["ACME CORP", "BETA INC"])
+    memory.set_type("ACME CORP", "company")
+    memory.set_type("BETA INC", "company")
+
+    memory.rename_canonical("ACME CORP", "ACME CORPORATION")  # tag follows the rename
+    assert memory.entity_type("ACME CORPORATION") == "company"
+    assert memory.entity_type("ACME CORP") is None
+
+    memory.delete_canonical("BETA INC")  # tag dropped with the canonical
+    assert memory.entity_type("BETA INC") is None
+
+    memory.add_canonical("GAMMA LLC")
+    memory.merge_canonicals("ACME CORPORATION", "GAMMA LLC")  # source tag moves to untagged target
+    assert memory.entity_type("GAMMA LLC") == "company"
+    assert memory.entity_type("ACME CORPORATION") is None
+
+
+def test_merge_absorbs_other_memory_types() -> None:
+    a = EntityMemory(canonicals=["ACME CORP"])
+    b = EntityMemory(canonicals=["BETA INC"])
+    b.set_type("BETA INC", "company")
+    a.merge(b)
+    assert a.entity_type("BETA INC") == "company"
+
+
+def test_normalize_column_emits_entity_type_column() -> None:
+    memory = EntityMemory(canonicals=["ACME CORPORATION", "SMITH, JOHN"])
+    memory.set_type("ACME CORPORATION", "company")
+    memory.set_type("SMITH, JOHN", "individual")
+    table = pa.table(
+        {"buyer": ["ACME CORPORATION", "SMITH, JOHN", "ACME CORPORATION; SMITH, JOHN", None]}
+    )
+    result = normalize_column(
+        table,
+        "buyer",
+        "buyer_canonical",
+        memory,
+        separator="; ",
+        learn=False,
+        type_target="buyer_canonical_type",
+    )
+    kinds = result.column("buyer_canonical_type").to_pylist()
+    assert kinds[0] == "company"
+    assert kinds[1] == "individual"
+    assert kinds[2] == "unknown"  # multi-party parties disagree
+    assert kinds[3] is None  # null passthrough
 
 
 def test_normalize_column_emits_score_and_review_columns() -> None:

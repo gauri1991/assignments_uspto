@@ -7,6 +7,7 @@ the fuzzy block index so ``resolve()`` keeps matching afterwards.
 
 from __future__ import annotations
 
+import importlib.util
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, QThread, QTimer
@@ -21,6 +22,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QPushButton,
     QSpinBox,
@@ -29,7 +31,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from uspto_assignments import EntityMemory, ReferenceGazetteer, build_reference
+from uspto_assignments import EntityMemory, ReferenceGazetteer, build_reference, tag_memory
 
 from ..models import EntityAliasModel
 from ..settings import EntityMemoryStore
@@ -42,6 +44,7 @@ _REFERENCE_FILTER = "Reference (*.tsv *.csv *.parquet);;All files (*)"
 _REFERENCE_NAME_COLUMN = "disambig_assignee_organization"  # PatentsView bulk-file default
 _SEARCH_DEBOUNCE_MS = 250
 _MAX_CANONICALS = 5000  # cap the visible canonical list so a 75k-entry memory stays responsive
+_ENTITY_TYPES = ("company", "individual", "unknown")
 
 
 def _search_box(placeholder: str) -> QLineEdit:
@@ -108,6 +111,9 @@ class EntityDialog(QDialog):
 
         self._canon_list = QListWidget()
         self._canon_list.setProperty("panel", "true")
+        self._canon_list.setSelectionMode(
+            QListWidget.SelectionMode.ExtendedSelection  # multi-select for bulk "Set type…"
+        )
         col.addWidget(self._canon_list, 1)
         self._canon_note = QLabel()
         self._canon_note.setProperty("role", "hint")
@@ -119,6 +125,12 @@ class EntityDialog(QDialog):
                 ("Rename…", self._rename_canonical),
                 ("Merge…", self._merge_canonical),
                 ("Delete", self._delete_canonical),
+            )
+        )
+        col.addLayout(
+            self._button_row(
+                ("Tag all…", self._tag_all),
+                ("Set type…", self._set_type),
             )
         )
         return tab
@@ -236,7 +248,11 @@ class EntityDialog(QDialog):
         matches = [c for c in self._memory.canonicals if not needle or needle in c.lower()]
         shown = matches[:_MAX_CANONICALS]
         self._canon_list.clear()
-        self._canon_list.addItems(shown)
+        for name in shown:  # show the stored type inline; keep the raw name in the item's data
+            entity_type = self._memory.entity_type(name)
+            item = QListWidgetItem(f"{name}  ·  {entity_type}" if entity_type else name)
+            item.setData(Qt.ItemDataRole.UserRole, name)
+            self._canon_list.addItem(item)
         extra = len(matches) - len(shown)
         self._canon_note.setText(
             f"showing {len(shown):,} of {len(matches):,} matches (+{extra:,} more)"
@@ -246,7 +262,10 @@ class EntityDialog(QDialog):
 
     def _selected_canonical(self) -> str | None:
         item = self._canon_list.currentItem()
-        return item.text() if item is not None else None
+        return item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+
+    def _selected_canonicals(self) -> list[str]:
+        return [item.data(Qt.ItemDataRole.UserRole) for item in self._canon_list.selectedItems()]
 
     # -- canonical edits ---------------------------------------------------
     def _add_canonical(self) -> None:
@@ -279,6 +298,67 @@ class EntityDialog(QDialog):
         name = self._selected_canonical()
         if name is not None:
             self._memory.delete_canonical(name)
+            self._refresh()
+
+    # -- entity-type tagging -----------------------------------------------
+    def _tag_all(self) -> None:
+        """Classify every canonical (Rules or ML) off the GUI thread, tagging the working memory."""
+        if self._thread is not None:
+            return
+        ml_installed = importlib.util.find_spec("probablepeople") is not None
+        ml_label = "ML (probablepeople)" if ml_installed else "ML (probablepeople — not installed)"
+        methods = ["Rules (fast, no dependency)", ml_label]
+        choice, ok = QInputDialog.getItem(
+            self,
+            "Tag all entities",
+            "Classify every canonical name as company / individual / unknown using:",
+            methods,
+            0,
+            False,
+        )
+        if not ok:
+            return
+        method = "probablepeople" if choice == ml_label else "rules"
+        memory = self._memory
+        self._counts.setText(f"Tagging {memory.counts()[0]:,} entities ({method})…")
+        thread = QThread(self)
+        worker = CallWorker(lambda: tag_memory(memory, method=method))
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_tag_ready)
+        worker.failed.connect(self._on_reference_failed)  # reuse: refresh + warn on failure
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(self._cleanup_thread)
+        self._thread = thread
+        self._worker = worker
+        thread.start()
+
+    def _on_tag_ready(self, result: object) -> None:
+        tagged = result if isinstance(result, int) else 0
+        self._refresh()
+        canonicals, aliases = self._memory.counts()
+        self._counts.setText(
+            f"{canonicals:,} canonical names · {aliases:,} learned aliases · "
+            f"tagged {tagged:,} entities (Save to persist)"
+        )
+
+    def _set_type(self) -> None:
+        """Set the selected canonical(s) to a chosen entity type."""
+        names = self._selected_canonicals()
+        if not names:
+            return
+        choice, ok = QInputDialog.getItem(
+            self,
+            "Set entity type",
+            f"Set type for {len(names)} selected entity(ies):",
+            list(_ENTITY_TYPES),
+            0,
+            False,
+        )
+        if ok and choice:
+            for name in names:
+                self._memory.set_type(name, choice)
             self._refresh()
 
     def _delete_alias(self) -> None:

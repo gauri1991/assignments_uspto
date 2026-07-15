@@ -358,7 +358,16 @@ A tabbed editor that works on a **working copy** (Save persists, Cancel discards
 
 - **Canonicals** tab — searchable list; **Add**, **Rename** (repoints its aliases), **Merge** (fold
   one canonical into another), **Delete** (also removes its aliases). Structural edits rebuild the
-  fuzzy block index so matching keeps working.
+  fuzzy block index so matching keeps working. Each canonical also shows its **entity type** inline
+  (`ACME INC · company`) when tagged:
+  - **Tag all…** classifies every canonical as company / individual / unknown using **Rules** (fast,
+    deterministic) or **ML (probablepeople)** — chosen when you click, and run off the UI thread.
+  - **Set type…** overrides the type of the selected canonical(s) by hand (multi-select supported).
+  - **Seed from reference…** tags every seeded organization `company` automatically (a disambiguated
+    gazetteer is companies by definition).
+  - Types are stored in the entities JSON (`"types"`) and persist on **Save**. A [normalize
+    step](#batch-step-catalog) with **emit type** reuses these tags to add a `<target>_type` column
+    downstream — so tag once, then filter (e.g. `_type equals company`) across every run.
 - **Aliases** tab — searchable table of `alias → canonical` with a **Score** column (the confidence
   each alias was learned at; 100 = exact or curated). **Double-click a canonical cell to reassign**
   an alias, or **Delete alias**.

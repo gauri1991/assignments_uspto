@@ -192,7 +192,9 @@ def build_reference(
                 names.append(org)
                 if entity_id:
                     ids[org] = str(entity_id)
-    memory = EntityMemory(canonicals=names)
+    # Every org in a disambiguated-assignee gazetteer is, by definition, a company — tag them so a
+    # memory seeded from the reference carries company types for free (see module docstring).
+    memory = EntityMemory(canonicals=names, types=dict.fromkeys(names, "company"))
     if logger.isEnabledFor(logging.DEBUG):  # block-distribution diagnostics under -v
         logger.debug(
             "gazetteer '%s': %d distinct orgs, largest fuzzy block %d (capped/re-split)",
