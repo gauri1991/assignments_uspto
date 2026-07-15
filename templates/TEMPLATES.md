@@ -181,6 +181,31 @@ warnings for each template. Regenerate after any template change.
 
 **Warnings:** none
 
+## 13_cpc_attach_offline.json
+
+### 13 - Attach CPC from file → Parquet (offline, ready for match)
+
+1. Filter · flat · 4 clause(s) · AND
+2. Normalize · flat.assignee_names → assignee_names_canonical (≥90)
+3. Attach CPC file · flat.doc_number vs patseer_export.csv → cpc_codes
+4. Derive · flat.transaction_date_year = year(transaction_date)
+5. Export · parquet · flat
+
+**Warnings:**
+- ⚠ Step 3 (AttachCpcFile): CPC file not found: cpc/patseer_export.csv
+
+## 14_cpc_match_offline.json
+
+### 14 - CPC match (offline footprint) + per-class matches
+
+1. CPC match · flat vs portfolio_footprint.csv · footprint_file → matched_buyers_by_portfolio_patent + class matches
+2. Export · csv · matched_buyers_by_portfolio_patent, matched_buyers_overall, matched_cpc_classes
+
+**Warnings:**
+- ⚠ Step 1 (CpcMatchStep): column 'assignee_names_canonical' is not available on 'flat' yet.
+- ⚠ Step 1 (CpcMatchStep): column 'cpc_codes' is not available on 'flat' yet.
+- ⚠ Step 1 (CpcMatch): portfolio file not found: cpc/portfolio_footprint.csv
+
 ## buyer_identification_templates.json
 
 ### Buyers - firm-to-firm transactions (clean, enriched)

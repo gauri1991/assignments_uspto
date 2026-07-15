@@ -74,7 +74,7 @@ producing step can reference them:
 | `compare` with `action: "flag"` | `<left>_matches_<right>` (values `"true"` / `"false"`); with `emit_score`: `<target>_score`; with `review_threshold>0`: `<target>_review` (added before any drop/keep filtering) |
 | `reference_match` on `column` | `<column>_disambiguated`, `<column>_matched` (`"true"`/`"false"`), `<column>_assignee_id` (only if `id_column` set); with `emit_score`: `<column>_match_score`; with `review_threshold>0`: `<column>_match_review` |
 | `fetch_cpc` / `attach_cpc_file` | `cpc_codes` (list), `cpc_subclasses` (list), `cpc_lookup_status` |
-| `cpc_match` | creates **two new tables**: `matched_buyers_by_portfolio_patent` and `matched_buyers_overall` |
+| `cpc_match` | creates **two new tables**: `matched_buyers_by_portfolio_patent` and `matched_buyers_overall`; with `emit_class_matches`, a third: `matched_cpc_classes` (one row per portfolio patent × buyer patent × shared CPC class) |
 | `aggregate` | creates a **new table** named `<table>_by_<group_by joined by _>` with columns = the group-by columns + `count` (+ `<count_distinct>_distinct` if set) |
 
 Example: after `{"kind":"normalize","table":"flat","column":"assignor_names"}`, the column
@@ -300,12 +300,16 @@ omitted) **auto-derives** the name per §2a — prefer leaving it blank so names
 { "kind": "cpc_match", "table": "flat", "portfolio_mode": "patent_list",
   "portfolio_path": "portfolio.txt", "buyer_column": "assignee_names_canonical",
   "number_column": "doc_number", "kind_column": "doc_kind", "date_column": "transaction_date",
-  "out_table": "matched_buyers_by_portfolio_patent", "overall_table": "matched_buyers_overall" }
+  "out_table": "matched_buyers_by_portfolio_patent", "overall_table": "matched_buyers_overall",
+  "emit_class_matches": false, "class_match_table": "matched_cpc_classes" }
 ```
-- Reads CPC already attached by a prior `fetch_cpc` step. `portfolio_mode` — `patent_list` (a file of
-  grant numbers, one per line; each footprint resolved via the same source/cache) or `footprint_file`
-  (a pre-built `patent,cpc` file; no network). Creates **two tables**: per-portfolio-patent ranked
-  buyers (`out_table`) and a cross-portfolio buyer summary (`overall_table`).
+- Reads CPC already attached by a prior `fetch_cpc`/`attach_cpc_file` step. `portfolio_mode` —
+  `patent_list` (a file of grant numbers, one per line; each footprint resolved via the same
+  source/cache) or `footprint_file` (a pre-built `patent,cpc` file; no network). Creates **two tables**:
+  per-portfolio-patent ranked buyers (`out_table`) and a cross-portfolio buyer summary (`overall_table`).
+- `emit_class_matches` *(optional)* — also writes `class_match_table` (default `matched_cpc_classes`):
+  the **many-to-many** evidence, one row per `(portfolio_patent, buyer, buyer_patent, cpc_class, year)`
+  for every shared class of every matched patent pair (see [`CPCmatching.md`](CPCmatching.md) §5).
 - **All match knobs — grain (`subclass`/`main_group`/`full_symbol`), overlap metric
   (`shared_count`/`jaccard`/`rarity_weighted`), threshold, ranking weights, min in-domain patents,
   and hit-rate floor — come from the project CPC config**, so they stay consistent across templates.
