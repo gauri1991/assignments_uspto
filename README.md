@@ -140,12 +140,15 @@ A native desktop viewer explores the parsed data interactively:
     rows, e.g. remove self-transfers), and *Transfer type* — a one-click preset that keeps only a
     chosen pairing (**firm→firm**, individual→firm, …). Classification is rule-based by default
     (legal-suffix/org-keyword detection + `LAST, FIRST` person patterns); an optional `probablepeople`
-    ML backend is selectable per step (falls back to rules if absent). It is opt-in
-    (`pip install ".[ml]"` on Python ≤3.13). On **Python 3.14** the C `doublemetaphone` dep has no
-    wheel yet, so install the backend without it and let the tool use the pure-Python `metaphone`
-    instead: `pip install python-crfsuite probableparsing Metaphone` then
-    `pip install --no-deps probablepeople` (classify substitutes `metaphone` automatically). Or just
-    use the default rules classifier, which needs none of this.
+    ML backend is selectable per step (falls back to rules if absent). **The rule-based default needs
+    no compiler and runs on any supported Python (3.12–3.14), including a locked-down Windows laptop.**
+    The ML backend depends on the C extension `python-crfsuite`, whose newest release (0.9.12) ships
+    wheels only up to **Python 3.12** — on 3.13/3.14 pip would build it from source and need a C++
+    compiler. So compiler-free ML requires a **Python 3.12 venv**; there install with (the pure-Python
+    `metaphone` shim removes the other C dep, `doublemetaphone`):
+    `pip install python-crfsuite probableparsing Metaphone` then
+    `pip install --no-deps probablepeople`. On Python 3.13/3.14 the ML backend cannot install without
+    a compiler — use the default rules classifier instead.
   - **Match against reference** — *Match against reference* fuzzy-matches a name column against an
     external **USPTO/PatentsView disambiguated-assignee** file (a company gazetteer). A match
     normalizes the raw name to the disambiguated organization and captures its `assignee_id`

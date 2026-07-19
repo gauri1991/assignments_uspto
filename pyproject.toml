@@ -26,24 +26,28 @@ dependencies = [
 ui = [
     "PyQt6>=6.6",
 ]
-# Optional ML backend for entity-type classification — opt in with `pip install ".[ml]"`.
-# It is NOT installed by default because probablepeople pulls a C extension (doublemetaphone) with
-# no wheel for the newest CPython (e.g. 3.14 as of mid-2026), so a plain install tries to build it
-# from source. `Metaphone` is a pure-Python double-metaphone that classify.py auto-substitutes for
-# it when the C package is absent (see _install_doublemetaphone_shim), so ML works with no compiler.
+# Optional ML backend for entity-type classification. NOT installed by default, and it needs a
+# C-extension: probablepeople depends on `python-crfsuite` (the CRF engine), whose newest release
+# (0.9.12) ships wheels only up to CPython 3.12 — none for 3.13 or 3.14 on any platform. So:
 #
-#   * Python <=3.13:  `pip install ".[ml]"`  (wheels exist for everything, including doublemetaphone)
-#   * Python 3.14:    the C doublemetaphone has no wheel, so install probablepeople WITHOUT its deps
-#                     and use the pure-Python metaphone instead:
+#   * Python 3.12:    compiler-free. Install with the recipe below (the pure-Python `metaphone`
+#                     shim in classify._install_doublemetaphone_shim removes probablepeople's OTHER
+#                     C dep, `doublemetaphone`, so only python-crfsuite's cp312 wheel is needed):
 #                         pip install python-crfsuite probableparsing Metaphone
 #                         pip install --no-deps probablepeople
-#                     (python-crfsuite ships a 3.14 wheel; probableparsing/Metaphone are pure Python)
+#   * Python 3.13/3.14:  python-crfsuite has NO wheel, so pip builds it from source and needs a C++
+#                     compiler. There is no pure-Python CRF backend — use a Python 3.12 venv for ML,
+#                     or just use the rule-based classifier (the default, needs no compiler).
 #
-# Rules is the default and always works: classify falls back to rules (with a one-time note)
-# whenever a step selects "probablepeople" but the package is absent.
+# Prefer the two-command recipe above over `pip install ".[ml]"`: the extra pulls probablepeople's
+# full dependency set, which includes the C `doublemetaphone` (may itself need building), whereas the
+# `--no-deps` recipe installs only the wheels and lets the pure-Python `metaphone` shim stand in.
+# Rules is the default and always works: classify falls back to rules (with a one-time note) whenever
+# a step selects "probablepeople" but the backend can't load.
 ml = [
     "probablepeople>=0.5",
-    "Metaphone>=0.6",  # pure-Python doublemetaphone stand-in — lets ML run without the C wheel
+    "python-crfsuite>=0.9.9",  # CRF engine — wheels only up to cp312; needs a compiler on 3.13/3.14
+    "Metaphone>=0.6",  # pure-Python doublemetaphone stand-in — avoids probablepeople's other C dep
 ]
 # Dev tooling + type stubs (the stubs are what let `pyright` strict pass on lxml/pyarrow).
 dev = [

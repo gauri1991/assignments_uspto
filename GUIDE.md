@@ -74,7 +74,7 @@ Optional dependency extras:
 | Extra | Adds | Needed for |
 |---|---|---|
 | `ui` | `PyQt6` | the desktop app |
-| `ml` | `probablepeople` | opt-in ML classifier — `pip install ".[ml]"` (not in the default install; needs C-ext wheels, so use Python 3.12/3.13; rules still work if absent) |
+| `ml` | `probablepeople` | opt-in ML classifier — needs the C extension `python-crfsuite`, which has wheels only up to **Python 3.12**, so compiler-free ML requires a Python 3.12 venv (see README / requirements.txt); on 3.13/3.14 it needs a C++ compiler. Rules is the default and always works. |
 | `dev` | `pytest`, `pytest-qt`, `ruff`, `pyright`, `lxml-stubs`, `pyarrow-stubs` | development |
 
 Entry points (installed as console scripts, or run the shims directly):
@@ -404,9 +404,12 @@ firm-to-firm transfers and to identify individual assignors (inventors).
   short (2–4 token) all-alphabetic name with no company keyword.
 - **Unknown** — everything else, e.g. single-token brands like `SONY` (deliberately not guessed).
 
-**ML backend** — set a step's *method* to `probablepeople` to use a CRF name classifier. It's
-included in the default install, so this works out of the box; if the package is ever missing the
-run log shows a one-line note (amber) and the step falls back to rules.
+**ML backend** — set a step's *method* to `probablepeople` to use a CRF name classifier. It is
+**opt-in and not in the default install**: it depends on the C extension `python-crfsuite`, which
+ships wheels only up to Python 3.12, so a compiler-free install needs a **Python 3.12 venv** (see
+README / requirements.txt); on Python 3.13/3.14 it requires a C++ compiler. When the backend is
+absent or can't load, the run log shows a one-line amber note and the step falls back to rules — so
+the rule-based default always works with no setup.
 
 **Multi-party mode** (for concatenated `*_names` columns) — how to combine the parties' types:
 

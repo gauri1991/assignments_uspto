@@ -150,3 +150,27 @@ def test_apply_classify_warns_once_when_ml_unavailable(monkeypatch: pytest.Monke
     ]
     assert len(warnings) == 1
     assert "assignor_names_type" in tables["flat"].column_names  # rules fallback still ran
+
+
+def test_load_probablepeople_returns_none_on_non_import_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The exact Windows failure mode: probablepeople is present but its python-crfsuite C extension
+    # fails to load with a NON-ImportError (e.g. "OSError: DLL load failed"). The broadened except
+    # must catch it so classify falls back to rules instead of crashing the run.
+    class _BoomFinder:
+        def find_spec(self, name: str, path: object = None, target: object = None) -> None:
+            if name == "probablepeople":
+                raise OSError("simulated DLL load failure")
+            # returning None (implicitly) tells the import system to try the next finder
+
+    classify._load_probablepeople.cache_clear()  # @cache — force a fresh load attempt
+    monkeypatch.delitem(sys.modules, "probablepeople", raising=False)
+    monkeypatch.setattr(sys, "meta_path", [_BoomFinder(), *sys.meta_path])
+    try:
+        assert classify._load_probablepeople() is None  # broad except → None, not a raise
+        # classify_name must not raise and must return exactly the rules result for the same name
+        got = classify_name("SMITH, JOHN A", method="probablepeople")
+        assert got == classify_name("SMITH, JOHN A", method="rules")
+    finally:
+        classify._load_probablepeople.cache_clear()  # don't poison other tests' cached load

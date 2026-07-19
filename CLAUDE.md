@@ -13,6 +13,10 @@ Inherits the pycoder workspace standards, skills, and settings from the parent d
   lxml-stubs pyarrow-stubs`. If you install uv later, migrate with `uv init` + `uv add`.
 - Runtime deps: `lxml` (streaming parse), `pyarrow` (Parquet), `openpyxl` (streaming Excel).
   The `*-stubs` packages are dev-only, needed for `pyright` strict to pass on those libraries.
+- **Optional ML classifier (`probablepeople`)**: opt-in only. It needs the C extension
+  `python-crfsuite`, which has wheels only up to **Python 3.12** — so a compiler-free ML install
+  requires a Python 3.12 venv (recipe in `requirements.txt` / `README.md`); on 3.13/3.14 it needs a
+  C++ compiler. The rule-based classifier is the default, needs no compiler, and runs on 3.12–3.14.
 - Install (editable, with dev extras): `.venv/bin/pip install -e ".[dev]"`
 - Run CLI: `.venv/bin/python main.py path/to/assignment.xml --outdir out` (or `.venv/bin/uspto-assign ...`)
 - Test: `.venv/bin/pytest`

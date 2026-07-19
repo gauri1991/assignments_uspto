@@ -195,18 +195,25 @@ def _install_doublemetaphone_shim() -> None:
     except ImportError:
         return
     shim: Any = types.ModuleType("doublemetaphone")
-    shim.doublemetaphone = metaphone.doublemetaphone
+    shim.doublemetaphone = metaphone.doublemetaphone  # pyright: ignore[reportUnknownMemberType]
     sys.modules["doublemetaphone"] = shim
     logger.debug("registered pure-Python doublemetaphone shim (metaphone) for probablepeople")
 
 
 @cache
 def _load_probablepeople() -> Any | None:
-    """Import the optional ``probablepeople`` backend once (cached); ``None`` when not installed."""
+    """Import the optional ``probablepeople`` backend once (cached); ``None`` when unavailable.
+
+    Any failure to load — not just a missing package, but a ``python-crfsuite`` C extension that is
+    absent or fails to load (e.g. no wheel for this Python, or a broken DLL on Windows, which can
+    surface as ``OSError`` rather than ``ImportError``) — resolves to ``None`` so the caller falls
+    back to rules instead of crashing. The tool never requires the ML backend to run.
+    """
     _install_doublemetaphone_shim()  # satisfy probablepeople's doublemetaphone import on 3.14+
     try:
         import probablepeople  # type: ignore[import-untyped]  # noqa: PLC0415 - optional backend
-    except ImportError:
+    except Exception as exc:  # optional backend: any load failure → fall back to rules
+        logger.debug("probablepeople ML backend unavailable (%s) — classify will use rules", exc)
         return None
     return probablepeople
 

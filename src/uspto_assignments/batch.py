@@ -1411,7 +1411,8 @@ def _apply_classify(tables: dict[str, pa.Table], step: ClassifyStep, emit: OnEve
             BatchEvent(
                 "warning",
                 f"  probablepeople not installed — classify used rules for "
-                f"{step.table}.{step.column} (pip install probablepeople to enable ML)",
+                f"{step.table}.{step.column} (the ML backend needs a Python 3.12 venv on Windows; "
+                f"see requirements.txt)",
             )
         )
 

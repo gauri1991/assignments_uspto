@@ -19,19 +19,24 @@ rapidfuzz>=3
 duckdb>=1.0
 
 # --- optional ML classify backend (opt in — NOT installed by default) ---
-# The rule-based classifier is the default and needs none of this; classify falls back to rules
-# (with a one-time note) if a step selects ML while it is absent. To enable the probablepeople ML
-# classifier:
+# The rule-based classifier is the DEFAULT and needs none of this; it runs compiler-free on any
+# supported Python (3.12-3.14). classify falls back to rules (with a one-time note) if a step selects
+# ML while the backend can't load.
 #
-#   * Python <=3.13 — uncomment both lines (wheels exist for everything, incl. the C doublemetaphone):
-# probablepeople>=0.5
-# Metaphone>=0.6
+# The ML backend needs the C extension `python-crfsuite`, whose newest release (0.9.12) has wheels
+# only up to CPython 3.12 — NONE for 3.13 or 3.14. So a compiler-free ML install requires a
+# Python 3.12 venv; on 3.13/3.14 pip would build python-crfsuite from source and need a C++ compiler
+# (there is no pure-Python CRF backend). To enable ML on Python 3.12 (Windows shown; the pure-Python
+# `metaphone` shim in classify.py removes probablepeople's other C dep, `doublemetaphone`):
 #
-#   * Python 3.14 — the C doublemetaphone has no wheel, so install probablepeople without its deps
-#     and let the tool use the pure-Python metaphone instead (classify.py substitutes it
-#     automatically). Run these two commands instead of uncommenting above:
-#         pip install python-crfsuite probableparsing Metaphone
-#         pip install --no-deps probablepeople
+#     py -3.12 -m venv .venv312
+#     .venv312\Scripts\Activate.ps1                 # Linux/Mac: source .venv312/bin/activate
+#     pip install -r requirements.txt               # the base tool
+#     pip install python-crfsuite probableparsing Metaphone
+#     pip install --no-deps probablepeople
+#
+# Smoke test (expect: individual):
+#     python -c "from uspto_assignments import classify_name; print(classify_name('SMITH, JOHN A', method='probablepeople'))"
 
 # --- desktop UI ---
 PyQt6>=6.6
