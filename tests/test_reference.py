@@ -219,3 +219,31 @@ def test_reference_columns_strips_quoted_header_and_bom(tmp_path: Path) -> None:
     # and the up-front check therefore accepts the real header names
     gaz = build_reference(quoted, "disambig_assignee_organization", id_column="assignee_id")
     assert gaz.size() == 1
+
+
+def test_match_column_unmatched_carries_best_near_miss_score(tmp_path: Path) -> None:
+    """Regression: unmatched names exported a constant score 0 — the off-gazetteer audit
+    templates (05/10) rename that column 'best_gazetteer_score', which was always empty info."""
+    tsv = tmp_path / "ref.tsv"
+    _write_tsv(tsv)
+    gaz = build_reference(tsv, "disambig_assignee_organization", id_column="assignee_id")
+    table = pa.table({"name": ["QUALCOM WORLDWIDE", "ZZYZX HOLDINGS"]})
+    result = match_column(
+        table,
+        "name",
+        gaz,
+        "name_disambiguated",
+        "name_matched",
+        "name_assignee_id",
+        threshold=95,
+        score_col="name_match_score",
+        review_col="name_match_review",
+        review_threshold=99,
+    )
+    matched = result.column("name_matched").to_pylist()
+    scores = result.column("name_match_score").to_pylist()
+    review = result.column("name_match_review").to_pylist()
+    assert matched == ["false", "false"]
+    assert scores[0] is not None and 0 < scores[0] < 95  # near-miss vs QUALCOMM INCORPORATED
+    assert scores[1] == 0  # nothing remotely close (different fuzzy block)
+    assert review == ["false", "false"]  # near-misses are not review candidates

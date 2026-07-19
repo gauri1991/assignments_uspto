@@ -1202,15 +1202,19 @@ def test_template_10_loads_and_validates(tmp_path: Path) -> None:
     path = Path(__file__).resolve().parent.parent / "templates" / "10_dropped_sellers_audit.json"
     template = load_templates(path)[0]
     assert template.name == "10 - Dropped sellers audit (off-gazetteer assignors)"
-    assert len(template.steps) == 4
+    # OR conveyance gate (both spellings) + housekeeping + reference flag + filter + export
+    assert len(template.steps) == 5
+    gate = template.steps[0]
+    assert isinstance(gate, FilterStep) and gate.combine == "or"
+    assert {c.value for c in gate.clauses} == {"ASSIGNORS INTEREST", "ASSIGNOR'S INTEREST"}
 
     # Validate against a tmp reference so the test doesn't depend on the local gazetteer build;
-    # this also proves the matched-flag column flows to step 3 via columns_after.
+    # this also proves the matched-flag column flows to the later filter via columns_after.
     reference = tmp_path / "reference.parquet"
     pq.write_table(  # pyright: ignore[reportUnknownMemberType]
         pa.table({"organization": ["ACME CORPORATION"], "assignee_id": ["A1"]}), reference
     )
-    step = template.steps[1]
+    step = template.steps[2]
     assert isinstance(step, ReferenceMatchStep)
     step.reference_path = str(reference)
     assert validate_template(template.load, template.steps) == []
@@ -1256,14 +1260,18 @@ def test_template_11_attach_cpc_from_file_loads_and_validates(tmp_path: Path) ->
     path = Path(__file__).resolve().parent.parent / "templates" / "11_attach_cpc_from_file.json"
     template = load_templates(path)[0]
     assert template.name.startswith("11 - Attach CPC from file")
-    assert len(template.steps) == 4
-    step = template.steps[1]
-    assert isinstance(step, AttachCpcFileStep)
+    # OR conveyance gate + housekeeping + firm gate (transfer_type, compare) + attach
+    # + derive + export
+    assert len(template.steps) == 7
+    step = next(s for s in template.steps if isinstance(s, AttachCpcFileStep))
     assert step.separator == ";" and step.code_column == "CPC"
+    attach_index = template.steps.index(step)
     # the step adds the CPC trio, so the export column list validates clean
-    cols = columns_after(template.load, template.steps, upto=2)["flat"]
+    cols = columns_after(template.load, template.steps, upto=attach_index + 1)["flat"]
     for name in ("cpc_codes", "cpc_subclasses", "cpc_lookup_status"):
         assert name in cols
     # only warning is the placeholder file path (user supplies their PatSeer export)
     warnings = validate_template(template.load, template.steps)
-    assert warnings == ["Step 2 (AttachCpcFile): CPC file not found: cpc/patseer_export.csv"]
+    assert warnings == [
+        f"Step {attach_index + 1} (AttachCpcFile): CPC file not found: cpc/patseer_export.csv"
+    ]

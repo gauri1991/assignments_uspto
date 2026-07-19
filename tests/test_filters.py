@@ -136,3 +136,22 @@ def test_apply_and_sort_on_empty_table_return_empty() -> None:
     assert apply(table, [FilterClause("a", "equals", "x")]).to_pylist() == []
     assert apply(table, []).to_pylist() == []
     assert sort_indices(table, "a").to_pylist() == []
+
+
+def test_filters_and_distinct_handle_non_string_columns() -> None:
+    """Regression: derived columns (int scores, CPC list columns) must filter, not crash.
+
+    ``normalize_column`` adds an int32 score column and the CPC steps add list columns;
+    ``open_parquet_store`` reopens them with types intact, so filters see non-string columns.
+    """
+    table = pa.table(
+        {
+            "name": ["ACME CORP", "Beta Inc", None],
+            "score": pa.array([95, 80, None], type=pa.int32()),
+            "cpc": pa.array([["H01L", "G06F"], [], None], type=pa.list_(pa.string())),
+        }
+    )
+    assert _indices(filters.apply(table, quick_search="H01L")) == [0]
+    clause = FilterClause(column="score", op="equals", value="95")
+    assert _indices(filters.apply(table, [clause])) == [0]
+    assert filters.distinct_values(table, "score") == ["80", "95"]

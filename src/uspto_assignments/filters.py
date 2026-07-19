@@ -5,8 +5,10 @@ file). A Qt ``QSortFilterProxyModel`` evaluates a Python predicate *per row* and
 so instead we filter in ``pyarrow.compute`` (vectorized C++) and return the **row indices** that
 pass. The Qt model then pages through that index array, querying only the visible cells.
 
-Every column is a string, so text predicates apply uniformly and date ranges compare
-lexicographically on the ``YYYYMMDD`` form (which orders correctly).
+Parsed columns are strings, so text predicates apply uniformly and date ranges compare
+lexicographically on the ``YYYYMMDD`` form (which orders correctly). Derived columns can be
+typed differently (int scores from ``normalize_column``, CPC list columns; Parquet round-trips
+preserve those types), so every predicate first takes a string view of its column.
 """
 
 from __future__ import annotations
@@ -17,6 +19,8 @@ from typing import Any, Literal
 
 import pyarrow as pa
 import pyarrow.compute as _pc_module
+
+from .tables import stringify_column
 
 # ``pyarrow.compute`` is under-typed in pyarrow-stubs: its functions accept Python scalars and
 # ChunkedArrays that the stub overloads omit, and results are ``Array[Unknown]``. Routing calls
@@ -51,9 +55,16 @@ class FilterClause:
     case_sensitive: bool = False
 
 
+def _text_view(col: Any) -> Any:
+    """Return ``col`` as a string column (non-string columns stringified, nulls preserved)."""
+    if pa.types.is_string(col.type):
+        return col
+    return stringify_column(col)
+
+
 def _clause_mask(table: pa.Table, clause: FilterClause) -> pa.Array[Any]:
     """Return a boolean mask (nulls treated as non-matching) for one clause."""
-    col = table.column(clause.column)
+    col = _text_view(table.column(clause.column))
     ignore_case = not clause.case_sensitive
     match clause.op:
         case "contains":
@@ -84,6 +95,8 @@ def _clause_mask(table: pa.Table, clause: FilterClause) -> pa.Array[Any]:
                 pc.greater_equal(col, clause.value),
                 pc.less_equal(col, clause.value2),
             )
+        case _:  # a Literal type can't stop runtime data (e.g. a hand-edited template)
+            raise ValueError(f"unknown filter op {clause.op!r}")
     return pc.fill_null(mask, False)
 
 
@@ -92,7 +105,7 @@ def _quick_mask(table: pa.Table, text: str) -> pa.Array[Any]:
     combined: pa.Array[Any] | None = None
     for name in table.column_names:
         col_mask = pc.fill_null(
-            pc.match_substring(table.column(name), text, ignore_case=True), False
+            pc.match_substring(_text_view(table.column(name)), text, ignore_case=True), False
         )
         combined = col_mask if combined is None else pc.or_(combined, col_mask)
     if combined is None:  # table with no columns
@@ -122,6 +135,8 @@ def apply(
     Returns:
         An ``int64`` array of matching row indices, in ascending row order.
     """
+    if combine not in ("and", "or"):  # anything else would silently OR (the match fallthrough)
+        raise ValueError(f"unknown combine mode {combine!r} (use 'and' or 'or')")
     if table.num_rows == 0:
         # Guard: pyarrow 25 compute kernels can SIGSEGV on edge-shaped empty/zero-chunk columns
         # (e.g. a column appended to a zeroed table). An empty table matches nothing — return early.
@@ -152,7 +167,7 @@ def distinct_values(table: pa.Table, column: str, *, max_unique: int = 200) -> l
     while keeping free text for columns with too many distinct values (titles, doc numbers).
     ``count_distinct`` is checked first so a high-cardinality column is never fully materialized.
     """
-    col = table.column(column)
+    col = _text_view(table.column(column))
     if pc.count_distinct(col).as_py() > max_unique:
         return None
     values = [v for v in pc.unique(col).to_pylist() if isinstance(v, str) and v]

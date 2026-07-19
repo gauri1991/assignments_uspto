@@ -25,7 +25,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from queue import Empty
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import numpy as np
 import pyarrow as pa
@@ -55,9 +55,10 @@ from .normalize import (
     EntityMemory,
     get_scorer,
     normalize_column,
+    scorer_names,
 )
 from .reference import load_reference, match_column, matched_mask, reference_columns
-from .tables import STORE_TABLES, open_dataset, parse_to_store
+from .tables import STORE_TABLES, dataset_columns, open_dataset, parse_to_store
 
 # pyarrow.compute is under-typed in pyarrow-stubs; route through Any (see filters.py for rationale).
 pc: Any = _pc_module
@@ -89,8 +90,13 @@ class LoadConfig:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> LoadConfig:
         columns = {str(k): [str(c) for c in v] for k, v in data.get("columns", {}).items()}
-        limit = data.get("limit")
-        return cls(limit=int(limit) if limit is not None else None, columns=columns)
+        raw_limit = data.get("limit")
+        # ``0`` (and any non-positive value) means "no cap", matching the UI's spinbox where
+        # 0 = all; a literal small positive cap is the only meaningful non-null value.
+        limit = int(raw_limit) if raw_limit is not None else None
+        if limit is not None and limit <= 0:
+            limit = None
+        return cls(limit=limit, columns=columns)
 
 
 @dataclass(slots=True)
@@ -569,20 +575,101 @@ BatchStep = (
 )
 
 
-def _clause_from_dict(data: dict[str, Any]) -> FilterClause:
+class TemplateFormatError(ValueError):
+    """A template file/object is malformed: bad shape, unknown step kind, or invalid enum value.
+
+    Raised with a message that names the offending template, step, and field so an author can fix
+    the JSON — the import path (UI and CLI) shows it verbatim instead of a bare traceback.
+    """
+
+
+# The closed enum vocabularies of the template format (templateInfo.md §4). Values outside these
+# used to be silently coerced to defaults at run time — an imported typo like ``combine: "AND"``
+# or ``action: "drop"`` would run "successfully" with the opposite semantics.
+_FILTER_OPS = frozenset(
+    {"contains", "equals", "not_equals", "starts_with", "not_empty", "is_empty", "in_range"}
+)
+_COMBINE_MODES = frozenset({"and", "or"})
+_DERIVE_OPS = frozenset({"year", "month", "split_first", "upper", "lower"})
+_COMPARE_METHODS = frozenset({"exact", "fuzzy"})
+_COMPARE_ACTIONS = frozenset({"flag", "drop_matches", "keep_matches"})
+_CLASSIFY_METHODS = frozenset({"rules", "probablepeople"})
+_CLASSIFY_MODES = frozenset({"all", "any", "first", "majority"})
+_REFERENCE_MODES = frozenset({"any", "all"})
+_REFERENCE_ACTIONS = frozenset({"flag", "keep_matched", "drop_matched"})
+_ENTITY_TYPES = frozenset({"company", "individual", "unknown"})
+_PORTFOLIO_MODES = frozenset({"patent_list", "footprint_file"})
+
+
+def _expect_enum(
+    data: dict[str, Any], field_name: str, allowed: frozenset[str], default: str
+) -> str:
+    value = str(data.get(field_name, default) or default)
+    if value not in allowed:
+        raise TemplateFormatError(
+            f"invalid {field_name} {value!r} (allowed: {', '.join(sorted(allowed))})"
+        )
+    return value
+
+
+def _expect_scorer(data: dict[str, Any]) -> str:
+    value = str(data.get("scorer", DEFAULT_SCORER) or DEFAULT_SCORER)
+    if value not in scorer_names():
+        raise TemplateFormatError(
+            f"invalid scorer {value!r} (allowed: {', '.join(scorer_names())})"
+        )
+    return value
+
+
+def _expect_threshold(data: dict[str, Any], field_name: str, default: int) -> int:
+    raw = data.get(field_name, default)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise TemplateFormatError(f"{field_name} must be an integer, got {raw!r}") from exc
+    if not 0 <= value <= 100:
+        raise TemplateFormatError(f"{field_name} must be between 0 and 100, got {value}")
+    return value
+
+
+def _expect_bool(data: dict[str, Any], field_name: str, default: bool) -> bool:
+    raw = data.get(field_name, default)
+    if not isinstance(raw, bool):
+        # bool("false") is True — a string here always means the author got the opposite of
+        # what they wrote, so reject it instead of guessing.
+        raise TemplateFormatError(f"{field_name} must be true or false, got {raw!r}")
+    return raw
+
+
+def _require(data: dict[str, Any], key: str, kind: str) -> str:
+    if key not in data:
+        raise TemplateFormatError(f"{kind} step is missing required field '{key}'")
+    return str(data[key])
+
+
+def _expect_str_list(raw: Any, field_name: str) -> list[str]:
+    if isinstance(raw, str) or not isinstance(raw, (list, tuple)):
+        raise TemplateFormatError(f"{field_name} must be a list of column names, got {raw!r}")
+    return [str(c) for c in cast("list[Any]", raw)]
+
+
+def _clause_from_dict(raw: Any) -> FilterClause:
+    if not isinstance(raw, dict):
+        raise TemplateFormatError(f"each filter clause must be an object, got {raw!r}")
+    data = cast(dict[str, Any], raw)
     return FilterClause(
-        column=str(data["column"]),
-        op=data["op"],
+        column=_require(data, "column", "filter clause"),
+        op=_expect_enum(data, "op", _FILTER_OPS, "contains"),  # type: ignore[arg-type]
         value=str(data.get("value", "")),
         value2=str(data.get("value2", "")),
-        case_sensitive=bool(data.get("case_sensitive", False)),
+        case_sensitive=_expect_bool(data, "case_sensitive", False),
     )
 
 
 def _step_from_dict(data: dict[str, Any]) -> BatchStep:
     """Decode a step and apply its ``enabled`` flag (default True)."""
     step = _decode_step(data)
-    step.enabled = bool(data.get("enabled", True))
+    step.enabled = _expect_bool(data, "enabled", True)
     return step
 
 
@@ -592,9 +679,14 @@ def _decode_step(data: dict[str, Any]) -> BatchStep:  # noqa: PLR0911, PLR0912 -
         tables = data.get("tables")
         raw_columns = data.get("columns")
         raw_renames = data.get("renames")
+        fmt = str(data.get("fmt", "parquet"))
+        if fmt not in FORMAT_SUFFIX:
+            raise TemplateFormatError(
+                f"invalid fmt {fmt!r} (allowed: {', '.join(sorted(FORMAT_SUFFIX))})"
+            )
         return ExportStep(
-            fmt=data.get("fmt", "parquet"),
-            tables=[str(t) for t in tables] if tables is not None else None,
+            fmt=fmt,  # type: ignore[arg-type]  # membership-checked against FORMAT_SUFFIX
+            tables=_expect_str_list(tables, "tables") if tables is not None else None,
             columns=(
                 {str(t): [str(c) for c in cols] for t, cols in raw_columns.items()}
                 if raw_columns
@@ -611,47 +703,47 @@ def _decode_step(data: dict[str, Any]) -> BatchStep:  # noqa: PLR0911, PLR0912 -
         target_raw = str(data.get("target", ""))
         target = "" if target_raw == LEGACY_NORMALIZE_TARGET else target_raw
         return NormalizeStep(
-            table=str(data["table"]),
+            table=_require(data, "table", "normalize"),
             column=str(data.get("column", "name")),
             target=target,
-            threshold=int(data.get("threshold", DEFAULT_THRESHOLD)),
+            threshold=_expect_threshold(data, "threshold", DEFAULT_THRESHOLD),
             separator=str(data.get("separator", "")),
-            learn=bool(data.get("learn", True)),
-            scorer=str(data.get("scorer", DEFAULT_SCORER)),
-            emit_score=bool(data.get("emit_score", False)),
-            review_threshold=int(data.get("review_threshold", 0)),
-            emit_type=bool(data.get("emit_type", False)),
+            learn=_expect_bool(data, "learn", True),
+            scorer=_expect_scorer(data),
+            emit_score=_expect_bool(data, "emit_score", False),
+            review_threshold=_expect_threshold(data, "review_threshold", 0),
+            emit_type=_expect_bool(data, "emit_type", False),
         )
     if kind == "classify":
         return ClassifyStep(
-            table=str(data["table"]),
+            table=_require(data, "table", "classify"),
             column=str(data.get("column", "name")),
             target=str(data.get("target", "")),
-            method=data.get("method", "rules"),
-            mode=data.get("mode", "all"),
+            method=_expect_enum(data, "method", _CLASSIFY_METHODS, "rules"),  # type: ignore[arg-type]
+            mode=_expect_enum(data, "mode", _CLASSIFY_MODES, "all"),  # type: ignore[arg-type]
             separator=str(data.get("separator", "")),
         )
     if kind == "compare":
         return CompareStep(
-            table=str(data["table"]),
-            left=str(data["left"]),
-            right=str(data["right"]),
+            table=_require(data, "table", "compare"),
+            left=_require(data, "left", "compare"),
+            right=_require(data, "right", "compare"),
             target=str(data.get("target", "")),
-            method=str(data.get("method", "exact")),
-            scorer=str(data.get("scorer", DEFAULT_SCORER)),
-            threshold=int(data.get("threshold", DEFAULT_THRESHOLD)),
-            action=str(data.get("action", "flag")),
-            emit_score=bool(data.get("emit_score", False)),
-            review_threshold=int(data.get("review_threshold", 0)),
+            method=_expect_enum(data, "method", _COMPARE_METHODS, "exact"),
+            scorer=_expect_scorer(data),
+            threshold=_expect_threshold(data, "threshold", DEFAULT_THRESHOLD),
+            action=_expect_enum(data, "action", _COMPARE_ACTIONS, "flag"),
+            emit_score=_expect_bool(data, "emit_score", False),
+            review_threshold=_expect_threshold(data, "review_threshold", 0),
         )
     if kind == "transfer_type":
         return TransferTypeStep(
             table=str(data.get("table", "flat")),
             assignor_column=str(data.get("assignor_column", "assignor_names")),
             assignee_column=str(data.get("assignee_column", "assignee_names")),
-            assignor_type=str(data.get("assignor_type", "company")),
-            assignee_type=str(data.get("assignee_type", "company")),
-            method=data.get("method", "rules"),
+            assignor_type=_expect_enum(data, "assignor_type", _ENTITY_TYPES, "company"),
+            assignee_type=_expect_enum(data, "assignee_type", _ENTITY_TYPES, "company"),
+            method=_expect_enum(data, "method", _CLASSIFY_METHODS, "rules"),  # type: ignore[arg-type]
         )
     if kind == "reference_match":
         return ReferenceMatchStep(
@@ -663,44 +755,44 @@ def _decode_step(data: dict[str, Any]) -> BatchStep:  # noqa: PLR0911, PLR0912 -
             target=str(data.get("target", "")),
             matched_target=str(data.get("matched_target", "")),
             id_target=str(data.get("id_target", "")),
-            threshold=int(data.get("threshold", DEFAULT_THRESHOLD)),
-            scorer=str(data.get("scorer", DEFAULT_SCORER)),
+            threshold=_expect_threshold(data, "threshold", DEFAULT_THRESHOLD),
+            scorer=_expect_scorer(data),
             separator=str(data.get("separator", "")),
-            mode=str(data.get("mode", "any")),
+            mode=_expect_enum(data, "mode", _REFERENCE_MODES, "any"),
             delimiter=str(data.get("delimiter", "")),
-            action=str(data.get("action", "flag")),
-            emit_score=bool(data.get("emit_score", False)),
-            review_threshold=int(data.get("review_threshold", 0)),
+            action=_expect_enum(data, "action", _REFERENCE_ACTIONS, "flag"),
+            emit_score=_expect_bool(data, "emit_score", False),
+            review_threshold=_expect_threshold(data, "review_threshold", 0),
         )
     if kind == "dedupe":
         subset = data.get("subset")
         return DedupeStep(
-            table=str(data["table"]),
-            subset=[str(c) for c in subset] if subset else None,
+            table=_require(data, "table", "dedupe"),
+            subset=_expect_str_list(subset, "subset") if subset else None,
         )
     if kind == "select":
         return SelectStep(
-            table=str(data["table"]),
-            columns=[str(c) for c in data.get("columns", [])],
+            table=_require(data, "table", "select"),
+            columns=_expect_str_list(data.get("columns", []), "columns"),
         )
     if kind == "sort":
         return SortStep(
-            table=str(data["table"]),
+            table=_require(data, "table", "sort"),
             column=str(data.get("column", "")),
-            ascending=bool(data.get("ascending", True)),
+            ascending=_expect_bool(data, "ascending", True),
         )
     if kind == "derive":
         return DeriveStep(
-            table=str(data["table"]),
-            source=str(data["source"]),
+            table=_require(data, "table", "derive"),
+            source=_require(data, "source", "derive"),
             target=str(data.get("target", "")),
-            op=str(data.get("op", "year")),
+            op=_expect_enum(data, "op", _DERIVE_OPS, "year"),
         )
     if kind == "aggregate":
         cd = data.get("count_distinct")
         return AggregateStep(
-            table=str(data["table"]),
-            group_by=[str(c) for c in data.get("group_by", [])],
+            table=_require(data, "table", "aggregate"),
+            group_by=_expect_str_list(data.get("group_by", []), "group_by"),
             count_distinct=str(cd) if cd else None,
             out_table=str(data.get("out_table", "")),
         )
@@ -723,7 +815,7 @@ def _decode_step(data: dict[str, Any]) -> BatchStep:  # noqa: PLR0911, PLR0912 -
     if kind == "cpc_match":
         return CpcMatchStep(
             table=str(data.get("table", "flat")),
-            portfolio_mode=str(data.get("portfolio_mode", "patent_list")),
+            portfolio_mode=_expect_enum(data, "portfolio_mode", _PORTFOLIO_MODES, "patent_list"),
             portfolio_path=str(data.get("portfolio_path", "")),
             buyer_column=str(data.get("buyer_column", "assignee_names_canonical")),
             number_column=str(data.get("number_column", "doc_number")),
@@ -734,14 +826,34 @@ def _decode_step(data: dict[str, Any]) -> BatchStep:  # noqa: PLR0911, PLR0912 -
             emit_class_matches=bool(data.get("emit_class_matches", False)),
             class_match_table=str(data.get("class_match_table", "matched_cpc_classes")),
         )
-    raw_sort = data.get("sort")
-    sort: SortSpec | None = (str(raw_sort[0]), bool(raw_sort[1])) if raw_sort else None
-    return FilterStep(
-        table=str(data["table"]),
-        clauses=[_clause_from_dict(c) for c in data.get("clauses", [])],
-        combine=data.get("combine", "and"),
-        columns=[str(c) for c in data["columns"]] if data.get("columns") else None,
-        sort=sort,
+    if kind == "filter":
+        raw_sort: Any = data.get("sort")
+        if raw_sort is not None and (
+            isinstance(raw_sort, str)
+            or not isinstance(raw_sort, (list, tuple))
+            or len(cast("list[Any]", raw_sort)) != 2
+        ):
+            raise TemplateFormatError(
+                f'sort must be ["<column>", <ascending bool>] or null, got {raw_sort!r}'
+            )
+        sort_pair = cast("list[Any] | None", raw_sort)
+        sort: SortSpec | None = (str(sort_pair[0]), bool(sort_pair[1])) if sort_pair else None
+        raw_clauses: Any = data.get("clauses", [])
+        if isinstance(raw_clauses, (str, dict)) or not isinstance(raw_clauses, list):
+            raise TemplateFormatError(
+                f"clauses must be a list of clause objects, got {raw_clauses!r}"
+            )
+        return FilterStep(
+            table=_require(data, "table", "filter"),
+            clauses=[_clause_from_dict(c) for c in cast("list[Any]", raw_clauses)],
+            combine=_expect_enum(data, "combine", _COMBINE_MODES, "and"),  # type: ignore[arg-type]
+            columns=_expect_str_list(data["columns"], "columns") if data.get("columns") else None,
+            sort=sort,
+        )
+    raise TemplateFormatError(
+        f"unknown step kind {kind!r} — valid kinds: filter, normalize, classify, compare, "
+        f"transfer_type, reference_match, fetch_cpc, attach_cpc_file, cpc_match, dedupe, "
+        f"select, sort, derive, aggregate, export"
     )
 
 
@@ -762,10 +874,32 @@ class BatchTemplate:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> BatchTemplate:
+        name: Any = data.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise TemplateFormatError(
+                "template is missing its required 'name' (a non-empty string)"
+            )
+        load: Any = data.get("load", {})
+        if not isinstance(load, dict):
+            raise TemplateFormatError(f"'load' must be an object, got {type(load).__name__}")
+        raw_steps: Any = data.get("steps", [])
+        steps_type_name = type(raw_steps).__name__
+        if isinstance(raw_steps, (str, dict)) or not isinstance(raw_steps, list):
+            raise TemplateFormatError(f"'steps' must be a list, got {steps_type_name}")
+        steps: list[BatchStep] = []
+        for index, raw in enumerate(cast("list[Any]", raw_steps), start=1):
+            if not isinstance(raw, dict):
+                raise TemplateFormatError(
+                    f"step {index} must be an object, got {type(raw).__name__}"
+                )
+            try:
+                steps.append(_step_from_dict(cast("dict[str, Any]", raw)))
+            except TemplateFormatError as exc:
+                raise TemplateFormatError(f"step {index}: {exc}") from exc
         return cls(
-            name=str(data["name"]),
-            load=LoadConfig.from_dict(data.get("load", {})),
-            steps=[_step_from_dict(s) for s in data.get("steps", [])],
+            name=name.strip(),
+            load=LoadConfig.from_dict(cast("dict[str, Any]", load)),
+            steps=steps,
         )
 
 
@@ -777,10 +911,37 @@ def dump_templates(templates: list[BatchTemplate], path: Path) -> None:
 
 
 def load_templates(path: Path) -> list[BatchTemplate]:
-    """Read templates from ``path`` (``[]`` if missing)."""
+    """Read templates from ``path`` (``[]`` if missing).
+
+    Raises:
+        TemplateFormatError: When the file is not valid JSON, is not a top-level array, or any
+            template/step in it is malformed — with a message naming the template and step.
+    """
     if not path.is_file():
         return []
-    return [BatchTemplate.from_dict(item) for item in json.loads(path.read_text(encoding="utf-8"))]
+    try:
+        raw: Any = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise TemplateFormatError(f"{path.name}: not valid JSON ({exc})") from exc
+    if not isinstance(raw, list):
+        raise TemplateFormatError(
+            f"{path.name}: the top level must be a JSON array of template objects "
+            f"(got {type(raw).__name__}) — wrap a single template in [ ... ]"
+        )
+    templates: list[BatchTemplate] = []
+    for index, item in enumerate(cast("list[Any]", raw), start=1):
+        if not isinstance(item, dict):
+            raise TemplateFormatError(
+                f"{path.name}: template {index} must be an object, got {type(item).__name__}"
+            )
+        template_data = cast(dict[str, Any], item)
+        try:
+            templates.append(BatchTemplate.from_dict(template_data))
+        except TemplateFormatError as exc:
+            label = str(template_data.get("name", "")) or None
+            where = f"template {index}" + (f" ({label!r})" if label else "")
+            raise TemplateFormatError(f"{path.name}: {where}: {exc}") from exc
+    return templates
 
 
 # --------------------------------------------------------------------------------------
@@ -797,7 +958,11 @@ def _confidence_columns(step: NormalizeStep | ReferenceMatchStep | CompareStep) 
 
 
 def columns_after(  # noqa: PLR0912 - one branch per step kind
-    load: LoadConfig, steps: Sequence[BatchStep], upto: int
+    load: LoadConfig,
+    steps: Sequence[BatchStep],
+    upto: int,
+    *,
+    base: dict[str, list[str]] | None = None,
 ) -> dict[str, list[str]]:
     """The columns present on each table after applying the first ``upto`` (enabled) steps.
 
@@ -805,11 +970,16 @@ def columns_after(  # noqa: PLR0912 - one branch per step kind
     folds each step's column effect — adds derived/canonical/type/match columns, applies
     filter/select projections, and creates aggregate output tables. Powers schema-aware column
     pickers and validation; disabled steps are ignored (they don't run).
+
+    ``base`` overrides the assumed fresh-parse schema per table — pass a dataset input's actual
+    columns (:func:`~uspto_assignments.tables.dataset_columns`) so a pipeline over a processed
+    dataset validates against what the input really carries (e.g. pre-attached ``cpc_codes``).
     """
     cols: dict[str, list[str]] = {}
     for table in STORE_TABLES:
-        base = load.columns.get(table)
-        cols[table] = list(base) if base else list(columns_for(table))
+        chosen = load.columns.get(table)
+        seed = (base or {}).get(table) or list(columns_for(table))
+        cols[table] = list(chosen) if chosen else list(seed)
 
     def add(table: str, name: str) -> None:
         column_list = cols.setdefault(table, [])
@@ -920,26 +1090,71 @@ def _reference_column_problems(step: ReferenceMatchStep) -> list[str]:
 
 
 def validate_template(  # noqa: PLR0912 - one validation branch per step kind
-    load: LoadConfig, steps: Sequence[BatchStep]
+    load: LoadConfig,
+    steps: Sequence[BatchStep],
+    *,
+    base: dict[str, list[str]] | None = None,
 ) -> list[str]:
-    """Return human-readable warnings about a template (missing columns/tables/reference files)."""
+    """Return human-readable warnings about a template (missing columns/tables/reference files).
+
+    ``base`` (optional) supplies the actual input schema per table — pass a dataset input's
+    :func:`~uspto_assignments.tables.dataset_columns` so columns an earlier pipeline attached
+    (``cpc_codes``, ``*_canonical``) don't warn as missing.
+    """
     warnings: list[str] = []
     if not any(s.enabled for s in steps):
         warnings.append("The pipeline has no enabled steps.")
+    warnings.extend(
+        f"Load: table '{name}' selects no columns — it will be dropped entirely "
+        f"(remove the entry to load all its columns)."
+        for name, cols in load.columns.items()
+        if not cols
+    )
     for index, step in enumerate(steps, start=1):
         if not step.enabled:
             continue
-        available = columns_after(load, steps, index - 1)  # columns available as input to this step
+        # columns available as input to this step
+        available = columns_after(load, steps, index - 1, base=base)
         table, refs = _referenced_columns(step)
         if table and table not in available:
             warnings.append(f"Step {index} ({type(step).__name__}): table '{table}' is not loaded.")
         else:
             present = available.get(table, [])
+            # cpc_match commonly runs on a processed dataset folder that already carries the
+            # canonical/CPC columns from an earlier template (the documented 13→14 chain) —
+            # static validation can't see a dataset input's schema, so soften that message.
+            hint = (
+                " (OK if the input is a processed dataset that already carries it)"
+                if isinstance(step, CpcMatchStep)
+                else ""
+            )
             for column in refs:
                 if column and column not in present:
                     warnings.append(
                         f"Step {index} ({type(step).__name__}): "
-                        f"column '{column}' is not available on '{table}' yet."
+                        f"column '{column}' is not available on '{table}' yet.{hint}"
+                    )
+        if isinstance(step, FilterStep):
+            warnings.extend(
+                f"Step {index} (Filter): in_range on '{clause.column}' has no upper bound "
+                f"(value2) — it will match nothing."
+                for clause in step.clauses
+                if clause.op == "in_range" and not clause.value2
+            )
+        if isinstance(step, ExportStep) and step.tables is not None:
+            warnings.extend(
+                f"Step {index} (Export): table '{name}' does not exist at this point — "
+                f"it will be silently skipped."
+                for name in step.tables
+                if name not in available
+            )
+        if isinstance(step, ExportStep) and step.columns:
+            for name, wanted in step.columns.items():
+                present = available.get(name)
+                if present is not None and wanted and not [c for c in wanted if c in present]:
+                    warnings.append(
+                        f"Step {index} (Export): none of the selected columns for '{name}' exist "
+                        f"— the projection would be ignored and all columns exported."
                     )
         if isinstance(step, ReferenceMatchStep):
             if not step.reference_path:
@@ -1241,6 +1456,17 @@ def _apply_compare(tables: dict[str, pa.Table], step: CompareStep, emit: OnEvent
         mask: Any = pc.fill_null(pc.equal(scores, 100), False)
     else:
         mask = pc.fill_null(pc.greater_equal(scores, step.threshold), False)
+
+    # Two empty values are NOT a match: comparing e.g. two ``*_assignee_id`` columns where
+    # neither side resolved ("" == "") must not count the rows as the same entity — with
+    # ``drop_matches`` that would silently drop every doubly-unmatched row.
+    source_table = table  # non-None binding for the closure (narrowing doesn't cross scopes)
+
+    def _non_empty(column: str) -> Any:
+        col: Any = pc.cast(source_table.column(column), pa.string())
+        return pc.fill_null(pc.greater(pc.utf8_length(col), 0), False)
+
+    mask = pc.and_(mask, pc.and_(_non_empty(step.left), _non_empty(step.right)))
     # Confidence columns are appended BEFORE any filtering so kept rows carry their score.
     if step.emit_score:
         table = _replace_column(table, step.resolved_score(), scores)
@@ -1534,8 +1760,23 @@ def _apply_export(
     for name in names:
         table = tables.get(name)
         if table is None:
+            emit(
+                BatchEvent(
+                    "warning",
+                    f"  export: table '{name}' does not exist at this point — skipped "
+                    f"(check the name against the tables earlier steps create)",
+                )
+            )
             continue
-
+        chosen = (step.columns or {}).get(name)
+        if chosen and not [c for c in chosen if c in table.column_names]:
+            emit(
+                BatchEvent(
+                    "warning",
+                    f"  export: none of the selected columns for '{name}' exist — "
+                    f"exporting all columns instead",
+                )
+            )
         table = _project_for_export(table, step, name)
         # Flat "convert" mode (export_prefix set) names files by source (<stem>_<table>.<ext>) in a
         # shared folder and overwrites on re-run; normal mode keeps <table>.<ext> non-clobbering.
@@ -1545,6 +1786,25 @@ def _apply_export(
         written.append(str(path))
         emit(BatchEvent("info", f"  export {name} → {path.name} ({table.num_rows:,} rows)"))
     return written
+
+
+def inputs_schema_base(inputs: Sequence[Path]) -> dict[str, list[str]] | None:
+    """The union of dataset-folder inputs' actual schemas, or None when none are datasets.
+
+    Validation otherwise assumes the fresh-parse schema and falsely warns that columns a prior
+    pipeline attached (``cpc_codes``, ``*_canonical`` — the documented 13→14 chain) "are not
+    available yet". Raw XML/ZIP inputs contribute nothing here: for them the static schema is
+    exact, and a genuinely missing column still fails visibly at run time.
+    """
+    base: dict[str, list[str]] | None = None
+    for source in inputs:
+        if not source.is_dir():
+            continue
+        for table, names in dataset_columns(source).items():
+            base = base if base is not None else {}
+            merged = base.setdefault(table, [])
+            merged.extend(n for n in names if n not in merged)
+    return base
 
 
 def _resolve_cpc_ctx(cpc_ctx: CpcRunContext | None) -> CpcRunContext:
@@ -1580,6 +1840,7 @@ def _apply_fetch_cpc(
             f"resolved (hit-rate {stats.hit_rate:.0%})",
         )
     )
+    _warn_low_cpc_hit_rate(stats, ctx.config.match.hit_rate_floor, "fetch_cpc", emit)
     if stats.uncached_offline:
         emit(
             BatchEvent(
@@ -1590,8 +1851,26 @@ def _apply_fetch_cpc(
         )
 
 
+def _warn_low_cpc_hit_rate(stats: Any, floor: float, step_name: str, emit: OnEvent) -> None:
+    """Escalate a suspicious CPC join to a warning: looked-up rows that mostly failed to resolve.
+
+    ``cpc_match`` aborts below the floor; the attach steps must not fail the run (partial CPC is
+    still useful) but a near-zero hit-rate almost always means the patent-number key formats are
+    misaligned — surfacing it as info only lets a broken join look like success.
+    """
+    if stats.looked_up and stats.hit_rate < floor:
+        emit(
+            BatchEvent(
+                "warning",
+                f"  {step_name}: CPC hit-rate {stats.hit_rate:.0%} is below {floor:.0%} — the "
+                f"patent numbers and the CPC source's key format are likely misaligned "
+                f"(expected bare grant numbers like 10987654)",
+            )
+        )
+
+
 def _apply_attach_cpc_file(
-    tables: dict[str, pa.Table], step: AttachCpcFileStep, emit: OnEvent
+    tables: dict[str, pa.Table], step: AttachCpcFileStep, ctx: CpcRunContext, emit: OnEvent
 ) -> None:
     table = tables.get(step.table)
     if table is None:
@@ -1624,6 +1903,7 @@ def _apply_attach_cpc_file(
             f"grants matched from {Path(step.source_path).name} (hit-rate {stats.hit_rate:.0%})",
         )
     )
+    _warn_low_cpc_hit_rate(stats, ctx.config.match.hit_rate_floor, "attach_cpc_file", emit)
 
 
 def _apply_cpc_match(
@@ -1706,7 +1986,7 @@ def _apply_step(  # noqa: PLR0912, PLR0913 - one branch per step kind
     elif isinstance(step, FetchCpcStep):
         _apply_fetch_cpc(tables, step, _resolve_cpc_ctx(cpc_ctx), emit)
     elif isinstance(step, AttachCpcFileStep):
-        _apply_attach_cpc_file(tables, step, emit)
+        _apply_attach_cpc_file(tables, step, _resolve_cpc_ctx(cpc_ctx), emit)
     elif isinstance(step, CpcMatchStep):
         _apply_cpc_match(tables, step, _resolve_cpc_ctx(cpc_ctx), emit)
     else:
@@ -2349,7 +2629,9 @@ def run_batch(  # noqa: PLR0913, PLR0912, PLR0915 - clear public entry point, ke
     """
     emit = on_event or _noop_event
     stop = should_stop or _never_stop
-    validation_warnings = validate_template(template.load, template.steps)
+    validation_warnings = validate_template(
+        template.load, template.steps, base=inputs_schema_base(inputs)
+    )
     for warning in validation_warnings:
         emit(BatchEvent("error", f"⚠ {warning}"))
     if strict and validation_warnings:

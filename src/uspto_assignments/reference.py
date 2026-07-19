@@ -21,7 +21,7 @@ import pyarrow.compute as _pc_module
 import pyarrow.csv as _pa_csv
 import pyarrow.parquet as _pq
 
-from .normalize import DEFAULT_SCORER, DEFAULT_THRESHOLD, EntityMemory, review_flags
+from .normalize import DEFAULT_SCORER, DEFAULT_THRESHOLD, EntityMemory
 
 # pyarrow.compute / pyarrow.csv are under-typed in the stubs; route through Any (see filters.py).
 pc: Any = _pc_module
@@ -287,9 +287,15 @@ def match_column(  # noqa: PLR0913, PLR0915 - one linear pass building several o
     once per **distinct** value (dictionary-encoded), then maps back over all rows.
 
     Confidence outputs (both optional): ``score_col`` adds an int column with the weakest score
-    among the matched parts (0 when nothing matched); ``review_col`` adds "true"/"false" flagging
-    values whose weakest accepted match scored below ``review_threshold`` (0 disables flagging).
+    among the matched parts — and, when nothing matched, the **best near-miss score** against the
+    gazetteer (so an off-gazetteer audit sees how close each dropped name came, instead of a
+    constant 0); ``review_col`` adds "true"/"false" flagging values whose weakest *accepted* match
+    scored below ``review_threshold`` (0 disables flagging; near-misses never flag).
     """
+    # Near-miss scores need the best candidate even below the cutoff, so when a score column is
+    # requested the probe runs uncapped and the accept threshold is applied here. Without a score
+    # column, keep the capped probe — rapidfuzz prunes on the cutoff, which is faster.
+    probe_threshold = 0 if score_col else threshold
 
     def resolve_value(value: str) -> tuple[str, bool, str, int]:
         parts = [p.strip() for p in value.split(separator) if p.strip()] if separator else [value]
@@ -297,17 +303,23 @@ def match_column(  # noqa: PLR0913, PLR0915 - one linear pass building several o
         flags: list[bool] = []
         first_id = ""
         min_matched_score = 100
+        best_near_miss = 0
         for part in parts:
-            canonical, entity_id, score = gazetteer.match(part, threshold=threshold, scorer=scorer)
-            disamb.append(canonical if canonical is not None else part)
-            flags.append(canonical is not None)
-            if canonical is not None:
+            canonical, entity_id, score = gazetteer.match(
+                part, threshold=probe_threshold, scorer=scorer
+            )
+            hit = canonical is not None and score >= threshold
+            disamb.append(canonical if hit and canonical is not None else part)
+            flags.append(hit)
+            if hit:
                 min_matched_score = min(min_matched_score, score)
-            if entity_id and not first_id:
-                first_id = entity_id
+                if entity_id and not first_id:
+                    first_id = entity_id
+            elif canonical is not None:
+                best_near_miss = max(best_near_miss, score)
         matched = all(flags) if mode == "all" else any(flags)
         joined = separator.join(disamb) if separator else disamb[0]
-        return joined, matched, first_id, (min_matched_score if any(flags) else 0)
+        return joined, matched, first_id, (min_matched_score if any(flags) else best_near_miss)
 
     source: Any = table.column(column).combine_chunks()
     encoded: Any = source.dictionary_encode()
@@ -348,7 +360,13 @@ def match_column(  # noqa: PLR0913, PLR0915 - one linear pass building several o
     if score_col:
         result = put(result, score_col, pa.array(score_vals, type=pa.int32()))
     if review_col:
-        flags_out = review_flags(score_vals, review_threshold)
+        # Flag only accepted-but-weak matches: unmatched rows now carry near-miss scores in the
+        # score column, and a near-miss is not an accept — it must not land in the review queue.
+        cap = min(review_threshold, 100)
+        flags_out = [
+            None if s is None else ("true" if m == "true" and 0 < s < cap else "false")
+            for s, m in zip(score_vals, matched_vals, strict=True)
+        ]
         result = put(result, review_col, pa.array(flags_out, type=pa.string()))
     return result
 
