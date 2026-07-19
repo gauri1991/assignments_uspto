@@ -45,7 +45,10 @@ to a **grain** and compares patents by the **set of grain codes** they share.
 | **`cpc_match`** | Ranks buyers by CPC overlap against a portfolio | Reads the `cpc_codes` a prior step attached; resolves the *portfolio* side from `portfolio_path` | Only `patent_list` mode may fetch |
 
 All three route patent numbers to **grants** (CPC is grant-only) and normalize them to the bare grant
-number before any join. Each of `fetch_cpc` / `attach_cpc_file` adds:
+number before any join. User-supplied CPC/portfolio/footprint files may key patents in
+**publication style** (`US10987654B2`, `USD912345S1`, comma-grouped digits) — those are normalized
+to the same bare-grant key too, so a raw PatSeer "Publication Number" column joins directly. Each of
+`fetch_cpc` / `attach_cpc_file` adds:
 
 - **`cpc_codes`** — list of full CPC symbols (e.g. `["G06F16/2455", "H04L9/32"]`)
 - **`cpc_subclasses`** — list of 4-char subclasses (e.g. `["G06F", "H04L"]`)
@@ -237,8 +240,9 @@ The grain also determines the granularity of the **`cpc_class`** column in the c
 - **"run a fetch_cpc step before cpc_match"** — the input table has no `cpc_codes`. Enrich first (08/11/13),
   export, then match on that output.
 - **"CPC hit-rate … below the floor"** — the patents' numbers and your CPC file's patent-number format
-  disagree (expected bare grant numbers like `10987654`), or the file barely covers your patents. Check
-  `cpc_lookup_status` and the file's patent column.
+  disagree, or the file barely covers your patents. Bare grant numbers (`10987654`) and
+  publication-style ids (`US10987654B2`) both join; anything else (application numbers, PCT ids)
+  will not. Check `cpc_lookup_status` and the file's patent column.
 - **"all grant patents are uncached and the network is disabled"** — you're in `patent_list` mode offline
   with no cached CPC for the portfolio patents. Use **`footprint_file`** mode (supply the CPCs directly), or
   enable the network / point at a local source.

@@ -17,6 +17,7 @@ from an all-offline-miss state, which reports "enable network to fetch".
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -60,9 +61,24 @@ def reduce_codes(codes: list[str], grain: CpcGrain) -> list[str]:
     return list(dict.fromkeys(grain_of(c, grain) for c in codes if c))
 
 
+# Publication-number shapes seen in portfolio/CPC files (PatSeer "US7000123B2", "USD912345S1",
+# "7,000,123 B2"): the number with a trailing kind code, which ``normalize_patent_id`` would
+# otherwise pass through unmodified (its regex requires the string to end in digits).
+_TRAILING_KIND_RE = re.compile(r"^((?:US)?[A-Z]{0,2}\d+)[A-Z]\d?$")
+
+
 def _normalize_grant(raw: str) -> str:
-    """Normalize a raw grant number to the bare-grant CPC key (forcing grant routing)."""
-    return normalize_patent_id(raw, "grant")
+    """Normalize a raw grant number to the bare-grant CPC key (forcing grant routing).
+
+    Accepts publication-number shapes from user files: commas/spaces are stripped and a trailing
+    kind code (``B2``, ``S1``, …) is removed before the standard grant normalization. Mirrors the
+    SQL-side normalization in :class:`~uspto_assignments.datasource.LocalFileCpcSource`.
+    """
+    cleaned = raw.strip().upper().replace(",", "").replace(" ", "")
+    match = _TRAILING_KIND_RE.match(cleaned)
+    if match is not None:
+        cleaned = match.group(1)
+    return normalize_patent_id(cleaned, "grant")
 
 
 @dataclass(slots=True)

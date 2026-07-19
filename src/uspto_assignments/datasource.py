@@ -92,7 +92,14 @@ class LocalFileCpcSource:
     code_separator: str = ""
 
     def fetch(self, grant_ids: list[str]) -> dict[str, list[str]]:
-        """Look up ``grant_ids`` in the bulk file via DuckDB, returning distinct CPC symbols."""
+        """Look up ``grant_ids`` in the bulk file via DuckDB, returning distinct CPC symbols.
+
+        The file's patent ids are normalized to the bare-grant key **in SQL** (the file may hold
+        tens of millions of rows), mirroring :func:`~uspto_assignments.propid.normalize_patent_id`
+        plus a trailing kind code: PatSeer-style ``US7000123B2`` / ``USD912345S1`` / ``7,000,123``
+        all join as ``7000123`` / ``D912345`` / ``7000123``. Unrecognized shapes pass through raw,
+        the same fallback the Python normalizer uses.
+        """
         if not grant_ids:
             return {}
         if not self.path.is_file():
@@ -101,15 +108,24 @@ class LocalFileCpcSource:
         # Quote the column identifiers — PatSeer headers have spaces (e.g. "Publication Number").
         patent = f'"{self.patent_column.replace(chr(34), "")}"'
         code = f'"{self.code_column.replace(chr(34), "")}"'
+        raw = f"replace(replace(upper(trim(CAST(s.{patent} AS VARCHAR))), ',', ''), ' ', '')"
+        key_re = "^(?:US)?([A-Z]{0,2})0*([0-9]+)(?:[A-Z][0-9]?)?$"
+        digits = f"regexp_extract({raw}, '{key_re}', 2)"
+        norm = (
+            f"CASE WHEN regexp_matches({raw}, '{key_re}') THEN "
+            f"regexp_extract({raw}, '{key_re}', 1) || "
+            f"CASE WHEN ltrim({digits}, '0') = '' THEN '0' ELSE ltrim({digits}, '0') END "
+            f"ELSE {raw} END"
+        )
         wanted = pa.table({"pid": pa.array(grant_ids, type=pa.string())})
         con = duckdb.connect()
         try:
             con.register("wanted", wanted)
             rows = con.execute(
-                f"SELECT CAST(s.{patent} AS VARCHAR) AS pid, "
+                f"SELECT {norm} AS pid, "
                 f"       list(DISTINCT CAST(s.{code} AS VARCHAR)) AS codes "
                 f"FROM {reader}('{self.path.as_posix()}') s "
-                f"JOIN wanted w ON CAST(s.{patent} AS VARCHAR) = w.pid "
+                f"JOIN wanted w ON {norm} = w.pid "
                 f"WHERE s.{code} IS NOT NULL AND s.{code} <> '' "
                 f"GROUP BY 1"
             ).fetchall()
@@ -360,6 +376,14 @@ class CpcCache:
 
     def _save(self) -> None:
         self._dir.mkdir(parents=True, exist_ok=True)
+        # Parallel batch workers share this file: merge in entries other processes saved since we
+        # loaded (our newer stamps win), then write-and-rename atomically so a concurrent reader
+        # never sees a truncated parquet and a concurrent writer's fetches aren't discarded.
+        try:
+            on_disk = self._load()
+        except (OSError, pa.ArrowInvalid):
+            on_disk = {}  # unreadable/partial file — rewrite it wholesale
+        self._entries = {**on_disk, **self._entries}
         ids = list(self._entries)
         table = pa.table(
             {
@@ -370,7 +394,9 @@ class CpcCache:
                 "fetched_at": pa.array([self._entries[pid][1] for pid in ids], type=pa.float64()),
             }
         )
-        pq.write_table(table, self._file)
+        tmp = self._dir / f"{CACHE_FILENAME}.{os.getpid()}.tmp"
+        pq.write_table(table, tmp)
+        tmp.replace(self._file)
 
 
 @dataclass(slots=True)

@@ -33,6 +33,7 @@ from uspto_assignments.cpcconfig import CpcConfig, load_config, save_config
 from uspto_assignments.cpcmatch import (
     CLASS_MATCH_COLUMNS,
     HitRateError,
+    _normalize_grant,
     attach_cpc,
     attach_cpc_from_file,
     grain_of,
@@ -317,10 +318,36 @@ def test_attach_cpc_routes_grants_only(tmp_path: Path) -> None:
     assert stats.eligible == 1 and stats.found == 1 and stats.hit_rate == 1.0
 
 
-def test_attach_cpc_hit_rate_low_on_format_mismatch(tmp_path: Path) -> None:
-    # CPC file keyed with kind-suffixed ids; our normalization produces bare grant numbers → 0 hits.
+def test_attach_cpc_normalizes_publication_style_file_keys(tmp_path: Path) -> None:
+    """Regression: PatSeer-style file keys (US prefix, kind suffix, commas) must join, not 0-hit."""
     tsv = tmp_path / "cpc.tsv"
-    _write_cpc_tsv(tsv, {"US10000001B2": ["H04L9/32"]})
+    _write_cpc_tsv(tsv, {"US10000001B2": ["H04L9/32"], "USD0912345S1": ["D14/138"]})
+    config = CpcConfig()
+    config.source.type = "local_file"
+    config.source.path = str(tsv)
+    config.cache.path = str(tmp_path / "cache")
+    cache = CpcCache(config, make_source(config), now=1000.0)
+    table = _flat(["10000001", "D912345"], ["B2", "S1"])
+    out, stats = attach_cpc(
+        table, number_column="doc_number", kind_column="doc_kind", cache=cache, allow_network=False
+    )
+    assert stats.eligible == 2 and stats.found == 2 and stats.hit_rate == 1.0
+    assert [r["cpc_lookup_status"] for r in out.to_pylist()] == ["found", "found"]
+
+
+def test_normalize_grant_accepts_publication_shapes() -> None:
+    """Portfolio/footprint files may hold publication-style ids; all normalize to the grant key."""
+    assert _normalize_grant("US10000001B2") == "10000001"
+    assert _normalize_grant("USD0912345S1") == "D912345"
+    assert _normalize_grant("8,000,001") == "8000001"
+    assert _normalize_grant("RE034567E") == "RE34567"
+    assert _normalize_grant("10000001") == "10000001"  # bare ids unchanged
+
+
+def test_attach_cpc_hit_rate_low_on_genuine_mismatch(tmp_path: Path) -> None:
+    # A file keyed by unrelated ids still yields 0 hits — the hit-rate guard remains meaningful.
+    tsv = tmp_path / "cpc.tsv"
+    _write_cpc_tsv(tsv, {"99999999": ["H04L9/32"]})
     config = CpcConfig()
     config.source.type = "local_file"
     config.source.path = str(tsv)
@@ -761,3 +788,31 @@ def test_attach_cpc_file_step_roundtrip_schema_and_apply(tmp_path: Path) -> None
     cols = columns_after(LoadConfig(), [step], upto=1)["flat"]
     for name in ("cpc_codes", "cpc_subclasses", "cpc_lookup_status"):
         assert name in cols
+
+
+def test_cache_save_merges_concurrent_writers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: two caches sharing the file must union their fetches, not last-writer-wins."""
+    monkeypatch.setenv("USPTO_ODP_API_KEY", "secret")
+    config = _api_config(tmp_path, offline_only=False)
+    cache_a = CpcCache(
+        config,
+        make_source(config, transport=_fake_transport({"10000001": ["H04L9/32"]})),
+        now=1000.0,
+    )
+    # b is constructed (loads the empty file) BEFORE a saves — like a parallel batch worker.
+    cache_b = CpcCache(
+        config,
+        make_source(config, transport=_fake_transport({"10000002": ["G06F3/01"]})),
+        now=1000.0,
+    )
+    cache_a.resolve(["10000001"], allow_network=True)
+    cache_b.resolve(["10000002"], allow_network=True)  # must merge, not overwrite, a's entry
+
+    offline = _api_config(tmp_path, offline_only=True)
+    cache_c = CpcCache(offline, make_source(offline, transport=_fake_transport({})), now=1000.0)
+    result = cache_c.resolve(["10000001", "10000002"], allow_network=False)
+    assert result.uncached_offline == []
+    assert result.found() == {"10000001": ["H04L9/32"], "10000002": ["G06F3/01"]}
+    assert not list(Path(config.cache.path).glob("*.tmp"))  # atomic rename leaves no temp files
