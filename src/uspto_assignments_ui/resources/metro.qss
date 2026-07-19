@@ -90,6 +90,10 @@ QPushButton:disabled {
     color: #6D6D6D;
     background-color: #E6E6E6;
 }
+QPushButton:checkable:checked {
+    background-color: #0078D7;         /* checked = accent, same language as "primary" */
+    color: #FFFFFF;
+}
 QPushButton[primary="true"] {
     background-color: #0078D7;
     color: #FFFFFF;

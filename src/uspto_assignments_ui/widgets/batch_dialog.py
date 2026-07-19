@@ -83,15 +83,18 @@ from uspto_assignments import (
     describe_step as _describe_step,
 )
 
+from ..help_content import step_note_text
 from ..settings import BatchTemplateStore, CpcConfigStore, EntityMemoryStore, UiStateStore
 from ..workers import BatchWorker, CallWorker, LogEmitter, QtLogHandler
 from .cpc_settings_dialog import CpcSettingsDialog
 from .field_tree import FieldTree
 from .filter_bar import FilterBar
+from .help_panel import HelpPanel
 from .page import SectionLabel
 from .preview_dialog import PreviewDialog
 
 _PREVIEW_LIMIT = PREVIEW_LIMIT  # single source of truth: uspto_assignments.batch
+_HELP_PANEL_WIDTH = 340  # widened/narrowed on the dialog when the Help panel opens/closes
 
 _MAX_RECORDS_CAP = 100_000_000
 _FORMATS: list[tuple[str, ExportFormat]] = [
@@ -1368,13 +1371,7 @@ class FetchCpcStepDialog(QDialog):
         form.addRow("Kind-code column", self._kind_column)
         layout.addLayout(form)
 
-        note = QLabel(
-            "Uses the project CPC source (Settings ▸ CPC data source). Offline by default — enable"
-            " network on the run to fetch uncached codes. CPC is grant-only; non-grants skipped."
-        )
-        note.setWordWrap(True)
-        layout.addWidget(note)
-
+        # Explanatory help is inserted once by attach_step_note() from the shared _STEP_HELP source.
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
@@ -1450,13 +1447,7 @@ class AttachCpcFileStepDialog(QDialog):
         form.addRow("CPC separator", self._separator)
         layout.addLayout(form)
 
-        note = QLabel(
-            "Fully offline — joins CPC from your file, no network. A PatSeer export packs several"
-            " CPCs in one cell; set the separator (e.g. ';') to split them. CPC is grant-only."
-        )
-        note.setWordWrap(True)
-        layout.addWidget(note)
-
+        # Explanatory help is inserted once by attach_step_note() from the shared _STEP_HELP source.
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
@@ -1556,15 +1547,7 @@ class CpcMatchStepDialog(QDialog):
         form.addRow("", self._emit_class_matches)
         layout.addLayout(form)
 
-        note = QLabel(
-            "Run a Fetch CPC step first. Match knobs (grain, metric, threshold, ranking, hit-rate"
-            " floor) come from Settings ▸ CPC data source. Output tables:"
-            " matched_buyers_by_portfolio_patent + matched_buyers_overall"
-            " (+ matched_cpc_classes when per-class matches is on)."
-        )
-        note.setWordWrap(True)
-        layout.addWidget(note)
-
+        # Explanatory help is inserted once by attach_step_note() from the shared _STEP_HELP source.
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
@@ -1684,6 +1667,28 @@ _EDIT_DIALOGS: dict[type[BatchStep], type[_StepDialog]] = {
     AggregateStep: AggregateStepDialog,
     ExportStep: ExportStepDialog,
 }
+# Reverse of _EDIT_DIALOGS, so the opener can look up a dialog's step kind for its help note.
+_STEP_TYPE_BY_DIALOG: dict[type[_StepDialog], type[BatchStep]] = {
+    dialog: step_type for step_type, dialog in _EDIT_DIALOGS.items()
+}
+
+
+def attach_step_note(dialog: QDialog, step_type: type[BatchStep]) -> None:
+    """Insert the shared step help under a step-editor dialog's title, from the one source.
+
+    Driven off ``help_content.step_note_text`` (the same text the Help panel shows), so the note a
+    user reads *while configuring* a step can never drift from the panel — and every step dialog
+    gets one, replacing the few hand-written per-dialog notes. Inserted at layout index 1, i.e.
+    directly under the title ``SectionLabel`` every step dialog adds first.
+    """
+    text = step_note_text(step_type)
+    layout = dialog.layout()
+    if not text or not isinstance(layout, QVBoxLayout) or layout.count() == 0:
+        return
+    note = QLabel(text)
+    note.setWordWrap(True)
+    note.setProperty("role", "hint")
+    layout.insertWidget(1, note)
 
 
 class BatchDialog(QDialog):
@@ -1715,6 +1720,7 @@ class BatchDialog(QDialog):
         self._ui_state = ui_state if ui_state is not None else UiStateStore()
         self._memory: EntityMemory | None = None  # populated at run time from the store
         self._steps: list[BatchStep] = []
+        self._description = ""  # a loaded/imported template's own embedded help, carried opaquely
         self._completed = 0  # files finished this run (drives the determinate progress bar)
         self._thread: QThread | None = None
         self._worker: QObject | None = None  # BatchWorker (run) or CallWorker (preview)
@@ -1728,6 +1734,13 @@ class BatchDialog(QDialog):
         root.setSpacing(12)
         root.addLayout(self._build_config_column(), 3)
         root.addLayout(self._build_console_column(), 4)
+        self._help_panel = HelpPanel()
+        self._help_panel.setVisible(False)  # opened on demand via the Help toggle button
+        root.addWidget(self._help_panel, 3)
+        self._help_toggle.toggled.connect(self._toggle_help)
+        self._steps_list.currentRowChanged.connect(lambda _row: self._update_help())
+        self._saved.currentIndexChanged.connect(lambda _index: self._update_help())
+        self._template_name.textChanged.connect(lambda _text: self._update_help())
 
         self._reload_templates()
 
@@ -1750,6 +1763,12 @@ class BatchDialog(QDialog):
         delete_btn.clicked.connect(self._delete_template)
         name_row.addWidget(save_btn)
         name_row.addWidget(delete_btn)
+        self._help_toggle = QPushButton("Help")
+        self._help_toggle.setCheckable(True)
+        self._help_toggle.setToolTip(
+            "Show what the selected template — or the step selected below — does"
+        )
+        name_row.addWidget(self._help_toggle)
         column.addLayout(name_row)
         column.addWidget(self._saved)
 
@@ -1921,6 +1940,7 @@ class BatchDialog(QDialog):
                 limit=self._max.value() or None, columns=self._fields.selected_columns()
             ),
             steps=list(self._steps),
+            description=self._description,  # preserved so save/export round-trips it
         )
 
     def _reload_templates(self) -> None:
@@ -1937,6 +1957,7 @@ class BatchDialog(QDialog):
         self._max.setValue(template.load.limit or 0)
         self._fields.set_selected_columns(template.load.columns)
         self._steps = [copy.deepcopy(s) for s in template.steps]
+        self._description = template.description
         self._refresh_steps_list()
 
     def _load_selected_template(self) -> None:
@@ -2069,6 +2090,9 @@ class BatchDialog(QDialog):
         _available_ctx = columns_after(self._load(), self._steps, index, base=self._schema_base())
         try:
             dialog = dialog_cls(step, parent=self) if step is not None else dialog_cls(parent=self)  # type: ignore[arg-type]
+            step_type = _STEP_TYPE_BY_DIALOG.get(dialog_cls)
+            if step_type is not None:
+                attach_step_note(dialog, step_type)
             return dialog.step() if dialog.exec() == QDialog.DialogCode.Accepted else None
         finally:
             _available_ctx = previous
@@ -2146,6 +2170,35 @@ class BatchDialog(QDialog):
             if index in warned:
                 item.setToolTip("\n".join(warned[index]))
             self._steps_list.addItem(item)
+        # Rebuilding the list drops the selection (no step focused) — refresh to the
+        # template-level view rather than leaving stale step help on screen.
+        self._update_help()
+
+    # -- help panel ----------------------------------------------------------
+    def _toggle_help(self, checked: bool) -> None:
+        self._help_panel.setVisible(checked)
+        # Give the panel real width instead of squeezing it out of the existing two columns
+        # (a help panel that has to wrap every long word onto its own line is unreadable).
+        self.resize(self.width() + _HELP_PANEL_WIDTH * (1 if checked else -1), self.height())
+        if checked:
+            self._update_help()
+
+    def _update_help(self) -> None:
+        """Refresh the Help panel to match the current selection, if it's open.
+
+        Gated on the toggle button's checked state rather than ``self._help_panel.isVisible()``
+        — a widget only reports visible once its top-level window is shown, so that guard would
+        never fire before the dialog's first ``show()`` (and never in a headless test).
+        """
+        if not self._help_toggle.isChecked():
+            return
+        row = self._steps_list.currentRow()
+        if 0 <= row < len(self._steps):
+            self._help_panel.show_step(self._steps[row])
+        else:
+            self._help_panel.show_template(
+                self._template_name.text(), self._steps, self._description
+            )
 
     # -- run ---------------------------------------------------------------
     def _choose_output(self) -> None:

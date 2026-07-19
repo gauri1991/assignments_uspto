@@ -12,7 +12,7 @@ pytest.importorskip("PyQt6")
 pytest.importorskip("pytestqt")
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QListWidget, QMessageBox
+from PyQt6.QtWidgets import QLabel, QListWidget, QMessageBox
 
 from uspto_assignments import (
     AggregateStep,
@@ -38,6 +38,7 @@ from uspto_assignments import (
     run_preview,
 )
 from uspto_assignments_ui.app import create_app
+from uspto_assignments_ui.help_content import step_note_text
 from uspto_assignments_ui.models import EntityAliasModel
 from uspto_assignments_ui.settings import BatchTemplateStore, EntityMemoryStore, UiStateStore
 from uspto_assignments_ui.widgets import batch_dialog as bd
@@ -1096,3 +1097,109 @@ def test_filter_dialog_edit_preserves_columns_and_sort(qtbot: Any) -> None:
     edited = dialog.step()
     assert edited.columns == ["reel_no", "frame_no"]
     assert edited.sort == ("recorded_date", False)
+
+
+def test_help_panel_hidden_by_default_and_toggled_by_button(qtbot: Any, tmp_path: Path) -> None:
+    create_app([])
+    dialog = BatchDialog(BatchTemplateStore(tmp_path / "b.json"))
+    qtbot.addWidget(dialog)
+    dialog.show()  # isVisible() only reflects setVisible() once the top-level window is shown
+    assert not dialog._help_panel.isVisible()
+    assert not dialog._help_toggle.isChecked()
+
+    dialog._help_toggle.setChecked(True)
+    assert dialog._help_panel.isVisible()
+
+    dialog._help_toggle.setChecked(False)
+    assert not dialog._help_panel.isVisible()
+
+
+def test_help_panel_shows_template_overview_when_no_step_selected(
+    qtbot: Any, tmp_path: Path
+) -> None:
+    create_app([])
+    dialog = BatchDialog(BatchTemplateStore(tmp_path / "b.json"))
+    qtbot.addWidget(dialog)
+    dialog._template_name.setText("12 - Convert to Parquet (all tables)")
+    dialog._steps = [ExportStep(fmt="parquet")]
+    dialog._refresh_steps_list()
+
+    dialog._help_toggle.setChecked(True)
+    body = dialog._help_panel._body.toHtml()
+    assert "12 - Convert to Parquet (all tables)" in body
+    assert "Produces" in body
+
+
+def test_help_panel_switches_to_step_help_on_selection(qtbot: Any, tmp_path: Path) -> None:
+    create_app([])
+    dialog = BatchDialog(BatchTemplateStore(tmp_path / "b.json"))
+    qtbot.addWidget(dialog)
+    dialog._steps = [
+        FilterStep(table="flat"),
+        NormalizeStep(table="flat", column="assignor_names"),
+    ]
+    dialog._refresh_steps_list()
+    dialog._help_toggle.setChecked(True)
+
+    dialog._steps_list.setCurrentRow(1)
+    body = dialog._help_panel._body.toHtml()
+    assert "Normalize step" in body
+
+    dialog._steps_list.setCurrentRow(-1)  # clear selection -> falls back to template view
+    body = dialog._help_panel._body.toHtml()
+    assert "Normalize step" not in body
+
+
+def test_help_panel_content_does_not_update_while_hidden(qtbot: Any, tmp_path: Path) -> None:
+    """The panel must not do needless work (or show stale content) before it's opened."""
+    create_app([])
+    dialog = BatchDialog(BatchTemplateStore(tmp_path / "b.json"))
+    qtbot.addWidget(dialog)
+    dialog._steps = [NormalizeStep(table="flat", column="assignor_names")]
+    dialog._refresh_steps_list()
+    dialog._steps_list.setCurrentRow(0)
+    # Panel is still hidden — it should show its default welcome text, not the step help.
+    body = dialog._help_panel._body.toHtml()
+    assert "Select a saved template" in body
+
+
+def test_step_dialog_shows_single_source_help_note(qtbot: Any) -> None:
+    """A step-editor dialog that previously had no note now shows help from the shared source."""
+
+    create_app([])
+    dialog = SortStepDialog()
+    qtbot.addWidget(dialog)
+    bd.attach_step_note(dialog, SortStep)
+    labels = [w.text() for w in dialog.findChildren(QLabel)]
+    expected = step_note_text(SortStep)
+    assert expected and any(expected in text for text in labels)
+
+
+def test_step_dialog_note_is_single_source_not_a_second_copy(qtbot: Any) -> None:
+    """The ex-CPC dialogs must carry no hand-written note of their own — only the injected one."""
+
+    create_app([])
+    dialog = bd.FetchCpcStepDialog()
+    qtbot.addWidget(dialog)
+    before = [w.text() for w in dialog.findChildren(QLabel)]
+    assert not any("Offline by default" in t for t in before)  # no duplicate note pre-injection
+    bd.attach_step_note(dialog, bd.FetchCpcStep)
+    after = [w.text() for w in dialog.findChildren(QLabel)]
+    assert any(step_note_text(bd.FetchCpcStep) in t for t in after)
+
+
+def test_editing_a_step_injects_its_help_note(qtbot: Any, tmp_path: Path, monkeypatch: Any) -> None:
+    """The real open path (BatchDialog._open_step_dialog) attaches the note to every step dialog."""
+    create_app([])
+    dialog = BatchDialog(BatchTemplateStore(tmp_path / "b.json"))
+    qtbot.addWidget(dialog)
+    captured: dict[str, list[str]] = {}
+
+    def fake_exec(self: Any) -> int:
+        captured["labels"] = [w.text() for w in self.findChildren(QLabel)]
+        return 0  # Rejected — we only want to inspect the constructed dialog
+
+    monkeypatch.setattr(bd.SortStepDialog, "exec", fake_exec)
+    dialog._open_step_dialog(bd.SortStepDialog, SortStep(table="flat", column="recorded_date"), 0)
+
+    assert any(step_note_text(SortStep) in t for t in captured["labels"])
