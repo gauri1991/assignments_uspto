@@ -89,6 +89,7 @@ from .model import (
     flat_schema,
     schema_for,
 )
+from .namemodel import classify_name_model, model_available
 from .naming import scope_suffix, unique_path
 from .normalize import DEFAULT_SCORER, EntityMemory, normalize_column, scorer_names
 from .parser import extract, iter_assignments, iter_records
@@ -184,6 +185,7 @@ __all__ = [
     "classify_column",
     "classify_conveyance",
     "classify_name",
+    "classify_name_model",
     "classify_value",
     "columns_after",
     "columns_for",
@@ -213,6 +215,7 @@ __all__ = [
     "make_source",
     "match_column",
     "match_portfolio",
+    "model_available",
     "normalize_column",
     "normalize_patent_id",
     "open_dataset",

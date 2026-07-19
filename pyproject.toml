@@ -67,6 +67,7 @@ uspto-assign-ui = "uspto_assignments_ui.__main__:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
+uspto_assignments = ["resources/*.json.gz"]  # vendored built-in ML classifier weights
 uspto_assignments_ui = ["resources/*.qss"]
 
 # NOTE: this project uses venv + pip (uv was not installed at scaffold time).
@@ -88,6 +89,9 @@ allowed-confusables = ["×", "–"]
 "tests/**" = ["PLR2004", "S101"]
 # Qt's API is camelCase, and overriding virtuals (rowCount, headerData, setText, ...) must match.
 "src/uspto_assignments_ui/**" = ["N802"]
+# Dev-only offline training script (not shipped/imported): allow ML-conventional matrix names,
+# relaxed line length, and a linear main(); it is excluded from pyright (see [tool.pyright] include).
+"scripts/**" = ["N806", "E501", "B905", "PLW2901", "PLR0915", "PLC0415"]
 
 [tool.ruff.format]
 docstring-code-format = true

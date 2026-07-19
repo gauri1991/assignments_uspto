@@ -31,7 +31,7 @@ pc: Any = _pc_module
 logger = logging.getLogger(__name__)
 
 EntityType = Literal["company", "individual", "unknown"]
-ClassifyMethod = Literal["rules", "probablepeople"]
+ClassifyMethod = Literal["rules", "probablepeople", "model"]
 CombineMode = Literal["all", "any", "first", "majority"]
 
 OnProgress = Callable[[int, int], None]
@@ -143,21 +143,27 @@ def _has_company_signal(cleaned: str, tokens: list[str]) -> bool:
     return any(phrase[0] in tokens and " ".join(phrase) in cleaned for phrase in _COMPANY_PHRASES)
 
 
+def _is_comma_person_form(name: str) -> bool:
+    """True for the dominant USPTO ``LAST, FIRST [MIDDLE]`` inventor format (comma-separated)."""
+    if "," not in name:
+        return False
+    left, _, right = name.partition(",")
+    left_tokens = _tokens(clean(left))
+    right_tokens = _tokens(clean(right))
+    return (
+        1 <= len(left_tokens) <= _MAX_NAME_PART_TOKENS
+        and 1 <= len(right_tokens) <= _MAX_NAME_PART_TOKENS
+    )
+
+
 def _looks_like_person(name: str, cleaned: str, tokens: list[str]) -> bool:
     """True for a ``LAST, FIRST`` comma form or a short all-alpha personal name."""
     if not tokens:
         return False
-    core = [t for t in tokens if t not in _PERSON_SUFFIXES]
-    if "," in name:  # "LAST, FIRST [MIDDLE]" — the dominant USPTO inventor format
-        left, _, right = name.partition(",")
-        left_tokens = _tokens(clean(left))
-        right_tokens = _tokens(clean(right))
-        if (
-            1 <= len(left_tokens) <= _MAX_NAME_PART_TOKENS
-            and 1 <= len(right_tokens) <= _MAX_NAME_PART_TOKENS
-        ):
-            return True
+    if _is_comma_person_form(name):  # "LAST, FIRST [MIDDLE]" — the dominant USPTO inventor format
+        return True
     # a short, all-alphabetic name with no organization keyword reads as a person
+    core = [t for t in tokens if t not in _PERSON_SUFFIXES]
     return _MIN_PERSON_TOKENS <= len(core) <= _MAX_PERSON_TOKENS and all(
         token.isalpha() for token in core
     )
@@ -252,6 +258,11 @@ def classify_name(name: str, *, method: ClassifyMethod = "rules") -> EntityType:
     """Classify a single name as ``"company"``, ``"individual"``, or ``"unknown"``."""
     if method == "probablepeople":
         return _probablepeople_classify(name)
+    if method == "model":
+        # local import breaks the classify↔namemodel cycle
+        from .namemodel import classify_name_model  # noqa: PLC0415
+
+        return classify_name_model(name)
     return _classify_rules(name)
 
 

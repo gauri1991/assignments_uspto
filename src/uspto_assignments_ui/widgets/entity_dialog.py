@@ -313,20 +313,26 @@ class EntityDialog(QDialog):
         """Classify every canonical (Rules or ML) off the GUI thread, tagging the working memory."""
         if self._busy():
             return
-        ml_installed = importlib.util.find_spec("probablepeople") is not None
-        ml_label = "ML (probablepeople)" if ml_installed else "ML (probablepeople — not installed)"
-        methods = ["Rules (fast, no dependency)", ml_label]
+        pp_installed = importlib.util.find_spec("probablepeople") is not None
+        pp_label = "ML (probablepeople)" if pp_installed else "ML (probablepeople — not installed)"
+        model_label = "ML (built-in, no setup)"
         choice, ok = QInputDialog.getItem(
             self,
             "Tag all entities",
             "Classify every canonical name as company / individual / unknown using:",
-            methods,
+            ["Rules (fast, no dependency)", model_label, pp_label],
             0,
             False,
         )
         if not ok:
             return
-        method = "probablepeople" if choice == ml_label else "rules"
+        method = (
+            "model"
+            if choice == model_label
+            else "probablepeople"
+            if choice == pp_label
+            else "rules"
+        )
         memory = self._memory
         self._counts.setText(f"Tagging {memory.counts()[0]:,} entities ({method})…")
         thread = QThread(self)

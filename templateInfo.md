@@ -113,7 +113,7 @@ Example: after `{"kind":"normalize","table":"flat","column":"assignor_names"}`, 
 | filter clause | `op` | `contains`, `equals`, `not_equals` (null-safe exclusion), `starts_with`, `not_empty`, `is_empty`, `in_range` |
 | filter | `combine` | `and`, `or` |
 | normalize / compare / reference_match | `scorer` | `wratio` (default), `token_set`, `token_sort`, `partial`, `qratio`, `ratio`, `jaro_winkler` |
-| classify / transfer_type | `method` | `rules` (default), `probablepeople` (ML; opt-in `pip install ".[ml]"`, falls back to rules if absent) |
+| classify / transfer_type | `method` | `rules` (default), `model` (built-in ML — pure-Python, ships in the default install, runs on any Python incl. 3.14), `probablepeople` (optional CRF ML; needs Python ≤3.12, falls back to rules if absent) |
 | classify | `mode` | `all` (default), `any`, `first`, `majority` |
 | classify output / transfer_type types | entity type | `company`, `individual`, `unknown` |
 | compare | `method` | `exact` (default), `fuzzy` |
@@ -157,7 +157,10 @@ so a crowded prefix never slows a match — this cap is shared by `normalize`, `
 the ledger pipeline, so full-`g_assignee_disambiguated.tsv` runs are safe at scale.
 
 **`classify`** — `method: "rules"` (default; legal-suffix + org keywords, and the `LAST, FIRST`
-person form) or `probablepeople` (ML; opt-in `pip install ".[ml]"`, falls back to rules if absent). `mode` combines
+person form), `model` (the built-in ML classifier — a pure-Python char-n-gram logistic-regression
+model that ships with the tool and runs on any Python including 3.14; it beats rules on companies
+with no legal suffix), or `probablepeople` (optional CRF model; needs a Python ≤3.12 venv, falls
+back to rules if absent). `mode` combines
 a multi-party `*_names` value: `all` (one agreed type across every party, else `unknown`), `any`
 (company if any party is), `first`, `majority`.
 
@@ -590,7 +593,8 @@ CLI pipeline. They compose: templates for exploration, the pipeline for the anal
 | Capability | Where | Notes |
 |---|---|---|
 | Rule-based entity-type classifier | `classify` step / `transfer_type` (`method: "rules"`) | legal-suffix + org-keyword detection, `LAST, FIRST` person form; deterministic and fast |
-| **probablepeople** (statistical CRF model) | `method: "probablepeople"` on `classify`/`transfer_type` | the only bundled *learned* model; ships in the default install; parses person-vs-corporation; falls back to rules if absent |
+| **Built-in ML classifier** (char-n-gram logistic regression) | `method: "model"` on `classify`/`transfer_type` | a *learned* company-vs-individual model, trained on PatentsView assignee data and shipped as ~100 KB of weights; **pure-Python inference, no compiler, runs on any Python incl. 3.14**; beats rules on companies with no legal suffix |
+| **probablepeople** (statistical CRF model) | `method: "probablepeople"` on `classify`/`transfer_type` | optional; needs the C extension `python-crfsuite` (wheels only ≤ Python 3.12), so a compiler-free install needs a Python 3.12 venv; falls back to rules if absent |
 | rapidfuzz similarity algorithms | `scorer` on `normalize`/`compare`/`reference_match` | 7 algorithms (§4b) — string similarity, not ML |
 | Learnable entity memory | `normalize` with `learn: true` | grows alias→canonical mappings from data (path-dependent — see §4b) |
 

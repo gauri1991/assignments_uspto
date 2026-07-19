@@ -116,13 +116,17 @@ _DERIVE_OPS: list[tuple[str, str]] = [
 
 
 def _classify_methods() -> list[tuple[str, str]]:
-    """Classify method options; the ML label reflects whether ``probablepeople`` is installed."""
-    ml_label = (
+    """Classify method options; the probablepeople label reflects whether it is installed."""
+    pp_label = (
         "ML (probablepeople)"
         if probablepeople_available()
         else "ML (probablepeople — not installed)"
     )
-    return [("Rules (fast, no dependency)", "rules"), (ml_label, "probablepeople")]
+    return [
+        ("Rules (fast, no dependency)", "rules"),
+        ("ML (built-in, no setup)", "model"),
+        (pp_label, "probablepeople"),
+    ]
 
 
 _COMBINE_MODES: list[tuple[str, str]] = [

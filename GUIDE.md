@@ -361,7 +361,8 @@ A tabbed editor that works on a **working copy** (Save persists, Cancel discards
   fuzzy block index so matching keeps working. Each canonical also shows its **entity type** inline
   (`ACME INC · company`) when tagged:
   - **Tag all…** classifies every canonical as company / individual / unknown using **Rules** (fast,
-    deterministic) or **ML (probablepeople)** — chosen when you click, and run off the UI thread.
+    deterministic), **ML (built-in, no setup)** (the bundled pure-Python model — works on any Python),
+    or **ML (probablepeople)** — chosen when you click, and run off the UI thread.
   - **Set type…** overrides the type of the selected canonical(s) by hand (multi-select supported).
   - **Seed from reference…** tags every seeded organization `company` automatically (a disambiguated
     gazetteer is companies by definition).
@@ -404,12 +405,19 @@ firm-to-firm transfers and to identify individual assignors (inventors).
   short (2–4 token) all-alphabetic name with no company keyword.
 - **Unknown** — everything else, e.g. single-token brands like `SONY` (deliberately not guessed).
 
-**ML backend** — set a step's *method* to `probablepeople` to use a CRF name classifier. It is
-**opt-in and not in the default install**: it depends on the C extension `python-crfsuite`, which
-ships wheels only up to Python 3.12, so a compiler-free install needs a **Python 3.12 venv** (see
-README / requirements.txt); on Python 3.13/3.14 it requires a C++ compiler. When the backend is
-absent or can't load, the run log shows a one-line amber note and the step falls back to rules — so
-the rule-based default always works with no setup.
+**ML backends** — two machine-learning options for a step's *method*:
+
+- `model` — the **built-in** classifier: a char-n-gram logistic-regression model trained on
+  PatentsView assignee data and shipped as ~100 KB of weights inside the package. Inference is
+  **pure Python — no compiler, no external data, runs on any Python including 3.14**. It beats the
+  rules on companies with no legal suffix (e.g. brand-style org names) and abstains ("unknown") when
+  unsure. This is the recommended ML option, especially on Python 3.13/3.14.
+- `probablepeople` — an **optional** CRF model. It depends on the C extension `python-crfsuite`,
+  which ships wheels only up to Python 3.12, so a compiler-free install needs a **Python 3.12 venv**
+  (see README / requirements.txt); on Python 3.13/3.14 it requires a C++ compiler.
+
+When a selected backend is absent or can't load, the run log shows a one-line amber note and the
+step falls back to rules — so a run never fails over classification.
 
 **Multi-party mode** (for concatenated `*_names` columns) — how to combine the parties' types:
 
@@ -674,7 +682,7 @@ match-only), `scorer` (default `wratio`; see [scorers](#7-entity-normalization--
 
 #### Classify
 Add an entity-type column (`company`/`individual`/`unknown`).
-Fields: `table`, `column`, `target` (blank → `<column>_type`), `method` (`rules`/`probablepeople`),
+Fields: `table`, `column`, `target` (blank → `<column>_type`), `method` (`rules`/`model`/`probablepeople`),
 `mode` (`all`/`any`/`first`/`majority`), `separator`.
 
 #### Compare

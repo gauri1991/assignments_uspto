@@ -48,6 +48,7 @@ from .datasource import CpcCache, CpcRunContext, make_source
 from .exporters import FORMAT_SUFFIX, ExportFormat, export, write_workbook
 from .filters import CombineMode, FilterClause, SortSpec, filter_sort, sort_indices
 from .model import columns_for
+from .namemodel import model_available
 from .naming import unique_path
 from .normalize import (
     DEFAULT_SCORER,
@@ -593,7 +594,7 @@ _COMBINE_MODES = frozenset({"and", "or"})
 _DERIVE_OPS = frozenset({"year", "month", "split_first", "upper", "lower"})
 _COMPARE_METHODS = frozenset({"exact", "fuzzy"})
 _COMPARE_ACTIONS = frozenset({"flag", "drop_matches", "keep_matches"})
-_CLASSIFY_METHODS = frozenset({"rules", "probablepeople"})
+_CLASSIFY_METHODS = frozenset({"rules", "probablepeople", "model"})
 _CLASSIFY_MODES = frozenset({"all", "any", "first", "majority"})
 _REFERENCE_MODES = frozenset({"any", "all"})
 _REFERENCE_ACTIONS = frozenset({"flag", "keep_matched", "drop_matched"})
@@ -1413,6 +1414,14 @@ def _apply_classify(tables: dict[str, pa.Table], step: ClassifyStep, emit: OnEve
                 f"  probablepeople not installed — classify used rules for "
                 f"{step.table}.{step.column} (the ML backend needs a Python 3.12 venv on Windows; "
                 f"see requirements.txt)",
+            )
+        )
+    if step.method == "model" and not model_available():  # only on a corrupt/partial install
+        emit(
+            BatchEvent(
+                "warning",
+                f"  built-in model artifact missing — classify used rules for "
+                f"{step.table}.{step.column}",
             )
         )
 

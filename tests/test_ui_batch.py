@@ -1203,3 +1203,13 @@ def test_editing_a_step_injects_its_help_note(qtbot: Any, tmp_path: Path, monkey
     dialog._open_step_dialog(bd.SortStepDialog, SortStep(table="flat", column="recorded_date"), 0)
 
     assert any(step_note_text(SortStep) in t for t in captured["labels"])
+
+
+def test_classify_dialog_offers_builtin_model_and_roundtrips(qtbot: Any) -> None:
+    """The built-in ML classifier is a selectable method and edits round-trip method='model'."""
+    create_app([])
+    labels = dict(bd._classify_methods())
+    assert labels.get("ML (built-in, no setup)") == "model"
+    dialog = ClassifyStepDialog(ClassifyStep(table="flat", column="assignor_names", method="model"))
+    qtbot.addWidget(dialog)
+    assert dialog.step().method == "model"
