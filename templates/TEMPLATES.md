@@ -9,17 +9,18 @@ warnings for each template. Regenerate after any template change.
 
 ### 01 - Firm-to-firm transactions (clean, enriched)
 
-1. Filter · flat · 4 clause(s) · AND
-2. Reference match · flat.assignor_names vs reference.parquet · keep_matched · score · review<95
-3. Classify · flat.assignee_names → assignee_names_type (rules)
-4. Filter · flat · 2 clause(s) · OR
-5. Reference match · flat.assignee_names vs reference.parquet · flag · score · review<95
-6. Compare · flat · assignor_names_assignee_id vs assignee_names_assignee_id · exact · drop_matches
-7. Normalize · flat.assignor_names → assignor_names_canonical (≥90)
-8. Normalize · flat.assignee_names → assignee_names_canonical (≥90)
-9. Compare · flat · assignor_names_canonical vs assignee_names_canonical · exact · drop_matches
-10. Derive · flat.transaction_date_year = year(transaction_date)
-11. Export · parquet · flat
+1. Filter · flat · 2 clause(s) · OR
+2. Filter · flat · 3 clause(s) · AND
+3. Reference match · flat.assignor_names vs reference.parquet · keep_matched · score · review<95
+4. Classify · flat.assignee_names → assignee_names_type (rules)
+5. Filter · flat · 2 clause(s) · OR
+6. Reference match · flat.assignee_names vs reference.parquet · flag · score · review<95
+7. Compare · flat · assignor_names_assignee_id vs assignee_names_assignee_id · exact · drop_matches
+8. Normalize · flat.assignor_names → assignor_names_canonical (≥90)
+9. Normalize · flat.assignee_names → assignee_names_canonical (≥90)
+10. Compare · flat · assignor_names_canonical vs assignee_names_canonical · exact · drop_matches
+11. Derive · flat.transaction_date_year = year(transaction_date)
+12. Export · parquet · flat
 
 **Warnings:** none
 
@@ -27,16 +28,17 @@ warnings for each template. Regenerate after any template change.
 
 ### 02 - Buyer leaderboard - deals closed
 
-1. Filter · flat · 3 clause(s) · AND
-2. Reference match · flat.assignor_names vs reference.parquet · keep_matched
-3. Classify · flat.assignee_names → assignee_names_type (rules)
-4. Filter · flat · 2 clause(s) · OR
-5. Deduplicate · flat · key: reel_no, frame_no
-6. Normalize · flat.assignor_names → assignor_names_canonical (≥90)
-7. Normalize · flat.assignee_names → assignee_names_canonical (≥90)
-8. Compare · flat · assignor_names_canonical vs assignee_names_canonical · exact · drop_matches
-9. Aggregate · flat by assignee_names_canonical → buyers_by_deals
-10. Export · csv · buyers_by_deals
+1. Filter · flat · 2 clause(s) · OR
+2. Filter · flat · 3 clause(s) · AND
+3. Reference match · flat.assignor_names vs reference.parquet · keep_matched
+4. Classify · flat.assignee_names → assignee_names_type (rules)
+5. Filter · flat · 2 clause(s) · OR
+6. Deduplicate · flat · key: reel_no, frame_no
+7. Normalize · flat.assignor_names → assignor_names_canonical (≥90)
+8. Normalize · flat.assignee_names → assignee_names_canonical (≥90)
+9. Compare · flat · assignor_names_canonical vs assignee_names_canonical · exact · drop_matches
+10. Aggregate · flat by assignee_names_canonical → buyers_by_deals
+11. Export · csv · buyers_by_deals
 
 **Warnings:** none
 
@@ -44,15 +46,16 @@ warnings for each template. Regenerate after any template change.
 
 ### 03 - Buyer leaderboard - patents (documents) acquired
 
-1. Filter · flat · 3 clause(s) · AND
-2. Reference match · flat.assignor_names vs reference.parquet · keep_matched
-3. Classify · flat.assignee_names → assignee_names_type (rules)
-4. Filter · flat · 2 clause(s) · OR
-5. Normalize · flat.assignor_names → assignor_names_canonical (≥90)
-6. Normalize · flat.assignee_names → assignee_names_canonical (≥90)
-7. Compare · flat · assignor_names_canonical vs assignee_names_canonical · exact · drop_matches
-8. Aggregate · flat by assignee_names_canonical → buyers_by_documents
-9. Export · csv · buyers_by_documents
+1. Filter · flat · 2 clause(s) · OR
+2. Filter · flat · 4 clause(s) · AND
+3. Reference match · flat.assignor_names vs reference.parquet · keep_matched
+4. Classify · flat.assignee_names → assignee_names_type (rules)
+5. Filter · flat · 2 clause(s) · OR
+6. Normalize · flat.assignor_names → assignor_names_canonical (≥90)
+7. Normalize · flat.assignee_names → assignee_names_canonical (≥90)
+8. Compare · flat · assignor_names_canonical vs assignee_names_canonical · exact · drop_matches
+9. Aggregate · flat by assignee_names_canonical → buyers_by_documents
+10. Export · csv · buyers_by_documents
 
 **Warnings:** none
 
@@ -60,17 +63,16 @@ warnings for each template. Regenerate after any template change.
 
 ### 04 - Buyers - gazetteer-matched (entity-accurate leaderboard)
 
-1. Filter · flat · 3 clause(s) · AND
-2. Reference match · flat.assignor_names vs reference.parquet · keep_matched
-3. Classify · flat.assignee_names → assignee_names_type (rules)
-4. Filter · flat · 2 clause(s) · OR
-5. Reference match · flat.assignee_names vs reference.parquet · flag
-6. Filter · flat · 1 clause(s) · AND
-7. Normalize · flat.assignor_names → assignor_names_canonical (≥90)
-8. Normalize · flat.assignee_names → assignee_names_canonical (≥90)
-9. Compare · flat · assignor_names_assignee_id vs assignee_names_assignee_id · exact · drop_matches
-10. Aggregate · flat by assignee_names_assignee_id, assignee_names_disambiguated → matched_buyers
-11. Export · csv · matched_buyers
+1. Filter · flat · 2 clause(s) · OR
+2. Filter · flat · 3 clause(s) · AND
+3. Reference match · flat.assignor_names vs reference.parquet · keep_matched
+4. Classify · flat.assignee_names → assignee_names_type (rules)
+5. Filter · flat · 2 clause(s) · OR
+6. Reference match · flat.assignee_names vs reference.parquet · flag
+7. Filter · flat · 1 clause(s) · AND
+8. Compare · flat · assignor_names_assignee_id vs assignee_names_assignee_id · exact · drop_matches
+9. Aggregate · flat by assignee_names_assignee_id, assignee_names_disambiguated → matched_buyers
+10. Export · csv · matched_buyers
 
 **Warnings:** none
 
@@ -78,17 +80,18 @@ warnings for each template. Regenerate after any template change.
 
 ### 05 - Buyers - off-gazetteer (NPEs / shells) for review
 
-1. Filter · flat · 3 clause(s) · AND
-2. Reference match · flat.assignor_names vs reference.parquet · keep_matched · score · review<95
-3. Classify · flat.assignee_names → assignee_names_type (rules)
-4. Filter · flat · 2 clause(s) · OR
-5. Reference match · flat.assignee_names vs reference.parquet · flag · score · review<95
-6. Filter · flat · 1 clause(s) · AND
-7. Normalize · flat.assignor_names → assignor_names_canonical (≥90)
-8. Normalize · flat.assignee_names → assignee_names_canonical (≥90)
-9. Compare · flat · assignor_names_canonical vs assignee_names_canonical · exact · drop_matches
-10. Sort · flat by assignee_names_canonical · asc
-11. Export · csv · flat
+1. Filter · flat · 2 clause(s) · OR
+2. Filter · flat · 3 clause(s) · AND
+3. Reference match · flat.assignor_names vs reference.parquet · keep_matched · score · review<95
+4. Classify · flat.assignee_names → assignee_names_type (rules)
+5. Filter · flat · 2 clause(s) · OR
+6. Reference match · flat.assignee_names vs reference.parquet · flag · score · review<95
+7. Filter · flat · 1 clause(s) · AND
+8. Normalize · flat.assignor_names → assignor_names_canonical (≥90)
+9. Normalize · flat.assignee_names → assignee_names_canonical (≥90)
+10. Compare · flat · assignor_names_canonical vs assignee_names_canonical · exact · drop_matches
+11. Sort · flat by assignee_names_canonical · asc
+12. Export · csv · flat
 
 **Warnings:** none
 
@@ -96,13 +99,14 @@ warnings for each template. Regenerate after any template change.
 
 ### 06 - Firm-to-firm buyers (rules only, no reference file)
 
-1. Filter · flat · 4 clause(s) · AND
-2. Transfer type · flat · company → company
-3. Normalize · flat.assignor_names → assignor_names_canonical (≥90)
-4. Normalize · flat.assignee_names → assignee_names_canonical (≥90)
-5. Compare · flat · assignor_names_canonical vs assignee_names_canonical · exact · drop_matches
-6. Derive · flat.transaction_date_year = year(transaction_date)
-7. Export · parquet · flat
+1. Filter · flat · 2 clause(s) · OR
+2. Filter · flat · 3 clause(s) · AND
+3. Transfer type · flat · company → company
+4. Normalize · flat.assignor_names → assignor_names_canonical (≥90)
+5. Normalize · flat.assignee_names → assignee_names_canonical (≥90)
+6. Compare · flat · assignor_names_canonical vs assignee_names_canonical · exact · drop_matches
+7. Derive · flat.transaction_date_year = year(transaction_date)
+8. Export · parquet · flat
 
 **Warnings:** none
 
@@ -110,16 +114,17 @@ warnings for each template. Regenerate after any template change.
 
 ### 07 - CPC patent list per buyer (bridge for downstream CPC match)
 
-1. Filter · flat · 4 clause(s) · AND
-2. Reference match · flat.assignor_names vs reference.parquet · keep_matched
-3. Classify · flat.assignee_names → assignee_names_type (rules)
-4. Filter · flat · 2 clause(s) · OR
-5. Reference match · flat.assignee_names vs reference.parquet · flag
-6. Normalize · flat.assignor_names → assignor_names_canonical (≥90)
-7. Normalize · flat.assignee_names → assignee_names_canonical (≥90)
-8. Compare · flat · assignor_names_assignee_id vs assignee_names_assignee_id · exact · drop_matches
-9. Derive · flat.transaction_date_year = year(transaction_date)
-10. Export · csv · flat
+1. Filter · flat · 2 clause(s) · OR
+2. Filter · flat · 3 clause(s) · AND
+3. Reference match · flat.assignor_names vs reference.parquet · keep_matched
+4. Classify · flat.assignee_names → assignee_names_type (rules)
+5. Filter · flat · 2 clause(s) · OR
+6. Reference match · flat.assignee_names vs reference.parquet · flag
+7. Normalize · flat.assignor_names → assignor_names_canonical (≥90)
+8. Normalize · flat.assignee_names → assignee_names_canonical (≥90)
+9. Compare · flat · assignor_names_assignee_id vs assignee_names_assignee_id · exact · drop_matches
+10. Derive · flat.transaction_date_year = year(transaction_date)
+11. Export · csv · flat
 
 **Warnings:** none
 
@@ -127,14 +132,15 @@ warnings for each template. Regenerate after any template change.
 
 ### 08 - CPC enrich (firm-to-firm buyers + CPC codes)
 
-1. Filter · flat · 4 clause(s) · AND
-2. Transfer type · flat · company → company
-3. Normalize · flat.assignor_names → assignor_names_canonical (≥90)
-4. Normalize · flat.assignee_names → assignee_names_canonical (≥90)
-5. Compare · flat · assignor_names_canonical vs assignee_names_canonical · exact · drop_matches
-6. Derive · flat.transaction_date_year = year(transaction_date)
-7. Fetch CPC · flat.doc_number → cpc_codes
-8. Export · parquet · flat
+1. Filter · flat · 2 clause(s) · OR
+2. Filter · flat · 3 clause(s) · AND
+3. Transfer type · flat · company → company
+4. Normalize · flat.assignor_names → assignor_names_canonical (≥90)
+5. Normalize · flat.assignee_names → assignee_names_canonical (≥90)
+6. Compare · flat · assignor_names_canonical vs assignee_names_canonical · exact · drop_matches
+7. Derive · flat.transaction_date_year = year(transaction_date)
+8. Fetch CPC · flat.doc_number → cpc_codes
+9. Export · parquet · flat
 
 **Warnings:** none
 
@@ -146,18 +152,19 @@ warnings for each template. Regenerate after any template change.
 2. Export · csv · matched_buyers_by_portfolio_patent, matched_buyers_overall
 
 **Warnings:**
-- ⚠ Step 1 (CpcMatchStep): column 'assignee_names_canonical' is not available on 'flat' yet.
-- ⚠ Step 1 (CpcMatchStep): column 'cpc_codes' is not available on 'flat' yet.
+- ⚠ Step 1 (CpcMatchStep): column 'assignee_names_canonical' is not available on 'flat' yet. (OK if the input is a processed dataset that already carries it)
+- ⚠ Step 1 (CpcMatchStep): column 'cpc_codes' is not available on 'flat' yet. (OK if the input is a processed dataset that already carries it)
 - ⚠ Step 1 (CpcMatch): portfolio file not found: portfolio.txt
 
 ## 10_dropped_sellers_audit.json
 
 ### 10 - Dropped sellers audit (off-gazetteer assignors)
 
-1. Filter · flat · 3 clause(s) · AND
-2. Reference match · flat.assignor_names vs reference.parquet · flag · score · review<95
-3. Filter · flat · 1 clause(s) · AND
-4. Export · csv · flat
+1. Filter · flat · 2 clause(s) · OR
+2. Filter · flat · 3 clause(s) · AND
+3. Reference match · flat.assignor_names vs reference.parquet · flag · score · review<95
+4. Filter · flat · 1 clause(s) · AND
+5. Export · csv · flat
 
 **Warnings:** none
 
@@ -165,13 +172,16 @@ warnings for each template. Regenerate after any template change.
 
 ### 11 - Attach CPC from file (firm-to-firm, offline PatSeer join)
 
-1. Filter · flat · 4 clause(s) · AND
-2. Attach CPC file · flat.doc_number vs patseer_export.csv → cpc_codes
-3. Derive · flat.transaction_date_year = year(transaction_date)
-4. Export · csv · flat
+1. Filter · flat · 2 clause(s) · OR
+2. Filter · flat · 3 clause(s) · AND
+3. Transfer type · flat · company → company
+4. Compare · flat · assignor_names vs assignee_names · exact · drop_matches
+5. Attach CPC file · flat.doc_number vs patseer_export.csv → cpc_codes
+6. Derive · flat.transaction_date_year = year(transaction_date)
+7. Export · csv · flat
 
 **Warnings:**
-- ⚠ Step 2 (AttachCpcFile): CPC file not found: cpc/patseer_export.csv
+- ⚠ Step 5 (AttachCpcFile): CPC file not found: cpc/patseer_export.csv
 
 ## 12_convert_to_parquet.json
 
@@ -185,14 +195,18 @@ warnings for each template. Regenerate after any template change.
 
 ### 13 - Attach CPC from file → Parquet (offline, ready for match)
 
-1. Filter · flat · 4 clause(s) · AND
-2. Normalize · flat.assignee_names → assignee_names_canonical (≥90)
-3. Attach CPC file · flat.doc_number vs patseer_export.csv → cpc_codes
-4. Derive · flat.transaction_date_year = year(transaction_date)
-5. Export · parquet · flat
+1. Filter · flat · 2 clause(s) · OR
+2. Filter · flat · 3 clause(s) · AND
+3. Transfer type · flat · company → company
+4. Normalize · flat.assignor_names → assignor_names_canonical (≥90) · match-only
+5. Normalize · flat.assignee_names → assignee_names_canonical (≥90) · match-only
+6. Compare · flat · assignor_names_canonical vs assignee_names_canonical · exact · drop_matches
+7. Attach CPC file · flat.doc_number vs patseer_export.csv → cpc_codes
+8. Derive · flat.transaction_date_year = year(transaction_date)
+9. Export · parquet · flat
 
 **Warnings:**
-- ⚠ Step 3 (AttachCpcFile): CPC file not found: cpc/patseer_export.csv
+- ⚠ Step 7 (AttachCpcFile): CPC file not found: cpc/patseer_export.csv
 
 ## 14_cpc_match_offline.json
 
@@ -202,8 +216,8 @@ warnings for each template. Regenerate after any template change.
 2. Export · csv · matched_buyers_by_portfolio_patent, matched_buyers_overall, matched_cpc_classes
 
 **Warnings:**
-- ⚠ Step 1 (CpcMatchStep): column 'assignee_names_canonical' is not available on 'flat' yet.
-- ⚠ Step 1 (CpcMatchStep): column 'cpc_codes' is not available on 'flat' yet.
+- ⚠ Step 1 (CpcMatchStep): column 'assignee_names_canonical' is not available on 'flat' yet. (OK if the input is a processed dataset that already carries it)
+- ⚠ Step 1 (CpcMatchStep): column 'cpc_codes' is not available on 'flat' yet. (OK if the input is a processed dataset that already carries it)
 - ⚠ Step 1 (CpcMatch): portfolio file not found: cpc/portfolio_footprint.csv
 
 ## buyer_identification_templates.json
@@ -391,18 +405,21 @@ warnings for each template. Regenerate after any template change.
 
 ### Top assignees by patent count
 
-1. Normalize · assignees.name → name_canonical (≥90)
-2. Aggregate · assignees by name_canonical → assignees_by_name_canonical
-3. Export · csv · assignees_by_name_canonical
+1. Normalize · flat.assignee_names → assignee_names_canonical (≥90)
+2. Filter · flat · 1 clause(s) · AND
+3. Aggregate · flat by assignee_names_canonical → flat_by_assignee_names_canonical
+4. Sort · flat_by_assignee_names_canonical by doc_number_distinct · desc
+5. Export · csv · flat_by_assignee_names_canonical
 
 **Warnings:** none
 
 ### Assignments per year
 
 1. Derive · flat.transaction_date_year = year(transaction_date)
-2. Aggregate · flat by transaction_date_year → flat_by_transaction_date_year
-3. Sort · flat_by_transaction_date_year by transaction_date_year · asc
-4. Export · csv · flat_by_transaction_date_year
+2. Deduplicate · flat · key: reel_no, frame_no
+3. Aggregate · flat by transaction_date_year → flat_by_transaction_date_year
+4. Sort · flat_by_transaction_date_year by transaction_date_year · asc
+5. Export · csv · flat_by_transaction_date_year
 
 **Warnings:** none
 

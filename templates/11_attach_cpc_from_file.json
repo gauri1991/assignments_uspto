@@ -1,84 +1,115 @@
 [
-  {
-    "name": "11 - Attach CPC from file (firm-to-firm, offline PatSeer join)",
-    "load": {
-      "limit": null
-    },
-    "steps": [
-      {
-        "kind": "filter",
-        "table": "flat",
-        "clauses": [
-          {
-            "column": "conveyance_text",
-            "op": "contains",
-            "value": "ASSIGNOR'S INTEREST",
-            "value2": "",
-            "case_sensitive": false
-          },
-          {
-            "column": "assignee_names",
-            "op": "not_empty",
-            "value": "",
-            "value2": "",
-            "case_sensitive": false
-          },
-          {
-            "column": "purge_indicator",
-            "op": "not_equals",
-            "value": "Y",
-            "value2": "",
-            "case_sensitive": false
-          },
-          {
-            "column": "doc_kind",
-            "op": "equals",
-            "value": "B2",
-            "value2": "",
-            "case_sensitive": false
-          }
-        ],
-        "combine": "and"
-      },
-      {
-        "kind": "attach_cpc_file",
-        "table": "flat",
-        "column": "doc_number",
-        "kind_column": "doc_kind",
-        "source_path": "cpc/patseer_export.csv",
-        "patent_column": "Publication Number",
-        "code_column": "CPC",
-        "separator": ";"
-      },
-      {
-        "kind": "derive",
-        "table": "flat",
-        "source": "transaction_date",
-        "op": "year"
-      },
-      {
-        "kind": "export",
-        "fmt": "csv",
-        "tables": [
-          "flat"
-        ],
-        "columns": {
-          "flat": [
-            "reel_no",
-            "frame_no",
-            "transaction_date",
-            "transaction_date_year",
-            "assignor_names",
-            "assignee_names",
-            "invention_title",
-            "doc_number",
-            "doc_kind",
-            "cpc_codes",
-            "cpc_subclasses",
-            "cpc_lookup_status"
-          ]
-        }
-      }
-    ]
-  }
+ {
+  "name": "11 - Attach CPC from file (firm-to-firm, offline PatSeer join)",
+  "load": {
+   "limit": null
+  },
+  "steps": [
+   {
+    "kind": "filter",
+    "table": "flat",
+    "clauses": [
+     {
+      "column": "conveyance_text",
+      "op": "contains",
+      "value": "ASSIGNORS INTEREST",
+      "value2": "",
+      "case_sensitive": false
+     },
+     {
+      "column": "conveyance_text",
+      "op": "contains",
+      "value": "ASSIGNOR'S INTEREST",
+      "value2": "",
+      "case_sensitive": false
+     }
+    ],
+    "combine": "or"
+   },
+   {
+    "kind": "filter",
+    "table": "flat",
+    "clauses": [
+     {
+      "column": "assignee_names",
+      "op": "not_empty",
+      "value": "",
+      "value2": "",
+      "case_sensitive": false
+     },
+     {
+      "column": "purge_indicator",
+      "op": "not_equals",
+      "value": "Y",
+      "value2": "",
+      "case_sensitive": false
+     },
+     {
+      "column": "doc_kind",
+      "op": "starts_with",
+      "value": "B",
+      "value2": "",
+      "case_sensitive": false
+     }
+    ],
+    "combine": "and"
+   },
+   {
+    "kind": "transfer_type",
+    "table": "flat",
+    "assignor_column": "assignor_names",
+    "assignee_column": "assignee_names",
+    "assignor_type": "company",
+    "assignee_type": "company",
+    "method": "rules"
+   },
+   {
+    "kind": "compare",
+    "table": "flat",
+    "left": "assignor_names",
+    "right": "assignee_names",
+    "method": "exact",
+    "action": "drop_matches"
+   },
+   {
+    "kind": "attach_cpc_file",
+    "table": "flat",
+    "column": "doc_number",
+    "kind_column": "doc_kind",
+    "source_path": "cpc/patseer_export.csv",
+    "patent_column": "Publication Number",
+    "code_column": "CPC",
+    "separator": ";"
+   },
+   {
+    "kind": "derive",
+    "table": "flat",
+    "source": "transaction_date",
+    "op": "year"
+   },
+   {
+    "kind": "export",
+    "fmt": "csv",
+    "tables": [
+     "flat"
+    ],
+    "columns": {
+     "flat": [
+      "reel_no",
+      "frame_no",
+      "transaction_date",
+      "transaction_date_year",
+      "assignor_names",
+      "assignee_names",
+      "invention_title",
+      "doc_number",
+      "doc_kind",
+      "cpc_codes",
+      "cpc_subclasses",
+      "cpc_lookup_status"
+     ]
+    }
+   }
+  ]
+ }
 ]

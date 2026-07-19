@@ -1,33 +1,33 @@
 [
-  {
-    "name": "14 - CPC match (offline footprint) + per-class matches",
-    "load": {
-      "limit": null
-    },
-    "steps": [
-      {
-        "kind": "cpc_match",
-        "table": "flat",
-        "portfolio_mode": "footprint_file",
-        "portfolio_path": "cpc/portfolio_footprint.csv",
-        "buyer_column": "assignee_names_canonical",
-        "number_column": "doc_number",
-        "kind_column": "doc_kind",
-        "date_column": "transaction_date",
-        "out_table": "matched_buyers_by_portfolio_patent",
-        "overall_table": "matched_buyers_overall",
-        "emit_class_matches": true,
-        "class_match_table": "matched_cpc_classes"
-      },
-      {
-        "kind": "export",
-        "fmt": "csv",
-        "tables": [
-          "matched_buyers_by_portfolio_patent",
-          "matched_buyers_overall",
-          "matched_cpc_classes"
-        ]
-      }
+ {
+  "name": "14 - CPC match (offline footprint) + per-class matches",
+  "load": {
+   "limit": null
+  },
+  "steps": [
+   {
+    "kind": "cpc_match",
+    "table": "flat",
+    "portfolio_mode": "footprint_file",
+    "portfolio_path": "cpc/portfolio_footprint.csv",
+    "buyer_column": "assignee_names_canonical",
+    "number_column": "doc_number",
+    "kind_column": "doc_kind",
+    "date_column": "transaction_date",
+    "out_table": "matched_buyers_by_portfolio_patent",
+    "overall_table": "matched_buyers_overall",
+    "emit_class_matches": true,
+    "class_match_table": "matched_cpc_classes"
+   },
+   {
+    "kind": "export",
+    "fmt": "csv",
+    "tables": [
+     "matched_buyers_by_portfolio_patent",
+     "matched_buyers_overall",
+     "matched_cpc_classes"
     ]
-  }
+   }
+  ]
+ }
 ]

@@ -1,90 +1,301 @@
 [
-  {
-    "name": "Enrich flat (clean names + types)",
-    "load": { "limit": null },
-    "steps": [
-      { "kind": "normalize", "table": "flat", "column": "assignor_names" },
-      { "kind": "normalize", "table": "flat", "column": "assignee_names" },
-      { "kind": "classify", "table": "flat", "column": "assignor_names" },
-      { "kind": "classify", "table": "flat", "column": "assignee_names" },
-      { "kind": "export", "fmt": "parquet", "tables": ["flat"] }
-    ]
+ {
+  "name": "Enrich flat (clean names + types)",
+  "load": {
+   "limit": null
   },
-  {
-    "name": "Firm-to-firm transfers, enriched",
-    "load": { "limit": null },
-    "steps": [
-      { "kind": "filter", "table": "flat",
-        "clauses": [
-          { "column": "conveyance_text", "op": "starts_with", "value": "assignment" },
-          { "column": "transaction_date", "op": "in_range", "value": "20060101", "value2": "20261231" }
-        ],
-        "combine": "and" },
-      { "kind": "normalize", "table": "flat", "column": "assignor_names" },
-      { "kind": "normalize", "table": "flat", "column": "assignee_names" },
-      { "kind": "classify", "table": "flat", "column": "assignor_names" },
-      { "kind": "classify", "table": "flat", "column": "assignee_names" },
-      { "kind": "transfer_type", "table": "flat", "assignor_type": "company", "assignee_type": "company" },
-      { "kind": "derive", "table": "flat", "source": "transaction_date", "op": "year" },
-      { "kind": "export", "fmt": "parquet", "tables": ["flat"],
-        "columns": { "flat": ["reel_no", "frame_no", "transaction_date_year",
-                              "execution_date", "transaction_date", "date_source",
-                              "assignor_names_canonical", "assignee_names_canonical"] },
-        "renames": { "flat": { "assignor_names_canonical": "assignor_clean",
-                              "assignee_names_canonical": "assignee_clean",
-                              "transaction_date_year": "year" } } }
+  "steps": [
+   {
+    "kind": "normalize",
+    "table": "flat",
+    "column": "assignor_names"
+   },
+   {
+    "kind": "normalize",
+    "table": "flat",
+    "column": "assignee_names"
+   },
+   {
+    "kind": "classify",
+    "table": "flat",
+    "column": "assignor_names"
+   },
+   {
+    "kind": "classify",
+    "table": "flat",
+    "column": "assignee_names"
+   },
+   {
+    "kind": "export",
+    "fmt": "parquet",
+    "tables": [
+     "flat"
     ]
+   }
+  ]
+ },
+ {
+  "name": "Firm-to-firm transfers, enriched",
+  "load": {
+   "limit": null
   },
-  {
-    "name": "Individual-to-company transfers",
-    "load": { "limit": null },
-    "steps": [
-      { "kind": "normalize", "table": "flat", "column": "assignor_names" },
-      { "kind": "normalize", "table": "flat", "column": "assignee_names" },
-      { "kind": "transfer_type", "table": "flat", "assignor_type": "individual", "assignee_type": "company" },
-      { "kind": "export", "fmt": "parquet", "tables": ["flat"] }
-    ]
+  "steps": [
+   {
+    "kind": "filter",
+    "table": "flat",
+    "clauses": [
+     {
+      "column": "conveyance_text",
+      "op": "starts_with",
+      "value": "assignment"
+     },
+     {
+      "column": "transaction_date",
+      "op": "in_range",
+      "value": "20060101",
+      "value2": "20991231"
+     }
+    ],
+    "combine": "and"
+   },
+   {
+    "kind": "normalize",
+    "table": "flat",
+    "column": "assignor_names"
+   },
+   {
+    "kind": "normalize",
+    "table": "flat",
+    "column": "assignee_names"
+   },
+   {
+    "kind": "classify",
+    "table": "flat",
+    "column": "assignor_names"
+   },
+   {
+    "kind": "classify",
+    "table": "flat",
+    "column": "assignee_names"
+   },
+   {
+    "kind": "transfer_type",
+    "table": "flat",
+    "assignor_type": "company",
+    "assignee_type": "company"
+   },
+   {
+    "kind": "derive",
+    "table": "flat",
+    "source": "transaction_date",
+    "op": "year"
+   },
+   {
+    "kind": "export",
+    "fmt": "parquet",
+    "tables": [
+     "flat"
+    ],
+    "columns": {
+     "flat": [
+      "reel_no",
+      "frame_no",
+      "transaction_date_year",
+      "execution_date",
+      "transaction_date",
+      "date_source",
+      "assignor_names_canonical",
+      "assignee_names_canonical"
+     ]
+    },
+    "renames": {
+     "flat": {
+      "assignor_names_canonical": "assignor_clean",
+      "assignee_names_canonical": "assignee_clean",
+      "transaction_date_year": "year"
+     }
+    }
+   }
+  ]
+ },
+ {
+  "name": "Individual-to-company transfers",
+  "load": {
+   "limit": null
   },
-  {
-    "name": "Remove self-transfers (assignor == assignee)",
-    "load": { "limit": null },
-    "steps": [
-      { "kind": "normalize", "table": "flat", "column": "assignor_names", "scorer": "token_set" },
-      { "kind": "normalize", "table": "flat", "column": "assignee_names", "scorer": "token_set" },
-      { "kind": "compare", "table": "flat",
-        "left": "assignor_names_canonical", "right": "assignee_names_canonical",
-        "method": "exact", "action": "drop_matches" },
-      { "kind": "export", "fmt": "parquet", "tables": ["flat"] }
+  "steps": [
+   {
+    "kind": "normalize",
+    "table": "flat",
+    "column": "assignor_names"
+   },
+   {
+    "kind": "normalize",
+    "table": "flat",
+    "column": "assignee_names"
+   },
+   {
+    "kind": "transfer_type",
+    "table": "flat",
+    "assignor_type": "individual",
+    "assignee_type": "company"
+   },
+   {
+    "kind": "export",
+    "fmt": "parquet",
+    "tables": [
+     "flat"
     ]
+   }
+  ]
+ },
+ {
+  "name": "Remove self-transfers (assignor == assignee)",
+  "load": {
+   "limit": null
   },
-  {
-    "name": "Top assignees by patent count",
-    "load": { "limit": null },
-    "steps": [
-      { "kind": "normalize", "table": "assignees", "column": "name" },
-      { "kind": "aggregate", "table": "assignees", "group_by": ["name_canonical"] },
-      { "kind": "export", "fmt": "csv", "tables": ["assignees_by_name_canonical"] }
+  "steps": [
+   {
+    "kind": "normalize",
+    "table": "flat",
+    "column": "assignor_names",
+    "scorer": "token_set"
+   },
+   {
+    "kind": "normalize",
+    "table": "flat",
+    "column": "assignee_names",
+    "scorer": "token_set"
+   },
+   {
+    "kind": "compare",
+    "table": "flat",
+    "left": "assignor_names_canonical",
+    "right": "assignee_names_canonical",
+    "method": "exact",
+    "action": "drop_matches"
+   },
+   {
+    "kind": "export",
+    "fmt": "parquet",
+    "tables": [
+     "flat"
     ]
+   }
+  ]
+ },
+ {
+  "name": "Top assignees by patent count",
+  "load": {
+   "limit": null
   },
-  {
-    "name": "Assignments per year",
-    "load": { "limit": null },
-    "steps": [
-      { "kind": "derive", "table": "flat", "source": "transaction_date", "op": "year" },
-      { "kind": "aggregate", "table": "flat", "group_by": ["transaction_date_year"] },
-      { "kind": "sort", "table": "flat_by_transaction_date_year", "column": "transaction_date_year", "ascending": true },
-      { "kind": "export", "fmt": "csv", "tables": ["flat_by_transaction_date_year"] }
+  "steps": [
+   {
+    "kind": "normalize",
+    "table": "flat",
+    "column": "assignee_names"
+   },
+   {
+    "kind": "filter",
+    "table": "flat",
+    "clauses": [
+     {
+      "column": "doc_kind",
+      "op": "starts_with",
+      "value": "B",
+      "value2": "",
+      "case_sensitive": false
+     }
+    ],
+    "combine": "and"
+   },
+   {
+    "kind": "aggregate",
+    "table": "flat",
+    "group_by": [
+     "assignee_names_canonical"
+    ],
+    "count_distinct": "doc_number"
+   },
+   {
+    "kind": "sort",
+    "table": "flat_by_assignee_names_canonical",
+    "column": "doc_number_distinct",
+    "ascending": false
+   },
+   {
+    "kind": "export",
+    "fmt": "csv",
+    "tables": [
+     "flat_by_assignee_names_canonical"
     ]
+   }
+  ]
+ },
+ {
+  "name": "Assignments per year",
+  "load": {
+   "limit": null
   },
-  {
-    "name": "Reference-match assignors to known companies",
-    "load": { "limit": null },
-    "steps": [
-      { "kind": "reference_match", "table": "flat", "column": "assignor_names",
-        "reference_path": "reference/g_assignee_disambiguated.tsv",
-        "name_column": "disambig_assignee_organization", "id_column": "assignee_id",
-        "action": "keep_matched" },
-      { "kind": "export", "fmt": "parquet", "tables": ["flat"] }
+  "steps": [
+   {
+    "kind": "derive",
+    "table": "flat",
+    "source": "transaction_date",
+    "op": "year"
+   },
+   {
+    "kind": "dedupe",
+    "table": "flat",
+    "subset": [
+     "reel_no",
+     "frame_no"
     ]
-  }
+   },
+   {
+    "kind": "aggregate",
+    "table": "flat",
+    "group_by": [
+     "transaction_date_year"
+    ]
+   },
+   {
+    "kind": "sort",
+    "table": "flat_by_transaction_date_year",
+    "column": "transaction_date_year",
+    "ascending": true
+   },
+   {
+    "kind": "export",
+    "fmt": "csv",
+    "tables": [
+     "flat_by_transaction_date_year"
+    ]
+   }
+  ]
+ },
+ {
+  "name": "Reference-match assignors to known companies",
+  "load": {
+   "limit": null
+  },
+  "steps": [
+   {
+    "kind": "reference_match",
+    "table": "flat",
+    "column": "assignor_names",
+    "reference_path": "reference/g_assignee_disambiguated.tsv",
+    "name_column": "disambig_assignee_organization",
+    "id_column": "assignee_id",
+    "action": "keep_matched"
+   },
+   {
+    "kind": "export",
+    "fmt": "parquet",
+    "tables": [
+     "flat"
+    ]
+   }
+  ]
+ }
 ]

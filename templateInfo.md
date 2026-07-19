@@ -34,7 +34,9 @@ Encoding: UTF-8, standard JSON (no comments, no trailing commas).
 ## 2. Tables and their columns
 
 Parsing produces **five tables**. Use these exact names and column names. `flat` is the
-denormalized, analysis-ready table (one row per patent property) and is what most pipelines use.
+denormalized, analysis-ready table (one row per patent property **× document-id** — a property
+carrying an application + grant + publication id contributes 3 rows; dedupe on
+`reel_no`,`frame_no` for assignment grain) and is what most pipelines use.
 
 | Table | Columns |
 |---|---|
@@ -293,7 +295,10 @@ omitted) **auto-derives** the name per §2a — prefer leaving it blank so names
   same grant-only exact join, but the codes come from `source_path` — **fully offline, no API, no
   cache**. `patent_column`/`code_column` name the columns in the file; `separator` splits a cell
   packing several CPC codes (typical PatSeer export), blank = one code per row (USPTO
-  `g_cpc_current` bulk). `source_path` must exist at run time.
+  `g_cpc_current` bulk). `source_path` must exist at run time. The file's patent ids may be
+  **publication-style** (`US10987654B2`, `USD912345S1`, `10,987,654`) or bare grant numbers —
+  both are normalized to the bare-grant key before the join (same for `cpc_match` portfolio and
+  footprint files).
 
 ### `cpc_match` — rank buyers per portfolio patent by CPC overlap
 ```json
@@ -501,9 +506,12 @@ template → how to verify with the tool**.
     "name": "Top assignees by patent count",
     "load": { "limit": null },
     "steps": [
-      { "kind": "normalize", "table": "assignees", "column": "name" },
-      { "kind": "aggregate", "table": "assignees", "group_by": ["name_canonical"] },
-      { "kind": "export", "fmt": "csv", "tables": ["assignees_by_name_canonical"] }
+      { "kind": "normalize", "table": "flat", "column": "assignee_names" },
+      { "kind": "filter", "table": "flat",
+        "clauses": [ { "column": "doc_kind", "op": "starts_with", "value": "B" } ] },
+      { "kind": "aggregate", "table": "flat",
+        "group_by": ["assignee_names_canonical"], "count_distinct": "doc_number" },
+      { "kind": "export", "fmt": "csv", "tables": ["flat_by_assignee_names_canonical"] }
     ]
   },
   {

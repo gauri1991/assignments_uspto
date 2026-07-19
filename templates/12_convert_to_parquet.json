@@ -1,14 +1,14 @@
 [
-  {
-    "name": "12 - Convert to Parquet (all tables)",
-    "load": {
-      "limit": null
-    },
-    "steps": [
-      {
-        "kind": "export",
-        "fmt": "parquet"
-      }
-    ]
-  }
+ {
+  "name": "12 - Convert to Parquet (all tables)",
+  "load": {
+   "limit": null
+  },
+  "steps": [
+   {
+    "kind": "export",
+    "fmt": "parquet"
+   }
+  ]
+ }
 ]

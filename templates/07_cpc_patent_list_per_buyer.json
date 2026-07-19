@@ -1,160 +1,174 @@
 [
-  {
-    "name": "07 - CPC patent list per buyer (bridge for downstream CPC match)",
-    "load": {
-      "limit": null
+ {
+  "name": "07 - CPC patent list per buyer (bridge for downstream CPC match)",
+  "load": {
+   "limit": null
+  },
+  "steps": [
+   {
+    "kind": "filter",
+    "table": "flat",
+    "clauses": [
+     {
+      "column": "conveyance_text",
+      "op": "contains",
+      "value": "ASSIGNORS INTEREST",
+      "value2": "",
+      "case_sensitive": false
+     },
+     {
+      "column": "conveyance_text",
+      "op": "contains",
+      "value": "ASSIGNOR'S INTEREST",
+      "value2": "",
+      "case_sensitive": false
+     }
+    ],
+    "combine": "or"
+   },
+   {
+    "kind": "filter",
+    "table": "flat",
+    "clauses": [
+     {
+      "column": "assignee_names",
+      "op": "not_empty",
+      "value": "",
+      "value2": "",
+      "case_sensitive": false
+     },
+     {
+      "column": "purge_indicator",
+      "op": "not_equals",
+      "value": "Y",
+      "value2": "",
+      "case_sensitive": false
+     },
+     {
+      "column": "recorded_date",
+      "op": "not_empty",
+      "value": "",
+      "value2": "",
+      "case_sensitive": false
+     }
+    ],
+    "combine": "and"
+   },
+   {
+    "kind": "reference_match",
+    "table": "flat",
+    "column": "assignor_names",
+    "reference_path": "reference/reference.parquet",
+    "name_column": "organization",
+    "id_column": "assignee_id",
+    "threshold": 90,
+    "scorer": "token_set",
+    "mode": "all",
+    "action": "keep_matched"
+   },
+   {
+    "kind": "classify",
+    "table": "flat",
+    "column": "assignee_names",
+    "method": "rules",
+    "mode": "all"
+   },
+   {
+    "kind": "filter",
+    "table": "flat",
+    "clauses": [
+     {
+      "column": "assignee_names_type",
+      "op": "equals",
+      "value": "company",
+      "value2": "",
+      "case_sensitive": false
+     },
+     {
+      "column": "assignee_names_type",
+      "op": "equals",
+      "value": "unknown",
+      "value2": "",
+      "case_sensitive": false
+     }
+    ],
+    "combine": "or"
+   },
+   {
+    "kind": "reference_match",
+    "table": "flat",
+    "column": "assignee_names",
+    "reference_path": "reference/reference.parquet",
+    "name_column": "organization",
+    "id_column": "assignee_id",
+    "threshold": 90,
+    "scorer": "token_set",
+    "mode": "any",
+    "action": "flag"
+   },
+   {
+    "kind": "normalize",
+    "table": "flat",
+    "column": "assignor_names",
+    "scorer": "token_set"
+   },
+   {
+    "kind": "normalize",
+    "table": "flat",
+    "column": "assignee_names",
+    "scorer": "token_set"
+   },
+   {
+    "kind": "compare",
+    "table": "flat",
+    "left": "assignor_names_assignee_id",
+    "right": "assignee_names_assignee_id",
+    "method": "exact",
+    "action": "drop_matches"
+   },
+   {
+    "kind": "derive",
+    "table": "flat",
+    "source": "transaction_date",
+    "op": "year"
+   },
+   {
+    "kind": "export",
+    "fmt": "csv",
+    "tables": [
+     "flat"
+    ],
+    "columns": {
+     "flat": [
+      "assignee_names_assignee_id",
+      "assignee_names_canonical",
+      "assignee_names_matched",
+      "reel_no",
+      "frame_no",
+      "recorded_date",
+      "execution_date",
+      "transaction_date",
+      "transaction_date_year",
+      "date_source",
+      "doc_number",
+      "doc_kind",
+      "doc_country",
+      "invention_title",
+      "doc_date"
+     ]
     },
-    "steps": [
-      {
-        "kind": "filter",
-        "table": "flat",
-        "clauses": [
-          {
-            "column": "conveyance_text",
-            "op": "contains",
-            "value": "ASSIGNOR'S INTEREST",
-            "value2": "",
-            "case_sensitive": false
-          },
-          {
-            "column": "assignee_names",
-            "op": "not_empty",
-            "value": "",
-            "value2": "",
-            "case_sensitive": false
-          },
-          {
-            "column": "purge_indicator",
-            "op": "not_equals",
-            "value": "Y",
-            "value2": "",
-            "case_sensitive": false
-          },
-          {
-            "column": "recorded_date",
-            "op": "not_empty",
-            "value": "",
-            "value2": "",
-            "case_sensitive": false
-          }
-        ],
-        "combine": "and"
-      },
-      {
-        "kind": "reference_match",
-        "table": "flat",
-        "column": "assignor_names",
-        "reference_path": "reference/reference.parquet",
-        "name_column": "organization",
-        "id_column": "assignee_id",
-        "threshold": 90,
-        "scorer": "token_set",
-        "mode": "all",
-        "action": "keep_matched"
-      },
-      {
-        "kind": "classify",
-        "table": "flat",
-        "column": "assignee_names",
-        "method": "rules",
-        "mode": "all"
-      },
-      {
-        "kind": "filter",
-        "table": "flat",
-        "clauses": [
-          {
-            "column": "assignee_names_type",
-            "op": "equals",
-            "value": "company",
-            "value2": "",
-            "case_sensitive": false
-          },
-          {
-            "column": "assignee_names_type",
-            "op": "equals",
-            "value": "unknown",
-            "value2": "",
-            "case_sensitive": false
-          }
-        ],
-        "combine": "or"
-      },
-      {
-        "kind": "reference_match",
-        "table": "flat",
-        "column": "assignee_names",
-        "reference_path": "reference/reference.parquet",
-        "name_column": "organization",
-        "id_column": "assignee_id",
-        "threshold": 90,
-        "scorer": "token_set",
-        "mode": "any",
-        "action": "flag"
-      },
-      {
-        "kind": "normalize",
-        "table": "flat",
-        "column": "assignor_names",
-        "scorer": "token_set"
-      },
-      {
-        "kind": "normalize",
-        "table": "flat",
-        "column": "assignee_names",
-        "scorer": "token_set"
-      },
-      {
-        "kind": "compare",
-        "table": "flat",
-        "left": "assignor_names_assignee_id",
-        "right": "assignee_names_assignee_id",
-        "method": "exact",
-        "action": "drop_matches"
-      },
-      {
-        "kind": "derive",
-        "table": "flat",
-        "source": "transaction_date",
-        "op": "year"
-      },
-      {
-        "kind": "export",
-        "fmt": "csv",
-        "tables": [
-          "flat"
-        ],
-        "columns": {
-          "flat": [
-            "assignee_names_assignee_id",
-            "assignee_names_canonical",
-            "assignee_names_matched",
-            "reel_no",
-            "frame_no",
-            "recorded_date",
-            "execution_date",
-            "transaction_date",
-            "transaction_date_year",
-            "date_source",
-            "doc_number",
-            "doc_kind",
-            "doc_country",
-            "invention_title",
-            "doc_date"
-          ]
-        },
-        "renames": {
-          "flat": {
-            "assignee_names_assignee_id": "buyer_id",
-            "assignee_names_canonical": "buyer_clean",
-            "assignee_names_matched": "buyer_in_gazetteer",
-            "transaction_date_year": "year",
-            "doc_number": "patent_number_raw",
-            "doc_kind": "kind_code",
-            "doc_country": "doc_country"
-          }
-        }
-      }
-    ]
-  }
+    "renames": {
+     "flat": {
+      "assignee_names_assignee_id": "buyer_id",
+      "assignee_names_canonical": "buyer_clean",
+      "assignee_names_matched": "buyer_in_gazetteer",
+      "transaction_date_year": "year",
+      "doc_number": "patent_number_raw",
+      "doc_kind": "kind_code",
+      "doc_country": "doc_country"
+     }
+    }
+   }
+  ]
+ }
 ]
