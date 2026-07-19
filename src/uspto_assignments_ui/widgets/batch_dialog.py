@@ -40,6 +40,7 @@ from PyQt6.QtWidgets import (
 
 from uspto_assignments import (
     LEGACY_NORMALIZE_TARGET,
+    PREVIEW_LIMIT,
     STORE_TABLES,
     AggregateStep,
     AttachCpcFileStep,
@@ -63,11 +64,13 @@ from uspto_assignments import (
     ReferenceMatchStep,
     SelectStep,
     SortStep,
+    TemplateFormatError,
     TransferTypeStep,
     columns_after,
     columns_for,
     dump_templates,
     extract_distinct_reference,
+    inputs_schema_base,
     is_dataset_dir,
     load_templates,
     probablepeople_available,
@@ -88,7 +91,7 @@ from .filter_bar import FilterBar
 from .page import SectionLabel
 from .preview_dialog import PreviewDialog
 
-_PREVIEW_LIMIT = 1000
+_PREVIEW_LIMIT = PREVIEW_LIMIT  # single source of truth: uspto_assignments.batch
 
 _MAX_RECORDS_CAP = 100_000_000
 _FORMATS: list[tuple[str, ExportFormat]] = [
@@ -196,7 +199,10 @@ def _cols(table: str) -> list[str]:
     """Columns for ``table`` — schema-aware (earlier steps' columns) when a context is set."""
     if _available_ctx is not None and table in _available_ctx:
         return list(_available_ctx[table])
-    return columns_for(table)
+    try:
+        return columns_for(table)
+    except KeyError:  # a derived table (aggregate/cpc_match output) outside the context
+        return []
 
 
 def _checkable_columns(columns: list[str], checked: set[str] | None) -> QListWidget:
@@ -267,6 +273,10 @@ class FilterStepDialog(QDialog):
         if step is not None:
             self._table.setCurrentText(step.table)  # rebuilds the filter bar for that table
             self._filter_bar.set_state(step.clauses, step.combine, None)
+        # ``columns`` (projection) and ``sort`` are spec-supported but have no widgets here —
+        # carry them through so editing the clauses doesn't silently strip them from the JSON.
+        self._carry_columns = step.columns if step is not None else None
+        self._carry_sort = step.sort if step is not None else None
 
     def _rebuild_filter_bar(self) -> None:
         new_bar = FilterBar(_cols(self._table.currentText()), show_quick_search=False)
@@ -286,6 +296,8 @@ class FilterStepDialog(QDialog):
             table=self._table.currentText(),
             clauses=self._filter_bar.clauses(),
             combine=self._filter_bar.combine(),
+            columns=self._carry_columns,
+            sort=self._carry_sort,
         )
 
 
@@ -442,7 +454,12 @@ class ExportStepDialog(QDialog):
         layout.addWidget(QLabel("Tables (all checked = every table)"))
         self._tables = QListWidget()
         chosen = None if step is None else step.tables
-        for name in STORE_TABLES:
+        # Offer every table available at this pipeline position — including tables earlier steps
+        # create (aggregate / cpc_match outputs) — plus any the step already names, so editing an
+        # export never silently drops a non-store table.
+        known = list(_available_ctx) if _available_ctx is not None else list(STORE_TABLES)
+        self._table_names: list[str] = known + [t for t in (chosen or []) if t not in known]
+        for name in self._table_names:
             item = QListWidgetItem(name)
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             checked = chosen is None or name in chosen
@@ -504,18 +521,18 @@ class ExportStepDialog(QDialog):
             return
         if self._editor_tables:  # harvest in-progress edits before re-seeding the grid
             self._pending_columns, self._pending_renames = self._editor.result(self._editor_tables)
-        tables = self._checked_tables() or list(STORE_TABLES)
+        tables = self._checked_tables() or list(self._table_names)
         self._editor.set_tables(tables, self._pending_columns, self._pending_renames)
         self._editor_tables = tables
 
     def step(self) -> ExportStep:
         """Return the configured export step (``tables=None`` when all are selected)."""
         checked = self._checked_tables()
-        tables = None if len(checked) == len(STORE_TABLES) else checked
+        tables = None if len(checked) == len(self._table_names) else checked
         columns: dict[str, list[str]] | None = None
         renames: dict[str, dict[str, str]] | None = None
         if self._customize.isChecked():
-            columns, renames = self._editor.result(checked or list(STORE_TABLES))
+            columns, renames = self._editor.result(checked or list(self._table_names))
         return ExportStep(
             fmt=self._format.currentData(), tables=tables, columns=columns, renames=renames
         )
@@ -763,6 +780,10 @@ class SortStepDialog(QDialog):
         layout.addWidget(buttons)
         if step is not None:
             self._table.setCurrentText(step.table)
+            if self._column.findText(step.column) < 0 and step.column:
+                # Keep an out-of-schema column visible (and selectable) instead of silently
+                # replacing it with the first item — the user must SEE the stale value to fix it.
+                self._column.addItem(step.column)
             self._column.setCurrentText(step.column)
             self._ascending.setChecked(step.ascending)
 
@@ -1065,6 +1086,8 @@ class CompareStepDialog(QDialog):
             self._action.setCurrentIndex(max(0, self._action.findData(step.action)))
             self._emit_score.setChecked(step.emit_score)
             self._review.setValue(step.review_threshold)
+        # ``target`` (custom flag-column name) has no widget — carry it through on edit.
+        self._carry_target = step.target if step is not None else ""
 
     def _rebuild_columns(self) -> None:
         cols = _cols(self._table.currentText())
@@ -1078,6 +1101,7 @@ class CompareStepDialog(QDialog):
             table=self._table.currentText(),
             left=self._left.currentText(),
             right=self._right.currentText(),
+            target=self._carry_target,
             method=self._method.currentData(),
             scorer=self._scorer.currentText(),
             threshold=self._threshold.value(),
@@ -1244,6 +1268,13 @@ class ReferenceMatchStepDialog(QDialog):
             self._action.setCurrentIndex(max(0, self._action.findData(step.action)))
             self._emit_score.setChecked(step.emit_score)
             self._review.setValue(step.review_threshold)
+        # Spec-supported fields without widgets here — carry them through so an edit in this
+        # dialog doesn't silently reset custom output names or file parsing options.
+        self._carry_target = step.target if step is not None else ""
+        self._carry_matched_target = step.matched_target if step is not None else ""
+        self._carry_id_target = step.id_target if step is not None else ""
+        self._carry_separator = step.separator if step is not None else ""
+        self._carry_delimiter = step.delimiter if step is not None else ""
 
     def _rebuild_columns(self) -> None:
         self._column.clear()
@@ -1300,9 +1331,14 @@ class ReferenceMatchStepDialog(QDialog):
             reference_path=self._reference.text().strip(),
             name_column=self._name_column.text().strip() or "disambig_assignee_organization",
             id_column=self._id_column.text().strip(),
+            target=self._carry_target,
+            matched_target=self._carry_matched_target,
+            id_target=self._carry_id_target,
             scorer=self._scorer.currentText(),
             threshold=self._threshold.value(),
+            separator=self._carry_separator,
             mode=self._mode.currentData(),
+            delimiter=self._carry_delimiter,
             action=self._action.currentData(),
             emit_score=self._emit_score.isChecked(),
             review_threshold=self._review.value(),
@@ -1547,6 +1583,14 @@ class CpcMatchStepDialog(QDialog):
             self._kind_column.setCurrentText(step.kind_column)
             self._date_column.setCurrentText(step.date_column)
             self._emit_class_matches.setChecked(step.emit_class_matches)
+        # Custom output-table names have no widgets — carry them through so an edit doesn't
+        # silently rename the tables a later export step targets.
+        defaults = CpcMatchStep(table="flat")
+        self._carry_out = step.out_table if step is not None else defaults.out_table
+        self._carry_overall = step.overall_table if step is not None else defaults.overall_table
+        self._carry_class = (
+            step.class_match_table if step is not None else defaults.class_match_table
+        )
 
     def _rebuild_columns(self) -> None:
         cols = _cols(self._table.currentText())
@@ -1578,7 +1622,10 @@ class CpcMatchStepDialog(QDialog):
             number_column=self._number_column.currentText() or "doc_number",
             kind_column=self._kind_column.currentText() or "doc_kind",
             date_column=self._date_column.currentText() or "transaction_date",
+            out_table=self._carry_out,
+            overall_table=self._carry_overall,
             emit_class_matches=self._emit_class_matches.isChecked(),
+            class_match_table=self._carry_class,
         )
 
 
@@ -1923,7 +1970,13 @@ class BatchDialog(QDialog):
         path, _ = QFileDialog.getOpenFileName(self, "Import template", "", "JSON (*.json)")
         if not path:
             return
-        templates = load_templates(Path(path))
+        try:
+            templates = load_templates(Path(path))
+        except (TemplateFormatError, OSError) as exc:
+            # Imported files are routinely hand- or LLM-authored; a bad one must show its
+            # problem, not escape the Qt slot and abort the whole app.
+            QMessageBox.warning(self, "Import failed", str(exc))
+            return
         if templates:
             self._apply_template(templates[0])
             self._append_console(f"Imported template '{templates[0].name}'")
@@ -1996,6 +2049,10 @@ class BatchDialog(QDialog):
         for item in self._inputs.selectedItems():
             self._inputs.takeItem(self._inputs.row(item))
 
+    def _schema_base(self) -> dict[str, list[str]] | None:
+        """Actual schemas of any dataset-folder inputs, for schema-aware validation/pickers."""
+        return inputs_schema_base(self._input_paths())
+
     def _input_paths(self) -> list[Path]:
         return [Path(self._inputs.item(i).text()) for i in range(self._inputs.count())]  # type: ignore[union-attr]
 
@@ -2009,7 +2066,7 @@ class BatchDialog(QDialog):
         """Open a step dialog with the columns available at ``index`` in scope; return new step."""
         global _available_ctx  # noqa: PLW0603 - modal, single-threaded schema context for dialogs
         previous = _available_ctx
-        _available_ctx = columns_after(self._load(), self._steps, index)
+        _available_ctx = columns_after(self._load(), self._steps, index, base=self._schema_base())
         try:
             dialog = dialog_cls(step, parent=self) if step is not None else dialog_cls(parent=self)  # type: ignore[arg-type]
             return dialog.step() if dialog.exec() == QDialog.DialogCode.Accepted else None
@@ -2072,7 +2129,9 @@ class BatchDialog(QDialog):
 
     def _refresh_steps_list(self) -> None:
         self._steps_list.clear()
-        warned = _warnings_by_step(validate_template(self._load(), self._steps))
+        warned = _warnings_by_step(
+            validate_template(self._load(), self._steps, base=self._schema_base())
+        )
         for index, step in enumerate(self._steps, start=1):
             badge = "⚠ " if index in warned else ""
             text = f"{index}. {badge}{_describe_step(step)}"
@@ -2116,7 +2175,7 @@ class BatchDialog(QDialog):
             return
         template = self.template()
         self._console.clear()
-        warnings = validate_template(template.load, template.steps)
+        warnings = validate_template(template.load, template.steps, base=self._schema_base())
         if warnings:  # run_batch re-emits each warning to the console; only prompt here
             proceed = QMessageBox.question(
                 self,

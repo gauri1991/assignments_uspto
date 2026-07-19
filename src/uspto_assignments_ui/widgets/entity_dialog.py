@@ -269,12 +269,16 @@ class EntityDialog(QDialog):
 
     # -- canonical edits ---------------------------------------------------
     def _add_canonical(self) -> None:
+        if self._busy():
+            return
         name, ok = QInputDialog.getText(self, "Add canonical", "Canonical name:")
         if ok and name.strip():
             self._memory.add_canonical(name.strip())
             self._refresh()
 
     def _rename_canonical(self) -> None:
+        if self._busy():
+            return
         old = self._selected_canonical()
         if old is None:
             return
@@ -284,6 +288,8 @@ class EntityDialog(QDialog):
             self._refresh()
 
     def _merge_canonical(self) -> None:
+        if self._busy():
+            return
         source = self._selected_canonical()
         if source is None:
             return
@@ -295,6 +301,8 @@ class EntityDialog(QDialog):
             self._refresh()
 
     def _delete_canonical(self) -> None:
+        if self._busy():
+            return
         name = self._selected_canonical()
         if name is not None:
             self._memory.delete_canonical(name)
@@ -303,7 +311,7 @@ class EntityDialog(QDialog):
     # -- entity-type tagging -----------------------------------------------
     def _tag_all(self) -> None:
         """Classify every canonical (Rules or ML) off the GUI thread, tagging the working memory."""
-        if self._thread is not None:
+        if self._busy():
             return
         ml_installed = importlib.util.find_spec("probablepeople") is not None
         ml_label = "ML (probablepeople)" if ml_installed else "ML (probablepeople — not installed)"
@@ -345,6 +353,8 @@ class EntityDialog(QDialog):
 
     def _set_type(self) -> None:
         """Set the selected canonical(s) to a chosen entity type."""
+        if self._busy():
+            return
         names = self._selected_canonicals()
         if not names:
             return
@@ -362,6 +372,8 @@ class EntityDialog(QDialog):
             self._refresh()
 
     def _delete_alias(self) -> None:
+        if self._busy():
+            return
         rows = sorted({i.row() for i in self._alias_table.selectedIndexes()})
         if rows:
             self._alias_model.delete_aliases(rows)
@@ -369,6 +381,8 @@ class EntityDialog(QDialog):
 
     def _confirm_alias(self) -> None:
         """Accept the selected marginal aliases: score → 100, dropping them off the review queue."""
+        if self._busy():
+            return
         rows = sorted({i.row() for i in self._alias_table.selectedIndexes()})
         if rows:
             self._alias_model.confirm_aliases(rows)
@@ -381,7 +395,7 @@ class EntityDialog(QDialog):
         Streams the file off the GUI thread (it may be multi-GB) and merges every distinct
         organization name into the working memory as a canonical. Save persists the result.
         """
-        if self._thread is not None:
+        if self._busy():
             return
         path_str, _ = QFileDialog.getOpenFileName(
             self, "Disambiguated reference file", "", _REFERENCE_FILTER
@@ -438,10 +452,11 @@ class EntityDialog(QDialog):
         self._worker = None
 
     def _busy(self) -> bool:
-        """True (with a notice) while the reference scan is running — edits/close must wait."""
+        """True (with a notice) while a background task runs — the worker mutates or reads the
+        working memory, so every edit, import, export, and close must wait for it."""
         if self._thread is None:
             return False
-        QMessageBox.information(self, "Busy", "Wait for the reference import to finish.")
+        QMessageBox.information(self, "Busy", "Wait for the current background task to finish.")
         return True
 
     def closeEvent(self, a0: QCloseEvent | None) -> None:
@@ -459,6 +474,8 @@ class EntityDialog(QDialog):
 
     # -- file operations ---------------------------------------------------
     def _import(self) -> None:
+        if self._busy():
+            return
         path, _ = QFileDialog.getOpenFileName(self, "Import entity names", "", _IMPORT_FILTER)
         if not path:
             return
@@ -470,6 +487,8 @@ class EntityDialog(QDialog):
         self._refresh()
 
     def _export(self) -> None:
+        if self._busy():  # the worker may be mid-mutation — exporting now would snapshot torn state
+            return
         path, _ = QFileDialog.getSaveFileName(
             self, "Export entity memory", "entities.json", "JSON (*.json)"
         )
@@ -485,9 +504,15 @@ class EntityDialog(QDialog):
             self._path_label.setText(f"Stored at: {self._store.path}")
 
     def _clear(self) -> None:
+        if self._busy():  # the worker holds the old memory; clearing now silently loses its result
+            return
         self._memory = EntityMemory()
         self._alias_model = EntityAliasModel(self._memory)
         self._alias_table.setModel(self._alias_model)
+        # The fresh model starts unfiltered — re-apply the search box and review-queue widgets so
+        # what the table shows keeps matching what the controls say.
+        self._alias_model.set_filter(self._alias_search.text())
+        self._apply_review_filter()
         self._refresh()
 
     def _save(self) -> None:

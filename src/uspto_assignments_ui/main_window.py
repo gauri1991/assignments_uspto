@@ -7,13 +7,14 @@ a :class:`TablePanel`; export honours the current filter/selection scope.
 
 from __future__ import annotations
 
+import shutil
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
 
 import pyarrow as pa
-from PyQt6.QtCore import QObject, QThread
-from PyQt6.QtGui import QAction
+from PyQt6.QtCore import QObject, Qt, QThread
+from PyQt6.QtGui import QAction, QCloseEvent
 from PyQt6.QtWidgets import (
     QDialog,
     QFileDialog,
@@ -88,14 +89,13 @@ class MainWindow(QMainWindow):
         self._page_size: int | None = 1000
         self._pending_template: LoadTemplate | None = None
         self._pending_source: Path | None = None
+        # Temp Arrow-store dirs backing parsed datasets: the one the current store mmaps, and the
+        # one the in-flight parse is writing. Both are deleted when no longer referenced.
+        self._store_dir: Path | None = None
+        self._pending_store_dir: Path | None = None
         self._thread: QThread | None = None
         self._worker: QObject | None = None
-        self._recent_store = RecentStore()
-        self._ui_state = UiStateStore()
-        self._query_store = QueryStore()
-        self._batch_store = BatchTemplateStore()
-        self._entity_store = EntityMemoryStore()
-        self._cpc_store = CpcConfigStore()
+        self._init_stores()
         self._batch_dialog: BatchDialog | None = None  # kept alive; shown non-modally (resizable)
         self._entity_dialog: EntityDialog | None = None  # non-modal so both windows coexist
 
@@ -133,6 +133,15 @@ class MainWindow(QMainWindow):
         self._set_status("Open a USPTO .xml/.zip or an Arrow/Parquet dataset folder to begin")
         if store is not None:
             self.load_store(store)
+
+    def _init_stores(self) -> None:
+        """Create the settings-backed persistence stores (recents, queries, templates, config)."""
+        self._recent_store = RecentStore()
+        self._ui_state = UiStateStore()
+        self._query_store = QueryStore()
+        self._batch_store = BatchTemplateStore()
+        self._entity_store = EntityMemoryStore()
+        self._cpc_store = CpcConfigStore()
 
     # -- actions / menu / toolbar -----------------------------------------
     def _build_actions(self) -> None:
@@ -231,9 +240,13 @@ class MainWindow(QMainWindow):
             return
         self._ui_state.set_last_dir("input", str(Path(path).parent))
         dialog = LoadDialog(allow_record_limit=True, parent=self)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-        self._start_parse(Path(path), dialog.template())
+        try:
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            template = dialog.template()
+        finally:
+            dialog.deleteLater()  # one-shot child dialogs must not accumulate on the window
+        self._start_parse(Path(path), template)
 
     def _choose_folder(self) -> None:
         path = QFileDialog.getExistingDirectory(
@@ -243,9 +256,13 @@ class MainWindow(QMainWindow):
             return
         self._ui_state.set_last_dir("input", path)
         dialog = LoadDialog(allow_record_limit=False, parent=self)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-        self._open_dataset_folder(Path(path), dialog.template())
+        try:
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            template = dialog.template()
+        finally:
+            dialog.deleteLater()
+        self._open_dataset_folder(Path(path), template)
 
     def _open_dataset_folder(self, path: Path, template: LoadTemplate) -> None:
         try:
@@ -253,6 +270,7 @@ class MainWindow(QMainWindow):
         except (FileNotFoundError, OSError) as exc:
             self._set_status(f"Could not open dataset: {exc}")
             return
+        self._discard_temp_store()  # the replaced dataset's backing dir, if it was a parse
         self._source_stem = path.name
         self._record_recent(path, "dataset")
 
@@ -273,6 +291,7 @@ class MainWindow(QMainWindow):
             self._set_status(f"Could not open {path.name}: {exc}")
             return
         self.load_store(TableStore({path.stem: table}))
+        self._discard_temp_store()  # the replaced dataset's backing dir, if it was a parse
         self._source_stem = path.stem
         self._record_recent(path, "table")
 
@@ -302,17 +321,27 @@ class MainWindow(QMainWindow):
     def _close_dataset(self) -> None:
         self._store = None
         self._tabs.clear()
+        self._discard_temp_store()
         self._stack.setCurrentWidget(self._landing)
         self._update_actions()
         self._set_status("Dataset closed")
+
+    def _discard_temp_store(self) -> None:
+        """Delete the temp Arrow store behind the previous parse, once nothing references it."""
+        if self._store_dir is not None:
+            shutil.rmtree(self._store_dir, ignore_errors=True)
+            self._store_dir = None
 
     def _save_processed(self) -> None:
         if self._store is None:
             return
         dialog = SaveDialog(parent=self)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-        fmt = dialog.selected_format()
+        try:
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            fmt = dialog.selected_format()
+        finally:
+            dialog.deleteLater()
         directory = QFileDialog.getExistingDirectory(
             self, "Save processed dataset to folder", self._ui_state.last_dir("output")
         )
@@ -340,6 +369,7 @@ class MainWindow(QMainWindow):
         self._pending_template = template
         self._pending_source = source
         store_dir = Path(tempfile.mkdtemp(prefix="uspto_store_"))
+        self._pending_store_dir = store_dir
         worker = ParseWorker(source, store_dir, limit=template.max_records)
         worker.progress.connect(self._on_parse_progress)
         self._show_busy(f"Parsing {source.name}…")
@@ -352,12 +382,18 @@ class MainWindow(QMainWindow):
         self._hide_busy()
         if isinstance(store, TableStore):
             self.load_store(store, self._pending_template)
+            self._discard_temp_store()  # the previous parse's dir; its store was just replaced
+            self._store_dir = self._pending_store_dir
+            self._pending_store_dir = None
             if self._pending_source is not None:
                 self._source_stem = self._pending_source.stem
                 self._record_recent(self._pending_source, "file")
 
     def _on_parse_failed(self, message: str) -> None:
         self._hide_busy()
+        if self._pending_store_dir is not None:  # nothing mmaps a failed parse's partial dir
+            shutil.rmtree(self._pending_store_dir, ignore_errors=True)
+            self._pending_store_dir = None
         self._set_status(f"Parse failed: {message}")
 
     # -- export ------------------------------------------------------------
@@ -374,10 +410,13 @@ class MainWindow(QMainWindow):
             selected_rows=len(selected),
             parent=self,
         )
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-        fmt = dialog.selected_format()
-        scope = dialog.selected_scope()
+        try:
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            fmt = dialog.selected_format()
+            scope = dialog.selected_scope()
+        finally:
+            dialog.deleteLater()
         rows = None if scope == "all" else (view_rows if scope == "filtered" else selected)
 
         name = self._current_table_name()
@@ -405,9 +444,12 @@ class MainWindow(QMainWindow):
             self._set_status("Nothing to export — open a dataset first")
             return
         dialog = ExportDialog(show_scope=False, parent=self)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-        fmt = dialog.selected_format()
+        try:
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            fmt = dialog.selected_format()
+        finally:
+            dialog.deleteLater()
         directory = QFileDialog.getExistingDirectory(
             self, "Export all tables to folder", self._ui_state.last_dir("output")
         )
@@ -471,6 +513,16 @@ class MainWindow(QMainWindow):
         self._thread = None
         self._worker = None
 
+    def closeEvent(self, a0: QCloseEvent | None) -> None:
+        """Refuse to close while a parse/save/export runs — destroying a live QThread aborts Qt."""
+        if self._thread is not None:
+            self._set_status("Busy — wait for the current task to finish before closing")
+            if a0 is not None:
+                a0.ignore()
+            return
+        self._discard_temp_store()
+        super().closeEvent(a0)
+
     # -- data --------------------------------------------------------------
     def load_store(self, store: TableStore, template: LoadTemplate | None = None) -> None:
         """Project ``store`` per the template, then show one paginated tab per kept table."""
@@ -514,9 +566,12 @@ class MainWindow(QMainWindow):
             return
         name = self._current_table_name()
         dialog = ColumnEditorDialog(list(panel.table.column_names), parent=self)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-        kept, renames = dialog.column_plan()
+        try:
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            kept, renames = dialog.column_plan()
+        finally:
+            dialog.deleteLater()
         if not kept:
             self._set_status("Keep at least one column.")
             return
@@ -542,9 +597,12 @@ class MainWindow(QMainWindow):
         if self._store is None:
             return
         dialog = QueryDialog(self._query_store, parent=self)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-        query = dialog.selected_query()
+        try:
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            query = dialog.selected_query()
+        finally:
+            dialog.deleteLater()
         if query is not None:
             self._apply_query(query)
 
@@ -560,7 +618,11 @@ class MainWindow(QMainWindow):
         self._batch_dialog.activateWindow()
 
     def _open_cpc_settings(self) -> None:
-        CpcSettingsDialog(self._cpc_store, self).exec()
+        dialog = CpcSettingsDialog(self._cpc_store, self)
+        try:
+            dialog.exec()
+        finally:
+            dialog.deleteLater()
 
     def _open_entities(self) -> None:
         # Non-modal so it can sit alongside the batch window and minimize/maximize. If it's already
@@ -570,10 +632,18 @@ class MainWindow(QMainWindow):
             self._entity_dialog.raise_()
             self._entity_dialog.activateWindow()
             return
-        self._entity_dialog = EntityDialog(self._entity_store, parent=self)
-        self._entity_dialog.show()
-        self._entity_dialog.raise_()
-        self._entity_dialog.activateWindow()
+        dialog = EntityDialog(self._entity_store, parent=self)
+        # Closed instances are deleted (each holds a full working-copy memory — up to ~75k
+        # entries); the destroyed hook drops our reference so the next open makes a fresh one.
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dialog.destroyed.connect(self._forget_entity_dialog)
+        self._entity_dialog = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _forget_entity_dialog(self) -> None:
+        self._entity_dialog = None
 
     def _apply_query(self, query: Query) -> None:
         panel = self._panel_for_table(query.table)

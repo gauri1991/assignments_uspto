@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 
 from PyQt6.QtCore import QThread
+from PyQt6.QtGui import QCloseEvent
 from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -19,6 +20,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QSpinBox,
     QVBoxLayout,
@@ -125,11 +127,19 @@ class CpcSettingsDialog(QDialog):
         self._threshold = _float_spin(0.0, 1000.0, config.match.overlap_threshold)
         self._min_patents = _int_spin(1, 10_000, config.match.min_in_domain_patents)
         self._hit_floor = _float_spin(0.0, 1.0, config.match.hit_rate_floor, step=0.05)
+        # Buyer-ranking weights (overlap strength × recency × in-domain volume) — previously
+        # documented as configured here but only editable by hand-editing cpc_config.json.
+        self._weight_overlap = _float_spin(0.0, 100.0, config.match.weight_overlap, step=0.1)
+        self._weight_recency = _float_spin(0.0, 100.0, config.match.weight_recency, step=0.1)
+        self._weight_volume = _float_spin(0.0, 100.0, config.match.weight_volume, step=0.1)
         match_form.addRow("Overlap grain", self._grain)
         match_form.addRow("Overlap metric", self._metric)
         match_form.addRow("Overlap threshold", self._threshold)
         match_form.addRow("Min in-domain patents", self._min_patents)
         match_form.addRow("Hit-rate floor (abort below)", self._hit_floor)
+        match_form.addRow("Ranking weight — overlap", self._weight_overlap)
+        match_form.addRow("Ranking weight — recency", self._weight_recency)
+        match_form.addRow("Ranking weight — volume", self._weight_volume)
         layout.addLayout(match_form)
 
         layout.addWidget(SectionLabel("Cache"))
@@ -215,6 +225,26 @@ class CpcSettingsDialog(QDialog):
         self._worker = None
         self._test_btn.setEnabled(True)
 
+    def _busy(self) -> bool:
+        """True (with a notice) while the test probe runs — closing would kill its live thread."""
+        if self._thread is None:
+            return False
+        QMessageBox.information(self, "Busy", "Wait for the connection test to finish.")
+        return True
+
+    def closeEvent(self, a0: QCloseEvent | None) -> None:
+        """Never destroy the dialog while the test-connection thread is alive."""
+        if self._busy():
+            if a0 is not None:
+                a0.ignore()
+            return
+        super().closeEvent(a0)
+
+    def reject(self) -> None:
+        """Route Esc/Cancel through the busy guard."""
+        if not self._busy():
+            super().reject()
+
     def config(self) -> CpcConfig:
         """Return the :class:`CpcConfig` reflecting the current form state."""
         config = CpcConfig()
@@ -233,11 +263,16 @@ class CpcSettingsDialog(QDialog):
         config.match.overlap_threshold = self._threshold.value()
         config.match.min_in_domain_patents = self._min_patents.value()
         config.match.hit_rate_floor = self._hit_floor.value()
+        config.match.weight_overlap = self._weight_overlap.value()
+        config.match.weight_recency = self._weight_recency.value()
+        config.match.weight_volume = self._weight_volume.value()
         config.cache.path = self._cache_path.text().strip() or "data/cpc"
         config.cache.ttl_days = self._cache_ttl.value()
         return config
 
     def _save(self) -> None:
+        if self._busy():
+            return
         self._store.save(self.config())
         self.accept()
 

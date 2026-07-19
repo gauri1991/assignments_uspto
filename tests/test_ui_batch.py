@@ -1036,3 +1036,63 @@ def test_batch_dialog_output_prefers_saved_dir(qtbot: Any, tmp_path: Path) -> No
     dialog = BatchDialog(BatchTemplateStore(tmp_path / "b.json"), ui_state=state)
     qtbot.addWidget(dialog)
     assert dialog._out_dir.text() == str(saved)
+
+
+def test_import_of_malformed_template_shows_warning_not_crash(
+    qtbot: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: a malformed import escaped the Qt slot and aborted the whole app."""
+    create_app([])
+    bad = tmp_path / "bad.json"
+    bad.write_text('{"name": "not-an-array"}', encoding="utf-8")
+    dialog = BatchDialog(
+        BatchTemplateStore(tmp_path / "b.json"), EntityMemoryStore(tmp_path / "e.json")
+    )
+    qtbot.addWidget(dialog)
+    monkeypatch.setattr(
+        bd.QFileDialog, "getOpenFileName", staticmethod(lambda *a, **k: (str(bad), ""))
+    )
+    shown: list[str] = []
+
+    def fake_warning(
+        _parent: object, _title: str, text: str, *args: object, **kwargs: object
+    ) -> QMessageBox.StandardButton:
+        shown.append(text)
+        return QMessageBox.StandardButton.Ok
+
+    monkeypatch.setattr(bd.QMessageBox, "warning", staticmethod(fake_warning))
+    dialog._import_template()  # must not raise
+    assert shown and "JSON array" in shown[0]
+
+
+def test_export_dialog_offers_tables_created_by_earlier_steps(qtbot: Any, tmp_path: Path) -> None:
+    """Regression: the export editor only listed store tables, dropping aggregate outputs."""
+    create_app([])
+    step = ExportStep(fmt="csv", tables=["assignees_by_name_canonical"])
+    bd._available_ctx = {
+        "assignees": ["name", "name_canonical"],
+        "assignees_by_name_canonical": ["name_canonical", "count"],
+    }
+    try:
+        dialog = bd.ExportStepDialog(step)
+        qtbot.addWidget(dialog)
+        names = [
+            item.text()
+            for i in range(dialog._tables.count())
+            if (item := dialog._tables.item(i)) is not None
+        ]
+        assert "assignees_by_name_canonical" in names
+        assert dialog.step().tables == ["assignees_by_name_canonical"]  # round-trips intact
+    finally:
+        bd._available_ctx = None
+
+
+def test_filter_dialog_edit_preserves_columns_and_sort(qtbot: Any) -> None:
+    """Regression: editing a filter step reset its spec-supported columns/sort to None."""
+    create_app([])
+    step = FilterStep(table="flat", columns=["reel_no", "frame_no"], sort=("recorded_date", False))
+    dialog = bd.FilterStepDialog(step)
+    qtbot.addWidget(dialog)
+    edited = dialog.step()
+    assert edited.columns == ["reel_no", "frame_no"]
+    assert edited.sort == ("recorded_date", False)
