@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import pyarrow.parquet as _pq
+import pytest
 
 from uspto_assignments import (
     CappedBlockIndex,
@@ -17,6 +18,7 @@ from uspto_assignments import (
     load_dictionary,
     normalize_patent_id,
     reconcile_cpc,
+    resolution,
     resolve_mentions,
     top_buyers,
 )
@@ -301,3 +303,33 @@ def test_cli_resolve_writes_mentions(tmp_path: Path) -> None:
     }
     # every row carries a source + confidence (the acceptance criterion)
     assert all(r["resolution_source"] for r in mentions.to_pylist())
+
+
+def test_release_of_security_interest_classifies_as_release() -> None:
+    """Regression: release/termination texts naming a security interest are releases, not grants."""
+    for text in (
+        "RELEASE OF SECURITY INTEREST",
+        "RELEASE OF SECURITY INTEREST IN PATENTS",
+        "TERMINATION AND RELEASE OF SECURITY INTEREST",
+        "TERMINATION OF SECURITY INTEREST",
+    ):
+        assert classify_conveyance(text) == "release", text
+    # Genuine security grants (no release/termination wording) still classify as security_interest.
+    assert classify_conveyance("SECURITY INTEREST (SEE DOCUMENT).") == "security_interest"
+    assert classify_conveyance("ASSIGNMENT FOR SECURITY") == "security_interest"
+
+
+def test_resolve_mentions_reports_progress_on_every_branch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: progress must tick for exact/person/fuzzy resolutions, not just residuals."""
+    build_dictionary(tmp_path / "dict", patentsview=SEED_TSV)
+    dictionary = load_dictionary(tmp_path / "dict")
+    monkeypatch.setattr(resolution, "_PROGRESS_EVERY", 1)
+    calls: list[tuple[int, int]] = []
+    resolve_mentions(
+        ["WIDGET CORP", "SMITH, JOHN"], dictionary, on_progress=lambda d, t: calls.append((d, t))
+    )
+    # Intermediate ticks for both mentions, plus the unconditional completion call at the end.
+    assert calls[:2] == [(1, 2), (2, 2)]
+    assert calls[-1] == (2, 2)

@@ -8,6 +8,7 @@ PyArrow table from dataclass rows, and :func:`flat_rows` denormalizes one record
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
@@ -149,6 +150,18 @@ class TableStore:
         return TableStore(projected)
 
 
+def _remove_partial_store(sinks: dict[str, _ArrowSink], store_dir: Path) -> None:
+    """Close sinks best-effort and delete their files after a failed (or interrupted) parse.
+
+    A mid-parse failure must not leave footer-less ``.arrow`` files behind: ``is_dataset_dir``
+    would report the directory as a dataset while ``open_store`` fails on it.
+    """
+    for name, sink in sinks.items():
+        with contextlib.suppress(pa.ArrowException, OSError):
+            sink.close()
+        (store_dir / f"{name}{_STORE_SUFFIX}").unlink(missing_ok=True)
+
+
 class _ArrowSink:
     """Streaming Arrow-IPC (Feather v2) writer for one table; writes batches to one file."""
 
@@ -231,29 +244,33 @@ def parse_to_store(  # noqa: PLR0913, PLR0912 - clear keyword-only options + tab
     # streams deterministically (a suspended parser cleaned up at GC time raises unraisably).
     records = iter_records(source)
     try:
-        for rec in records:
-            if "assignments" in buffers:
-                buffers["assignments"].append(rec.assignment)
-            if "assignors" in buffers:
-                buffers["assignors"].extend(rec.assignors)
-            if "assignees" in buffers:
-                buffers["assignees"].extend(rec.assignees)
-            if "properties" in buffers:
-                buffers["properties"].extend(rec.properties)
-            if build_flat:
-                flat_buffer.extend(flat_rows(rec))
-            seen += 1
-            if seen % batch_size == 0:
-                flush()
-            if progress is not None and seen % interval == 0:
-                progress(seen)
-            if limit is not None and seen >= limit:
-                break
-    finally:
-        records.close()
-    flush()
-    for sink in sinks.values():
-        sink.close()
+        try:
+            for rec in records:
+                if "assignments" in buffers:
+                    buffers["assignments"].append(rec.assignment)
+                if "assignors" in buffers:
+                    buffers["assignors"].extend(rec.assignors)
+                if "assignees" in buffers:
+                    buffers["assignees"].extend(rec.assignees)
+                if "properties" in buffers:
+                    buffers["properties"].extend(rec.properties)
+                if build_flat:
+                    flat_buffer.extend(flat_rows(rec))
+                seen += 1
+                if seen % batch_size == 0:
+                    flush()
+                if progress is not None and seen % interval == 0:
+                    progress(seen)
+                if limit is not None and seen >= limit:
+                    break
+        finally:
+            records.close()
+        flush()
+        for sink in sinks.values():
+            sink.close()
+    except BaseException:
+        _remove_partial_store(sinks, store_dir)
+        raise
     # Report the final count, unless the loop already reported it on an exact interval boundary.
     if progress is not None and seen % interval != 0:
         progress(seen)
@@ -332,10 +349,30 @@ def open_dataset(store_dir: Path) -> TableStore:
     raise FileNotFoundError(f"no Arrow (.arrow) or Parquet (.parquet) tables in {store_dir}")
 
 
+def dataset_columns(store_dir: Path) -> dict[str, list[str]]:
+    """Read the column names of each table in a saved dataset — schemas only, no data loaded.
+
+    Lets template validation see a processed dataset's *actual* schema (e.g. the ``cpc_codes`` /
+    ``*_canonical`` columns an earlier pipeline attached) instead of assuming the fresh-parse
+    schema. Returns ``{}`` for a directory holding no dataset tables.
+    """
+    columns: dict[str, list[str]] = {}
+    for name in STORE_TABLES:
+        arrow_path = store_dir / f"{name}{_STORE_SUFFIX}"
+        parquet_path = store_dir / f"{name}.parquet"
+        if arrow_path.is_file():
+            with pa.memory_map(str(arrow_path), "r") as source:
+                columns[name] = list(pa.ipc.open_file(source).schema.names)
+        elif parquet_path.is_file():
+            schema: Any = pq.read_schema(str(parquet_path))  # pyright: ignore[reportUnknownMemberType]
+            columns[name] = list(schema.names)
+    return columns
+
+
 TABLE_FILE_SUFFIXES: Final = (".parquet", ".arrow", ".feather", ".csv")
 
 
-def _stringify_column(column: Any) -> Any:
+def stringify_column(column: Any) -> Any:
     """Cast one column to string for the generic viewer (lists joined with ``"; "``)."""
     col: Any = column.combine_chunks()
     if pa.types.is_string(col.type):
@@ -379,6 +416,6 @@ def read_table_file(path: Path) -> pa.Table:
     else:
         raise ValueError(f"unsupported file type {suffix!r} (use {', '.join(TABLE_FILE_SUFFIXES)})")
     result: pa.Table = pa.table(
-        {name: _stringify_column(table.column(name)) for name in table.column_names}
+        {name: stringify_column(table.column(name)) for name in table.column_names}
     )
     return result

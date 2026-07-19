@@ -123,6 +123,32 @@ def _cluster_residual(residual: dict[str, str], scorer_name: str) -> dict[str, t
     return out
 
 
+def _resolve_one(
+    mention: str,
+    dictionary: ResolutionDictionary,
+    fuzzy_index: CappedBlockIndex[str],
+    scorer_fn: Callable[..., float],
+    threshold: int,
+) -> ResolvedMention | None:
+    """Run one mention through exact → person → fuzzy; None means residual (provisional later)."""
+    key = clean(mention)
+    if not key:
+        return ResolvedMention(mention, "", mention, "unknown", "unresolved", 0.0, "")
+    exact = dictionary.lookup_exact(key)
+    if exact is not None:
+        return _resolved_from_entity(mention, exact, dictionary, "exact", 1.0)
+    if classify_name(mention) == "individual":
+        return _person_mention(mention, key)
+    block = fuzzy_index.candidates(key)
+    match = (
+        process.extractOne(key, block, scorer=scorer_fn, score_cutoff=threshold) if block else None
+    )
+    if match is None:
+        return None
+    entity_id = dictionary.key_to_entity[match[0]]
+    return _resolved_from_entity(mention, entity_id, dictionary, "fuzzy", float(match[1]) / 100.0)
+
+
 def resolve_mentions(
     mentions: list[str],
     dictionary: ResolutionDictionary,
@@ -146,31 +172,12 @@ def resolve_mentions(
     residual: dict[str, str] = {}  # cleaned key -> a representative raw mention
     for done, mention in enumerate(distinct, start=1):
         key = clean(mention)
-        if not key:
-            resolved[mention] = ResolvedMention(
-                mention, "", mention, "unknown", "unresolved", 0.0, ""
-            )
-            continue
-        exact = dictionary.lookup_exact(key)
-        if exact is not None:
-            resolved[mention] = _resolved_from_entity(mention, exact, dictionary, "exact", 1.0)
-            continue
-        if classify_name(mention) == "individual":
-            resolved[mention] = _person_mention(mention, key)
-            continue
-        block = fuzzy_index.candidates(key)
-        match = (
-            process.extractOne(key, block, scorer=scorer_fn, score_cutoff=threshold)
-            if block
-            else None
-        )
-        if match is not None:
-            entity_id = dictionary.key_to_entity[match[0]]
-            resolved[mention] = _resolved_from_entity(
-                mention, entity_id, dictionary, "fuzzy", float(match[1]) / 100.0
-            )
-            continue
-        residual.setdefault(key, mention)
+        result = _resolve_one(mention, dictionary, fuzzy_index, scorer_fn, threshold)
+        if result is not None:
+            resolved[mention] = result
+        else:
+            residual.setdefault(key, mention)
+        # Progress must tick for every mention, whichever cascade branch resolved it.
         if on_progress is not None and done % _PROGRESS_EVERY == 0:
             on_progress(done, len(distinct))
 

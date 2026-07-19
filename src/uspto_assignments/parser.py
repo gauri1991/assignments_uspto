@@ -65,8 +65,10 @@ def _full_text(el: XmlElement, path: str) -> str | None:
     child = el.find(path)
     if child is None:
         return None
-    parts = [t.strip() for t in child.itertext() if isinstance(t, str) and t.strip()]
-    joined = " ".join(parts)
+    # Concatenate raw fragments before splitting: markup may break mid-word (H<sub>2</sub>O),
+    # so joining stripped fragments with spaces would corrupt the word ("H 2 O").
+    raw = "".join(t for t in child.itertext() if isinstance(t, str))
+    joined = " ".join(raw.split())
     return joined or None
 
 

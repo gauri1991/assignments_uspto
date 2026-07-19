@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import shutil
 import tempfile
 import time
 from datetime import UTC, datetime
@@ -187,7 +188,7 @@ def _write_cli_manifest(
         "duration_seconds": round(time.monotonic() - started, 1),
         "outputs": [
             {
-                "path": str(path.relative_to(out_dir)) if path.is_absolute() else str(path),
+                "path": str(path.resolve().relative_to(out_dir.resolve())),
                 "rows": rows,
             }
             for path, rows in outputs
@@ -222,15 +223,19 @@ def _cmd_parse(args: argparse.Namespace) -> None:
 
 def _cmd_ingest(args: argparse.Namespace) -> None:
     source: Path = args.input
+    started = time.monotonic()
     if source.is_dir():
-        store = open_dataset(source)
+        written = export_store(open_dataset(source), args.out, "parquet")
     elif source.is_file():
         work = Path(tempfile.mkdtemp(prefix="uspto_ingest_"))
-        store = parse_to_store(source, work, limit=args.limit)
+        try:
+            store = parse_to_store(source, work, limit=args.limit)
+            written = export_store(store, args.out, "parquet")
+            del store  # release the mmap on ``work`` before removing it
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
     else:
         raise SystemExit(f"input not found: {source}")
-    started = time.monotonic()
-    written = export_store(store, args.out, "parquet")
     outputs: list[tuple[Path, int | None]] = []
     for name, rows in written.items():
         print(f"ingested -> {name} ({rows:,} rows)")

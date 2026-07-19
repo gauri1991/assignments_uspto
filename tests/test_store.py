@@ -197,3 +197,17 @@ def test_read_table_file_csv_and_unsupported(tmp_path: Path) -> None:
 def test_table_store_names_include_non_canonical(tmp_path: Path) -> None:
     store = TableStore({"my_export": pa.table({"x": ["1"]})})
     assert store.names == ["my_export"]  # a viewer table (not one of the 5) is still listed
+
+
+def test_parse_to_store_failure_leaves_no_partial_dataset(tmp_path: Path) -> None:
+    """Regression: a mid-parse failure must not leave footer-less .arrow files behind that
+    make ``is_dataset_dir`` claim an openable dataset while ``open_store`` fails on it."""
+    store_dir = tmp_path / "store"
+
+    def boom(_seen: int) -> None:
+        raise RuntimeError("simulated failure mid-parse")
+
+    with pytest.raises(RuntimeError, match="simulated failure"):
+        parse_to_store(FIXTURE, store_dir, progress=boom, progress_interval=1)
+    assert not is_dataset_dir(store_dir)
+    assert not list(store_dir.glob("*.arrow"))

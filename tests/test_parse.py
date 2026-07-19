@@ -166,3 +166,14 @@ def test_write_excel_creates_all_sheets(tmp_path: Path) -> None:
     flat = wb["flat"]
     header = [c.value for c in next(flat.iter_rows(max_row=1))]
     assert "assignor_names" in header
+
+
+def test_invention_title_markup_inside_word_keeps_word_intact(tmp_path: Path) -> None:
+    """Regression: sub/sup tags splitting a word must not introduce spaces (H<sub>2</sub>O)."""
+    doc = FIXTURE.read_text(encoding="utf-8").replace(
+        "WIDGET <b>FASTENING</b> MECHANISM", "H<sub>2</sub>O PURIFIER"
+    )
+    path = tmp_path / "subscript.xml"
+    path.write_text(doc, encoding="utf-8")
+    first = next(iter_records(path))
+    assert first.properties[0].invention_title == "H2O PURIFIER"

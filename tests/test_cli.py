@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import tempfile
 from pathlib import Path
 
 import pyarrow.parquet as pq
+import pytest
 
 from uspto_assignments.cli import main
 
@@ -84,3 +86,33 @@ def test_templates_summary_writes_markdown(tmp_path: Path) -> None:
     assert "### demo" in text
     assert "1. Filter · flat · 1 clause(s) · AND" in text
     assert "⚠" in text and "nope_col" in text
+
+
+def test_cli_manifest_paths_bare_with_relative_outdir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: a relative --outdir must not prefix manifest paths with the dir itself."""
+    monkeypatch.chdir(tmp_path)
+    main(["parse", str(FIXTURE), "--outdir", "out"])
+    manifest = json.loads((tmp_path / "out" / "manifest.json").read_text(encoding="utf-8"))
+    for output in manifest["outputs"]:
+        assert "/" not in output["path"]  # bare filename, resolvable relative to the manifest
+        assert (tmp_path / "out" / output["path"]).is_file()
+
+
+def test_cli_ingest_removes_its_temp_work_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: ingest of a file must not leave the intermediate Arrow store in /tmp."""
+    created: list[Path] = []
+    real_mkdtemp = tempfile.mkdtemp
+
+    def tracking_mkdtemp(prefix: str) -> str:
+        path = real_mkdtemp(prefix=prefix, dir=str(tmp_path))
+        created.append(Path(path))
+        return path
+
+    monkeypatch.setattr(tempfile, "mkdtemp", tracking_mkdtemp)
+    main(["ingest", str(FIXTURE), "--out", str(tmp_path / "raw")])
+    assert len(created) == 1
+    assert not created[0].exists()

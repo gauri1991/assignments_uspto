@@ -31,13 +31,15 @@ ConveyanceType = Literal[
 
 # Ordered rules — FIRST match wins, so the specific kinds are tested before the generic
 # "assignment" catch-all (a nunc-pro-tunc or corrective *assignment* must not classify as plain
-# assignment, and "ASSIGNMENT ... FOR SECURITY" is a security interest, not a sale).
+# assignment, and "ASSIGNMENT ... FOR SECURITY" is a security interest, not a sale). Release
+# precedes security_interest: release texts almost always name the security interest they release
+# ("RELEASE OF SECURITY INTEREST"), while genuine security grants don't mention release/termination.
 _RULES: list[tuple[re.Pattern[str], ConveyanceType]] = [
+    (re.compile(r"\bRELEASE\b|TERMINATION\s+(AND\s+RELEASE|OF\s+SECURITY)"), "release"),
     (
         re.compile(r"SECURITY\s+(INTEREST|AGREEMENT)|FOR\s+SECURITY|\bLIEN\b|COLLATERAL"),
         "security_interest",
     ),
-    (re.compile(r"\bRELEASE\b|TERMINATION\s+(AND\s+RELEASE|OF\s+SECURITY)"), "release"),
     (re.compile(r"NUNC\s+PRO\s+TUNC"), "nunc_pro_tunc"),
     (re.compile(r"CORRECTIV|CORRECTION|TO\s+CORRECT"), "correction"),
     (re.compile(r"\bMERGER\b|CHANGE\s+OF\s+NAME\s+AND\s+MERGER"), "merger"),
