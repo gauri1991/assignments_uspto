@@ -35,6 +35,7 @@ from uspto_assignments import (
     ReferenceMatchStep,
     SelectStep,
     SortStep,
+    TemplateFormatError,
     TemplateValidationError,
     TransferTypeStep,
     columns_after,
@@ -209,6 +210,27 @@ def test_bundled_template_files_load_and_roundtrip() -> None:
         assert templates, f"{path.name} produced no templates"
         for template in templates:  # every step decodes and re-serializes cleanly
             assert template.to_dict()["steps"]
+
+
+def test_template_description_round_trips_and_is_omitted_when_blank(tmp_path: Path) -> None:
+    """Regression: a template's embedded help must survive save/export; blank stays out of files."""
+    described = BatchTemplate(
+        name="t", steps=[ExportStep(fmt="parquet")], description="What this does."
+    )
+    assert described.to_dict()["description"] == "What this does."
+    assert BatchTemplate.from_dict(described.to_dict()).description == "What this does."
+
+    plain = BatchTemplate(name="t", steps=[ExportStep(fmt="parquet")])
+    assert "description" not in plain.to_dict()  # omitted when blank → shipped files stay clean
+
+    path = tmp_path / "t.json"
+    dump_templates([described], path)
+    assert load_templates(path)[0].description == "What this does."
+
+
+def test_template_description_must_be_a_string() -> None:
+    with pytest.raises(TemplateFormatError, match="'description' must be a string"):
+        BatchTemplate.from_dict({"name": "t", "description": 5, "steps": []})
 
 
 def test_firm_to_firm_templates_key_time_axis_on_transaction_date() -> None:

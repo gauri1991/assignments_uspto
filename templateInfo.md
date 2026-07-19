@@ -15,14 +15,19 @@ Import…** and select the file. Each imported template can be run, previewed, a
 
 ```json
 [
-  { "name": "My template", "load": { "limit": null, "columns": {} }, "steps": [ /* step objects */ ] },
+  { "name": "My template", "description": "What this does + what it produces.",
+    "load": { "limit": null, "columns": {} }, "steps": [ /* step objects */ ] },
   { "name": "Another template", "load": {}, "steps": [ /* ... */ ] }
 ]
 ```
 
 - Top level is a **JSON array** (even for a single template).
-- Each **template object** has three keys:
+- Each **template object** has these keys:
   - `name` (string, required) — shown in the app.
+  - `description` (string, optional) — free-text help shown in the app's **Help** panel when this
+    template is selected. Travels *with* the template through import/save/export, so an imported
+    template documents itself. Omit it to fall back to any built-in help (for the shipped templates)
+    or to a generated step-by-step listing.
   - `load` (object, optional) — how much/what to load before the steps run (see §3).
   - `steps` (array, required) — the ordered pipeline (see §5). Steps run **top to bottom**; each
     transforms the working tables in place.

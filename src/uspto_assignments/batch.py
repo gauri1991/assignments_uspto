@@ -859,18 +859,27 @@ def _decode_step(data: dict[str, Any]) -> BatchStep:  # noqa: PLR0911, PLR0912 -
 
 @dataclass(slots=True)
 class BatchTemplate:
-    """A named batch pipeline: a load config and an ordered list of steps."""
+    """A named batch pipeline: a load config and an ordered list of steps.
+
+    ``description`` is optional free-text help that travels *with* the template through
+    import/save/export — so a user-authored or imported template can document itself. Shipped
+    templates leave it blank and are documented in the UI's curated help instead.
+    """
 
     name: str
     load: LoadConfig = field(default_factory=LoadConfig)
     steps: list[BatchStep] = field(default_factory=list[BatchStep])
+    description: str = ""
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "name": self.name,
             "load": self.load.to_dict(),
             "steps": [{**s.to_dict(), "enabled": s.enabled} for s in self.steps],
         }
+        if self.description:  # omit when blank so shipped template files stay uncluttered
+            payload["description"] = self.description
+        return payload
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> BatchTemplate:
@@ -878,6 +887,11 @@ class BatchTemplate:
         if not isinstance(name, str) or not name.strip():
             raise TemplateFormatError(
                 "template is missing its required 'name' (a non-empty string)"
+            )
+        description: Any = data.get("description", "")
+        if not isinstance(description, str):
+            raise TemplateFormatError(
+                f"'description' must be a string, got {type(description).__name__}"
             )
         load: Any = data.get("load", {})
         if not isinstance(load, dict):
@@ -900,6 +914,7 @@ class BatchTemplate:
             name=name.strip(),
             load=LoadConfig.from_dict(cast("dict[str, Any]", load)),
             steps=steps,
+            description=description.strip(),
         )
 
 
