@@ -20,9 +20,11 @@ Usage:
 from __future__ import annotations
 
 import base64
+import csv
 import datetime
 import gzip
 import json
+import random
 import sys
 from pathlib import Path
 
@@ -41,6 +43,9 @@ from uspto_assignments.normalize import clean
 
 _REPO = Path(__file__).resolve().parent.parent
 _TSV = _REPO / "reference" / "g_assignee_disambiguated.tsv"
+# Optional public-domain augmentation for the under-represented person class (US Census 2010
+# surnames, ~162k). Paired with real given names from the TSV to synthesize diverse person names.
+_CENSUS = _REPO / "reference" / "Names_2010Census.csv"
 _OUT = _REPO / "src" / "uspto_assignments" / "resources" / "namemodel.json.gz"
 
 _MAX_FEATURES = 20_000
@@ -48,6 +53,17 @@ _MIN_DF = 5
 _WEIGHT_PRUNE = 2e-3  # drop |ngram weight| below this to shrink the artifact
 _T_LOW, _T_HIGH = 0.35, 0.65  # abstention band on P(company); inside → "unknown"
 _MAX_TOKENS = 8  # ignore absurdly long multi-party strings when building training names
+_CENSUS_SURNAMES = 80_000  # top-N census surnames (by frequency) to synthesize persons from
+
+
+def _census_surnames() -> list[str]:
+    """Top-N US Census 2010 surnames (uppercase), most frequent first; [] if the file is absent."""
+    if not _CENSUS.is_file():
+        return []
+    with _CENSUS.open(encoding="utf-8", newline="") as fh:
+        rows = list(csv.DictReader(fh))
+    names = [r["name"].strip().upper() for r in rows if r.get("name") and r["name"] != "ALL OTHER NAMES"]
+    return names[:_CENSUS_SURNAMES]
 
 
 def _residual_company(cleaned: str) -> bool:
@@ -99,14 +115,29 @@ def _load_examples() -> tuple[list[str], list[str], list[int]]:
     for (org,) in orgs:
         if org and _residual_company(clean(org)):
             add(org, 1)
+    first_names: list[str] = []
     for first, last in people:  # reconstruct non-comma forms the model actually sees
         first = (first or "").strip()
         last = (last or "").strip()
         if last and first:
             add(f"{first} {last}", 0)
             add(f"{last} {first}", 0)
+            first_names.append(first)
         elif last:
             add(last, 0)
+
+    # Augment the under-represented person class with US Census surnames × real given names — this
+    # broadens surname/given-name character coverage far beyond the ~56k person assignees in the TSV.
+    surnames = _census_surnames()
+    if surnames and first_names:
+        rng = random.Random(0)
+        firsts = list({f for f in first_names if f})
+        before = label.count(0)
+        for surname in surnames:  # every top-N surname appears, paired with a random real given name
+            first = rng.choice(firsts)
+            add(f"{first} {surname}", 0)
+            add(f"{surname} {first}", 0)
+        print(f"census augmentation: +{label.count(0) - before:,} person names from {len(surnames):,} surnames")
 
     keep = [i for i, c in enumerate(cleaned) if seen.get(c) != -1]
     raw = [raw[i] for i in keep]
