@@ -243,6 +243,37 @@ def test_add_by_pattern_no_match_adds_nothing(
     assert dialog._inputs.count() == 0
 
 
+def test_trace_format_dropdown_defaults_parquet_and_gates_on_checkbox(
+    qtbot: Any, tmp_path: Path
+) -> None:
+    create_app([])
+    dialog = BatchDialog(BatchTemplateStore(tmp_path / "batch.json"))
+    qtbot.addWidget(dialog)
+    # defaults: Parquet selected, disabled until "Save each step's output" is ticked
+    assert dialog._trace_format.currentData() == "parquet"
+    assert not dialog._trace_format.isEnabled()
+    dialog._save_steps.setChecked(True)
+    assert dialog._trace_format.isEnabled()
+    dialog._save_steps.setChecked(False)
+    assert not dialog._trace_format.isEnabled()
+
+
+def test_convert_options_default_and_gate_on_checkbox(qtbot: Any, tmp_path: Path) -> None:
+    create_app([])
+    dialog = BatchDialog(BatchTemplateStore(tmp_path / "batch.json"))
+    qtbot.addWidget(dialog)
+    # defaults: overwrite policy, no mirroring, both disabled until Convert mode is ticked
+    assert dialog._convert_policy.currentData() == "overwrite"
+    assert not dialog._mirror_tree.isChecked()
+    assert not dialog._convert_policy.isEnabled()
+    assert not dialog._mirror_tree.isEnabled()
+    dialog._flat_output.setChecked(True)
+    assert dialog._convert_policy.isEnabled()
+    assert dialog._mirror_tree.isEnabled()
+    dialog._flat_output.setChecked(False)
+    assert not dialog._convert_policy.isEnabled()
+
+
 def test_clear_inputs_empties_the_list(qtbot: Any, tmp_path: Path) -> None:
     create_app([])
     dialog = BatchDialog(BatchTemplateStore(tmp_path / "batch.json"))

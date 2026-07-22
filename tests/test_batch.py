@@ -1146,6 +1146,77 @@ def test_run_batch_flat_output_dedupes_same_stem_sources(tmp_path: Path) -> None
     assert "x (1)_flat.parquet" in names  # second same-stem source deduped, not overwritten
 
 
+def _one_table_convert() -> BatchTemplate:
+    """A convert template that writes a single table (so smart naming drops the ``_<table>``)."""
+    return BatchTemplate(
+        name="c1",
+        steps=[
+            FilterStep(table="flat", clauses=[FilterClause("doc_kind", "equals", "B2")]),
+            ExportStep(fmt="csv", tables=["flat"]),
+        ],
+    )
+
+
+def test_convert_single_table_drops_table_suffix(tmp_path: Path) -> None:
+    a = tmp_path / "daily.xml"
+    shutil.copy(FIXTURE, a)
+    out = tmp_path / "converted"
+    run_batch(_one_table_convert(), [a], out, timestamp="cv", flat_output=True)
+    # one table written → <stem>.<ext>, not <stem>_flat.csv
+    assert (out / "daily.csv").is_file()
+    assert not (out / "daily_flat.csv").exists()
+
+
+def test_convert_existing_policy_skip_and_unique(tmp_path: Path) -> None:
+    a = tmp_path / "daily.xml"
+    shutil.copy(FIXTURE, a)
+    out = tmp_path / "converted"
+    run_batch(_one_table_convert(), [a], out, timestamp="cv", flat_output=True)
+    target = out / "daily.csv"
+    target.write_text("SENTINEL", encoding="utf-8")
+
+    # skip: an existing target is left untouched (resumable bulk conversion)
+    run_batch(_one_table_convert(), [a], out, timestamp="cv2", flat_output=True, existing="skip")
+    assert target.read_text(encoding="utf-8") == "SENTINEL"
+
+    # unique: never clobber — a second file appears
+    run_batch(_one_table_convert(), [a], out, timestamp="cv3", flat_output=True, existing="unique")
+    assert (out / "daily (1).csv").is_file()
+    assert target.read_text(encoding="utf-8") == "SENTINEL"  # original still untouched
+
+
+def test_convert_writes_index_breadcrumb(tmp_path: Path) -> None:
+    a = tmp_path / "daily.xml"
+    shutil.copy(FIXTURE, a)
+    out = tmp_path / "converted"
+    run_batch(_one_table_convert(), [a], out, timestamp="cv", flat_output=True)
+    index = out / "_convert_index.csv"
+    assert index.is_file()
+    rows = list(csv.DictReader(index.read_text(encoding="utf-8").splitlines()))
+    assert rows[0]["source"] == str(a)
+    assert rows[0]["status"] == "ok"
+    assert rows[0]["outputs"] == "daily.csv"
+    # a second run appends, not overwrites
+    run_batch(_one_table_convert(), [a], out, timestamp="cv2", flat_output=True)
+    assert len(index.read_text(encoding="utf-8").strip().splitlines()) == 3  # header + 2 rows
+
+
+def test_convert_mirror_tree_preserves_subfolders(tmp_path: Path) -> None:
+    base = tmp_path / "src"
+    (base / "2023").mkdir(parents=True)
+    (base / "2024").mkdir(parents=True)
+    a = base / "2023" / "x.xml"
+    b = base / "2024" / "x.xml"
+    shutil.copy(FIXTURE, a)
+    shutil.copy(FIXTURE, b)
+    out = tmp_path / "converted"
+    run_batch(_one_table_convert(), [a, b], out, timestamp="cv", flat_output=True, mirror_tree=True)
+    # each source's subfolder is recreated under out; same-stem files no longer need dedup
+    assert (out / "2023" / "x.csv").is_file()
+    assert (out / "2024" / "x.csv").is_file()
+    assert not (out / "2023" / "x (1).csv").exists()
+
+
 def test_run_batch_writes_manifest(tmp_path: Path) -> None:
     result = run_batch(_granted_template(), [FIXTURE], tmp_path / "out", timestamp="mf")
     run_dir = Path(result.run_dir)
@@ -1273,6 +1344,23 @@ def test_run_batch_trace_steps_writes_per_step_parquet(tmp_path: Path) -> None:
         "sample_assignment/steps/01_properties.parquet",
         "sample_assignment/steps/02_assignees.parquet",
     ]
+
+
+def test_run_batch_trace_steps_honors_chosen_format(tmp_path: Path) -> None:
+    template = BatchTemplate(
+        name="traced_csv",
+        steps=[
+            FilterStep(table="properties", clauses=[FilterClause("doc_kind", "equals", "B2")]),
+            ExportStep(fmt="parquet", tables=["properties"]),
+        ],
+    )
+    result = run_batch(
+        template, [FIXTURE], tmp_path / "out", timestamp="trc", trace_steps=True, trace_fmt="csv"
+    )
+    steps_dir = Path(result.run_dir) / "sample_assignment" / "steps"
+    # the trace honors the chosen format (csv), independent of the Export step's parquet
+    assert sorted(p.name for p in steps_dir.iterdir()) == ["01_properties.csv"]
+    assert not list(steps_dir.glob("*.parquet"))
 
 
 def test_run_batch_no_trace_writes_no_steps_dir(tmp_path: Path) -> None:

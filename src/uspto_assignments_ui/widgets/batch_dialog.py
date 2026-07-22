@@ -1892,18 +1892,57 @@ class BatchDialog(QDialog):
         self._save_steps = QCheckBox("Save each step's output (for review)")
         self._save_steps.setToolTip(
             "Write every enabled step's resulting table(s) to <run>/<source>/steps/"
-            "NN_<table>.parquet so you can open and check each intermediate."
+            "NN_<table>.<ext> so you can open and check each intermediate."
         )
-        column.addWidget(self._save_steps)
+        # Its own format (independent of the Export step); defaults to Parquet (lossless, compact).
+        self._trace_format = QComboBox()
+        for label, value in _FORMATS:
+            self._trace_format.addItem(label, value)
+        self._trace_format.setToolTip("Format for the saved step outputs (default Parquet).")
+        self._trace_format.setEnabled(False)
+        self._save_steps.toggled.connect(self._trace_format.setEnabled)
+        trace_row = QHBoxLayout()
+        trace_row.addWidget(self._save_steps)
+        trace_row.addWidget(QLabel("as"))
+        trace_row.addWidget(self._trace_format)
+        trace_row.addStretch(1)
+        column.addLayout(trace_row)
 
         # Convert mode: write outputs directly into the chosen folder, named by source file.
         self._flat_output = QCheckBox("Convert mode: one folder, files named by source")
         self._flat_output.setToolTip(
-            "Write outputs straight into the output folder as <source>_<table>.parquet "
-            "(no timestamped run subfolder, no manifest/summary). Re-runs overwrite same-named "
-            "files. Ideal with the 'Convert to Parquet' template."
+            "Write outputs straight into the output folder as <source>_<table>.<ext> "
+            "(or <source>.<ext> when a single table is written; no timestamped run subfolder, "
+            "no manifest/summary — just a _convert_index.csv breadcrumb). Ideal with the "
+            "'Convert to Parquet' template."
         )
         column.addWidget(self._flat_output)
+        # Convert-mode options: existing-file policy + subfolder mirroring (enabled with the mode).
+        self._convert_policy = QComboBox()
+        for label, value in (
+            ("Overwrite", "overwrite"),
+            ("Skip existing", "skip"),
+            ("Keep both", "unique"),
+        ):
+            self._convert_policy.addItem(label, value)
+        self._convert_policy.setToolTip(
+            "When a target file already exists: Overwrite it, Skip it (leave it — makes a bulk "
+            "conversion resumable), or Keep both (never clobber; append ' (1)')."
+        )
+        self._mirror_tree = QCheckBox("Mirror source subfolders")
+        self._mirror_tree.setToolTip(
+            "Recreate each source's subfolder position (under the inputs' common parent) beneath "
+            "the output folder, instead of flattening everything into one folder."
+        )
+        for widget in (self._convert_policy, self._mirror_tree):
+            widget.setEnabled(False)
+            self._flat_output.toggled.connect(widget.setEnabled)
+        convert_row = QHBoxLayout()
+        convert_row.addWidget(QLabel("when exists:"))
+        convert_row.addWidget(self._convert_policy)
+        convert_row.addWidget(self._mirror_tree)
+        convert_row.addStretch(1)
+        column.addLayout(convert_row)
 
         column.addWidget(SectionLabel("Console"))
         self._console = QPlainTextEdit()
@@ -2334,7 +2373,10 @@ class BatchDialog(QDialog):
             memory=self._memory,
             cpc_ctx=self._cpc_ctx(),
             trace_steps=self._save_steps.isChecked(),
+            trace_fmt=self._trace_format.currentData(),
             flat_output=self._flat_output.isChecked(),
+            existing=self._convert_policy.currentData(),
+            mirror_tree=self._mirror_tree.isChecked(),
         )
         worker.moveToThread(thread)
         thread.started.connect(worker.run)

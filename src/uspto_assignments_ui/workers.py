@@ -19,6 +19,8 @@ from uspto_assignments import (
     BatchTemplate,
     CpcRunContext,
     EntityMemory,
+    ExistingPolicy,
+    ExportFormat,
     parse_to_store,
     run_batch,
 )
@@ -106,7 +108,10 @@ class BatchWorker(QObject):
         memory: EntityMemory | None = None,
         cpc_ctx: CpcRunContext | None = None,
         trace_steps: bool = False,
+        trace_fmt: ExportFormat = "parquet",
         flat_output: bool = False,
+        existing: ExistingPolicy = "overwrite",
+        mirror_tree: bool = False,
     ) -> None:
         super().__init__()
         self._template = template
@@ -117,7 +122,10 @@ class BatchWorker(QObject):
         self._memory = memory
         self._cpc_ctx = cpc_ctx
         self._trace_steps = trace_steps
+        self._trace_fmt: ExportFormat = trace_fmt
         self._flat_output = flat_output
+        self._existing: ExistingPolicy = existing
+        self._mirror_tree = mirror_tree
         self._stop = threading.Event()
 
     def cancel(self) -> None:
@@ -138,7 +146,10 @@ class BatchWorker(QObject):
                 cpc_ctx=self._cpc_ctx,
                 should_stop=self._stop.is_set,
                 trace_steps=self._trace_steps,
+                trace_fmt=self._trace_fmt,
                 flat_output=self._flat_output,
+                existing=self._existing,
+                mirror_tree=self._mirror_tree,
             )
         except Exception as exc:  # thread boundary: report any error via the failed signal
             self.failed.emit(f"{type(exc).__name__}: {exc}")

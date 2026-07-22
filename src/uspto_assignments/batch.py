@@ -1279,6 +1279,10 @@ class BatchResult:
 
 OnEvent = Callable[[BatchEvent], None]
 
+# Convert ("flat_output") mode: what to do when a target file already exists on disk.
+ExistingPolicy = Literal["overwrite", "skip", "unique"]
+CONVERT_INDEX_NAME = "_convert_index.csv"  # breadcrumb appended in the convert output folder
+
 
 def _noop_event(_event: BatchEvent) -> None:
     """No-op event sink used when the caller passes no ``on_event``."""
@@ -1793,12 +1797,13 @@ def _project_for_export(table: pa.Table, step: ExportStep, name: str) -> pa.Tabl
     return table
 
 
-def _apply_export(
+def _apply_export(  # noqa: PLR0913 - the only writer; takes the run's naming + existing-file options
     tables: dict[str, pa.Table],
     step: ExportStep,
     source_dir: Path,
     emit: OnEvent,
     export_prefix: str = "",
+    existing: ExistingPolicy = "overwrite",
 ) -> list[str]:
     # Default export order: the known store tables first, then any derived/aggregate tables.
     # ``tables=[]`` means "nothing" (only reachable via hand-edited templates); ``None`` means all.
@@ -1810,6 +1815,9 @@ def _apply_export(
     )
     if not names:
         emit(BatchEvent("info", "  export: no tables selected — nothing written"))
+    # Convert-mode smart naming: when a single table is written, drop the redundant ``_<table>``
+    # suffix (``<stem>.<ext>`` instead of ``<stem>_flat.parquet``). Multi-table exports keep it.
+    single = export_prefix != "" and sum(tables.get(n) is not None for n in names) == 1
     written: list[str] = []
     for name in names:
         table = tables.get(name)
@@ -1832,10 +1840,16 @@ def _apply_export(
                 )
             )
         table = _project_for_export(table, step, name)
-        # Flat "convert" mode (export_prefix set) names files by source (<stem>_<table>.<ext>) in a
-        # shared folder and overwrites on re-run; normal mode keeps <table>.<ext> non-clobbering.
-        dest = source_dir / f"{export_prefix}{name}{FORMAT_SUFFIX[step.fmt]}"
-        path = dest if export_prefix else unique_path(dest)
+        ext = FORMAT_SUFFIX[step.fmt]
+        if export_prefix:  # flat "convert" mode: files named by source in a shared folder
+            filename = f"{export_prefix[:-1]}{ext}" if single else f"{export_prefix}{name}{ext}"
+            dest = source_dir / filename
+            if existing == "skip" and dest.exists():
+                emit(BatchEvent("info", f"  export {name} → {dest.name} skipped (already exists)"))
+                continue
+            path = unique_path(dest) if existing == "unique" else dest  # else overwrite
+        else:  # normal mode keeps <table>.<ext>, non-clobbering
+            path = unique_path(source_dir / f"{name}{ext}")
         export(table, path, step.fmt)
         written.append(str(path))
         emit(BatchEvent("info", f"  export {name} → {path.name} ({table.num_rows:,} rows)"))
@@ -2023,6 +2037,7 @@ def _apply_step(  # noqa: PLR0912, PLR0913 - one branch per step kind
     emit: OnEvent,
     cpc_ctx: CpcRunContext | None = None,
     export_prefix: str = "",
+    existing: ExistingPolicy = "overwrite",
 ) -> list[str]:
     """Apply one step in place; returns written paths (only an ExportStep writes anything)."""
     if isinstance(step, FilterStep):
@@ -2054,7 +2069,7 @@ def _apply_step(  # noqa: PLR0912, PLR0913 - one branch per step kind
     elif isinstance(step, CpcMatchStep):
         _apply_cpc_match(tables, step, _resolve_cpc_ctx(cpc_ctx), emit)
     else:
-        return _apply_export(tables, step, source_dir, emit, export_prefix)
+        return _apply_export(tables, step, source_dir, emit, export_prefix, existing)
     return []
 
 
@@ -2099,9 +2114,17 @@ def _warn_if_emptied(  # noqa: PLR0913 - a small guard threading the loop's loca
 
 
 def _trace_step_outputs(
-    tables: dict[str, pa.Table], touched: list[str], index: int, source_dir: Path
+    tables: dict[str, pa.Table],
+    touched: list[str],
+    index: int,
+    source_dir: Path,
+    fmt: ExportFormat = "parquet",
 ) -> list[str]:
-    """Write a step's resulting table(s) to ``<source>/steps/NN_<table>.parquet`` for review."""
+    """Write a step's resulting table(s) to ``<source>/steps/NN_<table>.<ext>`` for review.
+
+    ``fmt`` is the trace format (default ``parquet`` — lossless and compact); any format the
+    Export step supports (parquet/csv/xlsx/json/feather) works, via the same :func:`export` writer.
+    """
     steps_dir = source_dir / "steps"
     steps_dir.mkdir(parents=True, exist_ok=True)
     written: list[str] = []
@@ -2109,8 +2132,8 @@ def _trace_step_outputs(
         table = tables.get(name)
         if table is None:
             continue
-        path = steps_dir / f"{index:02d}_{_safe_name(name)}.parquet"
-        export(table, path, "parquet")
+        path = steps_dir / f"{index:02d}_{_safe_name(name)}{FORMAT_SUFFIX[fmt]}"
+        export(table, path, fmt)
         written.append(str(path))
     return written
 
@@ -2125,7 +2148,9 @@ def _process_input(  # noqa: PLR0913 - threads collaborators; one branch per kin
     memory: EntityMemory | None = None,
     cpc_ctx: CpcRunContext | None = None,
     trace_steps: bool = False,
+    trace_fmt: ExportFormat = "parquet",
     export_prefix: str = "",
+    existing: ExistingPolicy = "overwrite",
 ) -> FileResult:
     memory = memory if memory is not None else EntityMemory()
     learned_before = len(memory.learned)
@@ -2154,7 +2179,15 @@ def _process_input(  # noqa: PLR0913 - threads collaborators; one branch per kin
             before_tables = set(tables)
             outputs.extend(
                 _apply_step(
-                    tables, step, memory, used_targets, source_dir, emit, cpc_ctx, export_prefix
+                    tables,
+                    step,
+                    memory,
+                    used_targets,
+                    source_dir,
+                    emit,
+                    cpc_ctx,
+                    export_prefix,
+                    existing,
                 )
             )
             note = _warn_if_emptied(tables, step, index, table_name, before, emit)
@@ -2178,7 +2211,9 @@ def _process_input(  # noqa: PLR0913 - threads collaborators; one branch per kin
                 touched = ([table_name] if table_name in tables else []) + sorted(
                     set(tables) - before_tables
                 )
-                step_outputs.extend(_trace_step_outputs(tables, touched, index, source_dir))
+                step_outputs.extend(
+                    _trace_step_outputs(tables, touched, index, source_dir, trace_fmt)
+                )
         rows = {name: table.num_rows for name, table in tables.items()}
         result = FileResult(
             str(source),
@@ -2214,7 +2249,9 @@ def _process_one(  # noqa: PLR0913 - picklable worker threading the run's collab
     memory: EntityMemory,
     cpc_ctx: CpcRunContext | None = None,
     trace_steps: bool = False,
+    trace_fmt: ExportFormat = "parquet",
     export_prefix: str = "",
+    existing: ExistingPolicy = "overwrite",
 ) -> FileResult:
     """Picklable process-pool worker: streams events/progress live via ``event_queue``.
 
@@ -2233,7 +2270,9 @@ def _process_one(  # noqa: PLR0913 - picklable worker threading the run's collab
         memory=memory,
         cpc_ctx=cpc_ctx,
         trace_steps=trace_steps,
+        trace_fmt=trace_fmt,
         export_prefix=export_prefix,
+        existing=existing,
     )
 
 
@@ -2258,25 +2297,47 @@ def _assign_source_dirs(inputs: Sequence[Path], template_dir: Path) -> list[Path
     return dirs
 
 
-def _assign_export_prefixes(inputs: Sequence[Path]) -> list[str]:
+def _assign_export_prefixes(inputs: Sequence[Path], source_dirs: Sequence[Path]) -> list[str]:
     """One distinct filename prefix per input (flat convert mode), so files are named by source.
 
-    Mirrors :func:`_assign_source_dirs`: same-stem inputs from different folders would collide on
-    ``<stem>_<table>.parquet`` in the shared flat folder, so each gets a serial ``<stem> (n)_``
-    prefix decided up front (parallel-safe — every worker targets a distinct filename).
+    Same-stem inputs targeting the **same** output directory would collide on
+    ``<stem>_<table>.parquet``, so each gets a serial ``<stem> (n)_`` prefix decided up front
+    (parallel-safe — every worker targets a distinct filename). De-duping is per target directory,
+    so with subfolder mirroring, same-stem files in *different* dirs keep the clean ``<stem>_``.
     """
-    claimed: set[str] = set()
+    claimed: dict[str, set[str]] = {}
     prefixes: list[str] = []
-    for source in inputs:
+    for source, target in zip(inputs, source_dirs, strict=True):
+        seen = claimed.setdefault(str(target), set())
         stem = source.stem
         candidate = stem
         counter = 1
-        while candidate in claimed:
+        while candidate in seen:
             candidate = f"{stem} ({counter})"
             counter += 1
-        claimed.add(candidate)
+        seen.add(candidate)
         prefixes.append(f"{candidate}_")
     return prefixes
+
+
+def _mirror_source_dirs(inputs: Sequence[Path], out_root: Path) -> list[Path]:
+    """Per-input output dir mirroring each source's position under the inputs' common ancestor.
+
+    Preserves provenance in convert mode: ``<out_root>/<source.parent relative to common base>``.
+    Falls back to ``out_root`` (flat) for any input not under the common base (e.g. mixed drives).
+    """
+    parents = [source.parent for source in inputs]
+    try:
+        base = Path(os.path.commonpath([str(p) for p in parents]))
+    except ValueError:  # empty inputs or paths on different drives — cannot mirror
+        return [out_root] * len(inputs)
+    dirs: list[Path] = []
+    for parent in parents:
+        try:
+            dirs.append(out_root / parent.relative_to(base))
+        except ValueError:
+            dirs.append(out_root)
+    return dirs
 
 
 def _future_result(future: Future[FileResult], source: Path) -> FileResult:
@@ -2325,6 +2386,8 @@ def _run_parallel(  # noqa: PLR0913, PLR0915 - internal helper threading the run
     cpc_ctx: CpcRunContext | None = None,
     should_stop: Callable[[], bool] = _never_stop,
     trace_steps: bool = False,
+    trace_fmt: ExportFormat = "parquet",
+    existing: ExistingPolicy = "overwrite",
     export_prefixes: Sequence[str] | None = None,
 ) -> tuple[list[FileResult], bool]:
     """Process inputs across a worker pool, emitting each file's events plus a combined total.
@@ -2388,7 +2451,9 @@ def _run_parallel(  # noqa: PLR0913, PLR0915 - internal helper threading the run
                     memory,
                     cpc_ctx,
                     trace_steps,
+                    trace_fmt,
                     prefix,
+                    existing,
                 ): src
                 for src, src_dir, prefix in zip(inputs, source_dirs, prefixes, strict=True)
             }
@@ -2439,6 +2504,25 @@ def _write_run_log(run_dir: Path, template: BatchTemplate, results: list[FileRes
             f"rows={result.rows} outputs={len(result.outputs)}"
         )
     log_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _write_convert_index(out_root: Path, results: list[FileResult], timestamp: str) -> None:
+    """Append a lightweight breadcrumb of a convert run to ``<out_root>/_convert_index.csv``.
+
+    Convert mode skips the full run-folder audit, so this one appended CSV row per source (written
+    once in the parent process — race-free) is the only trace of what was produced from what.
+    """
+    index_path = out_root / CONVERT_INDEX_NAME
+    header_needed = not index_path.exists()
+    with index_path.open("a", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        if header_needed:
+            writer.writerow(["timestamp", "source", "status", "outputs", "rows", "error"])
+        for result in results:
+            outputs = "; ".join(Path(raw).name for raw in result.outputs)
+            rows = "; ".join(f"{name}={count}" for name, count in result.rows.items())
+            status = "ok" if result.ok else "failed"
+            writer.writerow([timestamp, result.source, status, outputs, rows, result.error or ""])
 
 
 def _run_relative(raw: str, run_dir: Path) -> str:
@@ -2658,7 +2742,10 @@ def run_batch(  # noqa: PLR0913, PLR0912, PLR0915 - clear public entry point, ke
     should_stop: Callable[[], bool] | None = None,
     strict: bool = False,
     trace_steps: bool = False,
+    trace_fmt: ExportFormat = "parquet",
     flat_output: bool = False,
+    existing: ExistingPolicy = "overwrite",
+    mirror_tree: bool = False,
 ) -> BatchResult:
     """Run ``template`` over ``inputs``, writing outputs under ``out_root``.
 
@@ -2681,11 +2768,20 @@ def run_batch(  # noqa: PLR0913, PLR0912, PLR0915 - clear public entry point, ke
             is written) by raising :class:`TemplateValidationError`. The default emits the
             warnings as error events and continues.
         trace_steps: When True, each enabled step's resulting table(s) are written to
-            ``<source-stem>/steps/NN_<table>.parquet`` for manual review of every intermediate.
+            ``<source-stem>/steps/NN_<table>.<ext>`` for manual review of every intermediate.
+        trace_fmt: Format for the ``trace_steps`` files (default ``parquet`` — lossless and
+            compact); any Export format works (parquet/csv/xlsx/json/feather). Ignored unless
+            ``trace_steps`` is True.
         flat_output: "Convert" mode. When True, outputs land **directly in ``out_root``** named by
-            source (``<source-stem>_<table>.<ext>``) instead of per-source subfolders under a
-            timestamped run folder, and the manifest / summary / runs-index / run-log audit
-            artifacts are skipped. Re-runs overwrite same-named files. ``trace_steps`` is ignored.
+            source (``<source-stem>_<table>.<ext>``, or ``<source-stem>.<ext>`` when a single table
+            is written) instead of per-source subfolders under a timestamped run folder, and the
+            manifest / summary / runs-index / run-log audit artifacts are skipped in favor of a
+            lightweight ``_convert_index.csv`` breadcrumb. ``trace_steps`` is ignored.
+        existing: Convert-mode policy when a target file already exists — ``overwrite`` (default),
+            ``skip`` (leave it; makes a bulk conversion resumable), or ``unique`` (never clobber;
+            append `` (1)``…). Ignored outside convert mode (normal runs already never clobber).
+        mirror_tree: Convert-mode option to mirror each source's subfolder position (under the
+            inputs' common ancestor) beneath ``out_root`` instead of flattening into one folder.
 
     Returns:
         A :class:`BatchResult` summarizing successes, failures, and per-file details;
@@ -2708,8 +2804,10 @@ def run_batch(  # noqa: PLR0913, PLR0912, PLR0915 - clear public entry point, ke
             emit(BatchEvent("info", "Convert mode: step-output tracing is ignored (no run folder)"))
         out_root.mkdir(parents=True, exist_ok=True)
         run_dir = out_root  # everything lands directly here, no template/run subfolders
-        source_dirs = [out_root] * len(inputs)
-        export_prefixes = _assign_export_prefixes(inputs)  # <source-stem>_ per file, deduped
+        source_dirs = (
+            _mirror_source_dirs(inputs, out_root) if mirror_tree else [out_root] * len(inputs)
+        )
+        export_prefixes = _assign_export_prefixes(inputs, source_dirs)  # <stem>_ per file/dir
         trace_steps = False
     else:
         template_dir = out_root / _safe_name(template.name)
@@ -2733,6 +2831,8 @@ def run_batch(  # noqa: PLR0913, PLR0912, PLR0915 - clear public entry point, ke
             cpc_ctx,
             should_stop=stop,
             trace_steps=trace_steps,
+            trace_fmt=trace_fmt,
+            existing=existing,
             export_prefixes=export_prefixes,
         )
         # Workers mutate pickled copies of the memory; merge what they learned back in. (The
@@ -2760,12 +2860,17 @@ def run_batch(  # noqa: PLR0913, PLR0912, PLR0915 - clear public entry point, ke
                 memory=memory,
                 cpc_ctx=cpc_ctx,
                 trace_steps=trace_steps,
+                trace_fmt=trace_fmt,
                 export_prefix=export_prefix,
+                existing=existing,
             )
             _emit_file_done(result, emit)
             results.append(result)
 
-    if not flat_output:
+    if flat_output:
+        if results:
+            _write_convert_index(out_root, results, timestamp)
+    else:
         _write_run_log(run_dir, template, results)
     succeeded = sum(1 for r in results if r.ok)
     failed = len(results) - succeeded

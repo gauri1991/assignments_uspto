@@ -596,8 +596,9 @@ is also how the CPC-match templates (09/14) consume the processed output of 07/0
    **double-click a step to edit** it; *Remove*.
 5. **Output** — defaults to your last-used folder (or `data/out`); **Workers** (1 = sequential;
    >1 processes files in parallel). File dialogs remember where you last picked.
-   **Save each step's output** (checkbox) writes every enabled step's resulting table to
-   `<source>/steps/NN_<table>.parquet` so you can open and check each intermediate — see below.
+   **Save each step's output** (checkbox + format dropdown) writes every enabled step's resulting
+   table to `<source>/steps/NN_<table>.<ext>` in the format you pick — **Parquet** (default),
+   CSV, Excel, JSON, or Feather — so you can open and check each intermediate — see below.
 6. **Run batch** — watch the live **console** and the per-file progress bar; a run log is written
    too. A **Cancel** button appears while a run is active (cancellation is per-file: the file in
    flight finishes, the rest are skipped, and the summary notes what was cancelled). Closing the
@@ -620,8 +621,10 @@ Re-running never mixes with earlier outputs (a duplicate timestamp gets a `` (1)
 
 **Save each step's output (step-by-step review).** Tick the checkbox to trace the pipeline: every
 enabled step's resulting table(s) are written under each source's `steps/` folder as
-`NN_<table>.parquet` (`NN` = step number), so you can open any intermediate and check exactly what
-that step produced — filter → normalize → match, one file each:
+`NN_<table>.<ext>` (`NN` = step number) in the format chosen next to the checkbox — Parquet
+(default; lossless and compact), CSV, Excel, JSON, or Feather, independent of your Export step —
+so you can open any intermediate and check exactly what that step produced — filter → normalize →
+match, one file each:
 
 ```
 <source-stem>/
@@ -641,11 +644,20 @@ files written, so it's meant for reviewing/validating on a **shortlisted** set, 
 
 **Convert mode (one folder, files named by source).** Tick **Convert mode: one folder, files named
 by source** to bypass the timestamped run folder entirely: outputs land **directly in the folder you
-picked**, named `<source-stem>_<table>.parquet`, all side by side. No per-source subfolder, no
-`manifest.json` / `summary.xlsx` / `runs_index.csv`. A re-run **overwrites** same-named files (two
-inputs that share a stem get a `` (1)`` suffix so they never clobber each other). This is the
-fast path for bulk **XML/ZIP → Parquet** conversion — pair it with the bundled **12 - Convert to
-Parquet** template (a single Export-Parquet step, all 5 tables):
+picked**, named `<source-stem>_<table>.parquet` — or just `<source-stem>.parquet` when the template
+writes a **single table** (the redundant `_flat` is dropped). No per-source subfolder, no
+`manifest.json` / `summary.xlsx` / `runs_index.csv`; instead a lightweight **`_convert_index.csv`**
+breadcrumb is appended in the folder (source → outputs → row counts → timestamp). Two inputs that
+share a stem get a `` (1)`` suffix so they never clobber each other. Two convert-mode options sit
+next to the checkbox:
+
+- **when exists** — *Overwrite* (default), *Skip existing* (leave files already produced — makes a
+  big conversion **resumable** after an interruption), or *Keep both* (never clobber; append `` (1)``).
+- **Mirror source subfolders** — recreate each source's subfolder position (under the inputs' common
+  parent) beneath the output folder, instead of flattening everything into one directory.
+
+This is the fast path for bulk **XML/ZIP → Parquet** conversion — pair it with the bundled
+**12 - Convert to Parquet** template (a single Export-Parquet step, all 5 tables):
 
 ```
 <chosen folder>/
