@@ -59,7 +59,16 @@ from .normalize import (
     scorer_names,
 )
 from .reference import load_reference, match_column, matched_mask, reference_columns
-from .tables import STORE_TABLES, dataset_columns, open_dataset, parse_to_store
+from .tables import (
+    STORE_TABLES,
+    TABLE_FILE_SUFFIXES,
+    TableStore,
+    dataset_columns,
+    file_columns,
+    open_dataset,
+    parse_to_store,
+    read_table_file,
+)
 
 # pyarrow.compute is under-typed in pyarrow-stubs; route through Any (see filters.py for rationale).
 pc: Any = _pc_module
@@ -1327,11 +1336,31 @@ def _needed_tables(template: BatchTemplate) -> set[str] | None:
     return needed or None
 
 
+def is_data_file(source: Path) -> bool:
+    """True for a single already-processed data file (parquet/arrow/feather/csv).
+
+    Distinguishes a processed input that is *loaded* from a raw ``.xml``/``.zip`` that is *parsed*.
+    """
+    return source.is_file() and source.suffix.lower() in TABLE_FILE_SUFFIXES
+
+
+def data_file_table_name(source: Path) -> str:
+    """The store-table name a single data file loads as: its stem if a known table, else ``flat``.
+
+    So ``flat.parquet`` → ``flat`` and ``assignees.parquet`` → ``assignees``, while any other name
+    (e.g. an exported ``01_output.parquet``) loads as ``flat`` — the table every template targets.
+    """
+    return source.stem if source.stem in STORE_TABLES else "flat"
+
+
 def _load_tables(
     template: BatchTemplate, source: Path, work_dir: Path, on_parse: OnParse | None
 ) -> dict[str, pa.Table]:
     if source.is_dir():
-        store = open_dataset(source)
+        store = open_dataset(source)  # already-processed dataset folder (Arrow/Parquet tables)
+    elif is_data_file(source):
+        # A single already-processed data file → load it as one store table (usually ``flat``).
+        store = TableStore({data_file_table_name(source): read_table_file(source)})
     else:
         store = parse_to_store(
             source,
@@ -1814,18 +1843,28 @@ def _apply_export(
 
 
 def inputs_schema_base(inputs: Sequence[Path]) -> dict[str, list[str]] | None:
-    """The union of dataset-folder inputs' actual schemas, or None when none are datasets.
+    """The union of processed inputs' actual schemas, or None when no input is a processed dataset.
 
-    Validation otherwise assumes the fresh-parse schema and falsely warns that columns a prior
-    pipeline attached (``cpc_codes``, ``*_canonical`` — the documented 13→14 chain) "are not
-    available yet". Raw XML/ZIP inputs contribute nothing here: for them the static schema is
-    exact, and a genuinely missing column still fails visibly at run time.
+    A processed input is a dataset **folder** or a single processed data **file**
+    (``.parquet``/``.arrow``/``.feather``/``.csv``). Validation otherwise assumes the fresh-parse
+    schema and falsely warns that columns a prior pipeline attached (``cpc_codes``, ``*_canonical``
+    — the documented 13→14 chain) "are not available yet". Raw XML/ZIP inputs contribute nothing
+    here: for them the static schema is exact, and a genuinely missing column still fails visibly
+    at run time.
     """
     base: dict[str, list[str]] | None = None
     for source in inputs:
-        if not source.is_dir():
-            continue
-        for table, names in dataset_columns(source).items():
+        if source.is_dir():
+            schema = dataset_columns(source)
+        elif is_data_file(source):
+            # A single processed file contributes its real schema under its resolved table name.
+            try:
+                schema = {data_file_table_name(source): file_columns(source)}
+            except (OSError, ValueError):  # unreadable/unsupported → fall back to static schema
+                continue
+        else:
+            continue  # raw XML/ZIP: the static fresh-parse schema is already exact
+        for table, names in schema.items():
             base = base if base is not None else {}
             merged = base.setdefault(table, [])
             merged.extend(n for n in names if n not in merged)
@@ -2095,8 +2134,8 @@ def _process_input(  # noqa: PLR0913 - threads collaborators; one branch per kin
     step_stats: list[StepStat] = []  # audit trail (partial stats survive a mid-run failure)
     step_outputs: list[str] = []  # per-step trace files, when trace_steps is on
     try:
-        if source.is_file():
-            work_dir = Path(tempfile.mkdtemp(prefix="uspto_batch_"))
+        if source.is_file() and not is_data_file(source):
+            work_dir = Path(tempfile.mkdtemp(prefix="uspto_batch_"))  # scratch for XML/ZIP parse
         tables = _load_tables(template, source, work_dir or template_dir, on_parse)
         source_dir.mkdir(parents=True, exist_ok=True)
         outputs: list[str] = []

@@ -39,8 +39,11 @@ from uspto_assignments import (
     TemplateValidationError,
     TransferTypeStep,
     columns_after,
+    data_file_table_name,
     describe_step,
     dump_templates,
+    inputs_schema_base,
+    is_data_file,
     load_templates,
     parse_to_store,
     run_batch,
@@ -1282,9 +1285,9 @@ def test_template_11_attach_cpc_from_file_loads_and_validates(tmp_path: Path) ->
     path = Path(__file__).resolve().parent.parent / "templates" / "11_attach_cpc_from_file.json"
     template = load_templates(path)[0]
     assert template.name.startswith("11 - Attach CPC from file")
-    # OR conveyance gate + housekeeping + firm gate (transfer_type, compare) + attach
-    # + derive + export
-    assert len(template.steps) == 7
+    # OR conveyance gate + housekeeping + firm gate (transfer_type) + normalize×2 +
+    # canonical self-transfer compare + attach + derive + export
+    assert len(template.steps) == 9
     step = next(s for s in template.steps if isinstance(s, AttachCpcFileStep))
     assert step.separator == ";" and step.code_column == "CPC"
     attach_index = template.steps.index(step)
@@ -1297,3 +1300,55 @@ def test_template_11_attach_cpc_from_file_loads_and_validates(tmp_path: Path) ->
     assert warnings == [
         f"Step {attach_index + 1} (AttachCpcFile): CPC file not found: cpc/patseer_export.csv"
     ]
+
+
+# -- processed data-file inputs (parquet/arrow/feather/csv fed straight to batch) --
+
+
+def _write_flat_parquet(path: Path) -> None:
+    """A tiny already-processed ``flat`` table with a column a prior pipeline attached."""
+    flat = pa.table(
+        {
+            "assignee_names": ["ACME INC", "BETA LLC", ""],
+            "doc_number": ["7000001", "7000002", "7000003"],
+            "cpc_codes": ["H04L", "G06F", ""],
+        }
+    )
+    pq.write_table(flat, path)
+
+
+def test_data_file_table_name_rules(tmp_path: Path) -> None:
+    assert data_file_table_name(tmp_path / "flat.parquet") == "flat"
+    assert data_file_table_name(tmp_path / "assignees.parquet") == "assignees"
+    assert data_file_table_name(tmp_path / "daily_flat.parquet") == "flat"  # unknown stem → flat
+
+
+def test_run_batch_accepts_processed_parquet_input(tmp_path: Path) -> None:
+    src = tmp_path / "daily_flat.parquet"
+    _write_flat_parquet(src)
+    assert is_data_file(src)
+    template = BatchTemplate(
+        name="pq",
+        steps=[
+            FilterStep(
+                table="flat", clauses=[FilterClause(column="assignee_names", op="not_empty")]
+            ),
+            ExportStep(fmt="csv", tables=["flat"]),
+        ],
+    )
+    result = run_batch(template, [src], tmp_path / "out", timestamp="pq1")
+    assert result.succeeded == 1 and result.failed == 0
+    out = tmp_path / "out" / "pq" / "run_pq1" / "daily_flat" / "flat.csv"
+    assert out.is_file()
+    rows = list(csv.DictReader(out.read_text().splitlines()))
+    assert [r["assignee_names"] for r in rows] == ["ACME INC", "BETA LLC"]  # blank row filtered out
+    assert "cpc_codes" in rows[0]  # processed column carried through
+
+
+def test_inputs_schema_base_reads_processed_file_columns(tmp_path: Path) -> None:
+    src = tmp_path / "flat.parquet"
+    _write_flat_parquet(src)
+    base = inputs_schema_base([src])
+    assert base == {"flat": ["assignee_names", "doc_number", "cpc_codes"]}
+    # a raw XML input contributes nothing — its static parse schema is already exact
+    assert inputs_schema_base([FIXTURE]) is None

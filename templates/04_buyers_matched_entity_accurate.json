@@ -50,6 +50,13 @@
       "value": "",
       "value2": "",
       "case_sensitive": false
+     },
+     {
+      "column": "doc_kind",
+      "op": "starts_with",
+      "value": "B",
+      "value2": "",
+      "case_sensitive": false
      }
     ],
     "combine": "and"

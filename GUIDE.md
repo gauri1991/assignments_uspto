@@ -568,17 +568,29 @@ than returning a misleading empty result.
 BatchTemplate = name + LoadConfig + [ ordered list of steps ]
 ```
 
-Each template is applied to **each input independently**. Inputs can be USPTO `.xml`/`.zip` files
-**or** already-processed dataset folders (Arrow/Parquet).
+Each template is applied to **each input independently**. Inputs can be:
+
+- USPTO `.xml`/`.zip` files (parsed), **or**
+- an already-processed **dataset folder** (Arrow/Parquet — multiple `<table>.parquet`/`.arrow`), **or**
+- a single already-processed **data file** (`.parquet`/`.arrow`/`.feather`/`.csv`) — loaded directly
+  as the `flat` table (a file literally named `assignees.parquet` loads as `assignees`).
+
+So you can re-run **any** template on data you already exported — no re-parse. A template's steps
+are simply re-applied; steps that name a table your file doesn't contain are skipped harmlessly, and
+a firm-to-firm conveyance filter on already-filtered rows just keeps the rows that still match. This
+is also how the CPC-match templates (09/14) consume the processed output of 07/08/13.
 
 **Building & running (left → right in the dialog):**
 
 1. **Template** — name it; **Save** / **Delete**; reload a saved template from the dropdown.
-2. **Inputs** — *Add files…* (multi-select `.xml`/`.zip`) and/or *Add folder…*; *Remove*. **Add
-   folder…** is smart: point it at an already-parsed **dataset folder** (has `flat.parquet` /
-   `flat.arrow` …) and it's added as one dataset input; point it at any **other folder** and it's
-   scanned **recursively** for every `.xml`/`.zip`, each added as its own input — so a whole folder
-   of daily/annual dumps queues in one click.
+2. **Inputs** — *Add files…* (multi-select `.xml`/`.zip` **and** processed `.parquet`/`.arrow`/
+   `.feather`/`.csv`), *Add folder…*, *Add by pattern…*, *Remove* (select several — Ctrl/Shift —
+   to drop many at once), *Clear*. **Add folder…** is smart: point it at an already-parsed
+   **dataset folder** (has `flat.parquet` / `flat.arrow` …) and it's added as one dataset input;
+   point it at any **other folder** and it's scanned **recursively** for every `.xml`/`.zip` and
+   processed data file, each added as its own input. **Add by pattern…** picks a folder plus a
+   filename pattern — a glob like `*_flat*.parquet` or a bare substring like `_flat` — and adds only
+   the matching files, so a whole folder of daily/annual dumps or processed extracts queues in one click.
 3. **Load** — an optional max-record cap and a field/table selection tree (loads only what you need).
 4. **Steps** — *Add step ▾* (menu below), reorder isn't needed (they run top-to-bottom);
    **double-click a step to edit** it; *Remove*.

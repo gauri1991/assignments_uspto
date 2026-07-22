@@ -64,10 +64,24 @@
     "method": "rules"
    },
    {
+    "kind": "normalize",
+    "table": "flat",
+    "column": "assignor_names",
+    "scorer": "token_set",
+    "learn": false
+   },
+   {
+    "kind": "normalize",
+    "table": "flat",
+    "column": "assignee_names",
+    "scorer": "token_set",
+    "learn": false
+   },
+   {
     "kind": "compare",
     "table": "flat",
-    "left": "assignor_names",
-    "right": "assignee_names",
+    "left": "assignor_names_canonical",
+    "right": "assignee_names_canonical",
     "method": "exact",
     "action": "drop_matches"
    },
@@ -101,6 +115,7 @@
       "transaction_date_year",
       "assignor_names",
       "assignee_names",
+      "assignee_names_canonical",
       "invention_title",
       "doc_number",
       "doc_kind",

@@ -167,6 +167,92 @@ def test_add_folder_with_nothing_usable_adds_no_inputs(
     assert dialog._inputs.count() == 0
 
 
+def test_add_files_accepts_processed_data_files_and_dedupes(
+    qtbot: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    create_app([])
+    dialog = BatchDialog(BatchTemplateStore(tmp_path / "batch.json"))
+    qtbot.addWidget(dialog)
+    src = tmp_path / "daily_flat.parquet"
+    src.write_text("", encoding="utf-8")
+    monkeypatch.setattr(
+        bd.QFileDialog, "getOpenFileNames", staticmethod(lambda *a, **k: ([str(src)], ""))
+    )
+    dialog._add_files()
+    dialog._add_files()  # same file again → de-duped, not added twice
+    paths = [dialog._inputs.item(i).text() for i in range(dialog._inputs.count())]  # type: ignore[union-attr]
+    assert paths == [str(src)]
+
+
+def test_multi_select_remove_drops_several_rows(qtbot: Any, tmp_path: Path) -> None:
+    create_app([])
+    dialog = BatchDialog(BatchTemplateStore(tmp_path / "batch.json"))
+    qtbot.addWidget(dialog)
+    added = dialog._add_input_paths([tmp_path / f"f{i}.parquet" for i in range(4)])
+    assert added == 4
+    for i in (0, 2):  # select two non-adjacent rows (ExtendedSelection is enabled)
+        dialog._inputs.item(i).setSelected(True)  # type: ignore[union-attr]
+    dialog._remove_input()
+    remaining = [Path(dialog._inputs.item(i).text()).name for i in range(dialog._inputs.count())]  # type: ignore[union-attr]
+    assert remaining == ["f1.parquet", "f3.parquet"]
+
+
+def test_add_by_pattern_adds_only_matching_files(
+    qtbot: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    create_app([])
+    dialog = BatchDialog(BatchTemplateStore(tmp_path / "batch.json"))
+    qtbot.addWidget(dialog)
+    folder = tmp_path / "extracts"
+    folder.mkdir()
+    (folder / "daily_flat.parquet").write_text("", encoding="utf-8")
+    (folder / "weekly_flat.parquet").write_text("", encoding="utf-8")
+    (folder / "buyers_leaderboard.csv").write_text("", encoding="utf-8")  # right suffix, no match
+    (folder / "notes.txt").write_text("", encoding="utf-8")  # wrong suffix
+
+    monkeypatch.setattr(
+        bd.QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: str(folder))
+    )
+    monkeypatch.setattr(bd.QInputDialog, "getText", staticmethod(lambda *a, **k: ("*_flat*", True)))
+    dialog._add_by_pattern()
+    added = sorted(
+        Path(dialog._inputs.item(i).text()).name  # type: ignore[union-attr]
+        for i in range(dialog._inputs.count())
+    )
+    assert added == ["daily_flat.parquet", "weekly_flat.parquet"]
+
+
+def test_add_by_pattern_no_match_adds_nothing(
+    qtbot: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    create_app([])
+    dialog = BatchDialog(BatchTemplateStore(tmp_path / "batch.json"))
+    qtbot.addWidget(dialog)
+    folder = tmp_path / "extracts"
+    folder.mkdir()
+    (folder / "daily_flat.parquet").write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(
+        bd.QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: str(folder))
+    )
+    monkeypatch.setattr(bd.QInputDialog, "getText", staticmethod(lambda *a, **k: ("zzz", True)))
+    monkeypatch.setattr(  # suppress the "no files matched" popup
+        bd.QMessageBox, "information", staticmethod(lambda *a, **k: QMessageBox.StandardButton.Ok)
+    )
+    dialog._add_by_pattern()
+    assert dialog._inputs.count() == 0
+
+
+def test_clear_inputs_empties_the_list(qtbot: Any, tmp_path: Path) -> None:
+    create_app([])
+    dialog = BatchDialog(BatchTemplateStore(tmp_path / "batch.json"))
+    qtbot.addWidget(dialog)
+    dialog._add_input_paths([tmp_path / "a.parquet", tmp_path / "b.parquet"])
+    assert dialog._inputs.count() == 2
+    dialog._clear_inputs()
+    assert dialog._inputs.count() == 0
+
+
 def test_batch_dialog_runs_and_writes_output(qtbot: Any, tmp_path: Path) -> None:
     create_app([])
     store = BatchTemplateStore(tmp_path / "batch.json")

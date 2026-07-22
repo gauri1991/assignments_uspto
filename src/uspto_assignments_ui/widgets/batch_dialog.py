@@ -6,7 +6,7 @@ import copy
 import html
 import logging
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -22,6 +22,7 @@ from PyQt6.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -42,6 +43,7 @@ from uspto_assignments import (
     LEGACY_NORMALIZE_TARGET,
     PREVIEW_LIMIT,
     STORE_TABLES,
+    TABLE_FILE_SUFFIXES,
     AggregateStep,
     AttachCpcFileStep,
     BatchEvent,
@@ -73,6 +75,7 @@ from uspto_assignments import (
     inputs_schema_base,
     is_dataset_dir,
     load_templates,
+    match_input_files,
     probablepeople_available,
     reference_columns,
     run_preview,
@@ -105,7 +108,9 @@ _FORMATS: list[tuple[str, ExportFormat]] = [
     ("Feather (Arrow)", "feather"),
 ]
 _CORE_LOGGER = "uspto_assignments"
-_INPUT_SUFFIXES = (".xml", ".zip")  # raw batch inputs a folder scan picks up
+# Batch inputs a folder scan / pattern pick will accept: raw XML/ZIP to parse, plus already-
+# processed data files (parquet/arrow/feather/csv) loaded directly as the ``flat`` table.
+_INPUT_SUFFIXES = (".xml", ".zip", *TABLE_FILE_SUFFIXES)
 _DERIVE_OPS: list[tuple[str, str]] = [
     ("Year (YYYY of a date)", "year"),
     ("Month (MM of a date)", "month"),
@@ -1792,16 +1797,20 @@ class BatchDialog(QDialog):
         )
         column.addWidget(example_btn)
 
-        column.addWidget(SectionLabel("Inputs (xml / zip files or dataset folders)"))
+        column.addWidget(SectionLabel("Inputs (xml / zip / parquet files, or dataset folders)"))
         self._inputs = QListWidget()
         self._inputs.setProperty("panel", "true")
+        # Extended selection so Remove can drop several rows at once (Ctrl/Shift-click).
+        self._inputs.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         # Weighted 1:2:2 with the field tree and steps list — the working areas get the space.
         column.addWidget(self._inputs, 1)
         column.addLayout(
             self._button_row(
                 ("Add files…", self._add_files),
                 ("Add folder…", self._add_folder),
+                ("Add by pattern…", self._add_by_pattern),
                 ("Remove", self._remove_input),
+                ("Clear", self._clear_inputs),
             )
         )
 
@@ -2026,35 +2035,54 @@ class BatchDialog(QDialog):
         self._append_console(f"Deleted template '{name}'")
 
     # -- inputs ------------------------------------------------------------
+    def _current_inputs(self) -> set[str]:
+        """The set of input paths already in the list (for de-duping additions)."""
+        return {self._inputs.item(i).text() for i in range(self._inputs.count())}  # type: ignore[union-attr]
+
+    def _add_input_paths(self, paths: Sequence[str | Path]) -> int:
+        """Add each path once (skipping any already present); return how many were newly added."""
+        existing = self._current_inputs()
+        added = 0
+        for path in paths:
+            text = str(path)
+            if text not in existing:
+                self._inputs.addItem(text)
+                existing.add(text)
+                added += 1
+        return added
+
     def _add_files(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(
             self,
             "Add input files",
             self._ui_state.last_dir("input"),
-            "USPTO assignment (*.xml *.zip);;All files (*)",
+            "USPTO input (*.xml *.zip *.parquet *.arrow *.feather *.csv)"
+            ";;USPTO assignment (*.xml *.zip)"
+            ";;Processed data (*.parquet *.arrow *.feather *.csv)"
+            ";;All files (*)",
         )
-        for path in paths:
-            self._inputs.addItem(path)
+        self._add_input_paths(paths)
         if paths:
             self._ui_state.set_last_dir("input", str(Path(paths[0]).parent))
 
     def _add_folder(self) -> None:
-        """Add a folder: a parsed dataset folder is one input; else scan it for .xml/.zip files.
+        """Add a folder: a parsed dataset folder is one input; else scan it for input files.
 
         A pre-parsed dataset folder (``flat.parquet`` / ``flat.arrow`` …) is added as a single
         input for :func:`open_dataset`. Any other folder is walked **recursively** for ``.xml`` /
-        ``.zip`` files, each added as its own input — so a folder of USPTO dumps converts in one go.
+        ``.zip`` and processed data files (parquet/arrow/feather/csv), each added as its own input —
+        so a folder of USPTO dumps (or of processed extracts) converts in one go.
         """
         path = QFileDialog.getExistingDirectory(
             self,
-            "Add dataset folder or a folder of XML/ZIP files",
+            "Add dataset folder or a folder of input files",
             self._ui_state.last_dir("input"),
         )
         if not path:
             return
         folder = Path(path)
         if is_dataset_dir(folder):
-            self._inputs.addItem(path)
+            self._add_input_paths([path])
         else:
             files = sorted(
                 p for p in folder.rglob("*") if p.is_file() and p.suffix.lower() in _INPUT_SUFFIXES
@@ -2063,12 +2091,52 @@ class BatchDialog(QDialog):
                 QMessageBox.information(
                     self,
                     "Nothing to add",
-                    f"No .xml/.zip files and no parsed dataset were found in:\n{folder}",
+                    "No .xml/.zip or processed data files, and no parsed dataset, were found in:"
+                    f"\n{folder}",
                 )
                 return
-            for file in files:
-                self._inputs.addItem(str(file))
+            self._add_input_paths(files)
         self._ui_state.set_last_dir("input", path)
+
+    def _add_by_pattern(self) -> None:
+        """Pick a folder, then add only the files whose names match a pattern.
+
+        The pattern is a glob (``*_flat*``, ``*.parquet``) when it has a glob metacharacter,
+        otherwise a case-insensitive substring (``_flat``). Matches are restricted to the accepted
+        input suffixes and de-duped against the list. See :func:`match_input_files`.
+        """
+        path = QFileDialog.getExistingDirectory(
+            self,
+            "Choose a folder to pick input files from",
+            self._ui_state.last_dir("input"),
+        )
+        if not path:
+            return
+        folder = Path(path)
+        pattern, ok = QInputDialog.getText(
+            self,
+            "Add by filename pattern",
+            "Filename pattern (glob like *_flat*.parquet, or a substring like _flat):",
+            text="*_flat*",
+        )
+        if not ok:
+            return
+        matches = match_input_files(folder, pattern.strip(), _INPUT_SUFFIXES)
+        if not matches:
+            QMessageBox.information(
+                self,
+                "No files matched",
+                f"No input files matched '{pattern.strip()}' in:\n{folder}",
+            )
+            return
+        added = self._add_input_paths(matches)
+        self._ui_state.set_last_dir("input", path)
+        skipped = len(matches) - added
+        note = f"Added {added} file(s)" + (f" ({skipped} already in the list)" if skipped else "")
+        self._append_console(note)
+
+    def _clear_inputs(self) -> None:
+        self._inputs.clear()
 
     def _remove_input(self) -> None:
         for item in self._inputs.selectedItems():

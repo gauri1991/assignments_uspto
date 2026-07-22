@@ -9,8 +9,9 @@ PyArrow table from dataclass rows, and :func:`flat_rows` denormalizes one record
 from __future__ import annotations
 
 import contextlib
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, fields
+from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any, Final
 
@@ -419,3 +420,60 @@ def read_table_file(path: Path) -> pa.Table:
         {name: stringify_column(table.column(name)) for name in table.column_names}
     )
     return result
+
+
+def match_input_files(
+    folder: Path,
+    pattern: str,
+    suffixes: Sequence[str],
+    *,
+    recursive: bool = True,
+) -> list[Path]:
+    """Files under ``folder`` whose name matches ``pattern``, restricted to ``suffixes``.
+
+    ``pattern`` is treated as a shell glob (``fnmatch`` on the file name) when it contains a glob
+    metacharacter (``* ? [``) — e.g. ``*_flat*`` or ``*.parquet``; otherwise it is a
+    case-insensitive substring — e.g. ``_flat`` matches ``daily_flat.parquet``. An empty pattern
+    matches every file of an accepted suffix. Suffix matching is case-insensitive. The result is
+    de-duplicated and sorted. Pure (filesystem + string only) so it is unit-testable without Qt.
+    """
+    accepted = {s.lower() for s in suffixes}
+    needle = pattern.lower()
+    is_glob = any(ch in pattern for ch in "*?[")
+    candidates = folder.rglob("*") if recursive else folder.glob("*")
+    matches: set[Path] = set()
+    for candidate in candidates:
+        if not candidate.is_file() or candidate.suffix.lower() not in accepted:
+            continue
+        name = candidate.name.lower()
+        if fnmatch(name, needle) if is_glob else (needle in name):
+            matches.add(candidate)
+    return sorted(matches)
+
+
+def file_columns(path: Path) -> list[str]:
+    """Return the column names of a single data file — schema only, no data materialized.
+
+    The cheap counterpart to :func:`read_table_file` for validation: lets a processed file input
+    contribute its real schema (``cpc_codes``/``*_canonical`` an earlier pipeline attached) without
+    reading the whole table. Mirrors :func:`dataset_columns` for the single-file case.
+
+    Raises:
+        ValueError: For an unsupported file extension.
+        FileNotFoundError: If ``path`` does not exist.
+    """
+    if not path.is_file():
+        raise FileNotFoundError(f"file not found: {path}")
+    suffix = path.suffix.lower()
+    if suffix == ".parquet":
+        schema: Any = pq.read_schema(str(path))  # pyright: ignore[reportUnknownMemberType]
+        return list(schema.names)
+    if suffix in (".arrow", ".feather"):
+        with pa.memory_map(str(path), "r") as source:
+            return list(pa.ipc.open_file(source).schema.names)
+    if suffix == ".csv":
+        import pyarrow.csv as pa_csv  # noqa: PLC0415 - lazy; only for CSV
+
+        reader: Any = pa_csv.open_csv(str(path))  # reads only the header to resolve the schema
+        return list(reader.schema.names)
+    raise ValueError(f"unsupported file type {suffix!r} (use {', '.join(TABLE_FILE_SUFFIXES)})")

@@ -10,10 +10,13 @@ import pytest
 
 from uspto_assignments import (
     STORE_TABLES,
+    TABLE_FILE_SUFFIXES,
     TableStore,
     columns_for,
     export_store,
+    file_columns,
     is_dataset_dir,
+    match_input_files,
     open_dataset,
     open_parquet_store,
     open_store,
@@ -211,3 +214,50 @@ def test_parse_to_store_failure_leaves_no_partial_dataset(tmp_path: Path) -> Non
         parse_to_store(FIXTURE, store_dir, progress=boom, progress_interval=1)
     assert not is_dataset_dir(store_dir)
     assert not list(store_dir.glob("*.arrow"))
+
+
+# -- single-file schema + filename-pattern picking (batch input helpers) -------
+
+
+def test_file_columns_reads_schema_only(tmp_path: Path) -> None:
+    parquet = tmp_path / "t.parquet"
+    pq.write_table(pa.table({"a": ["1"], "b": ["2"]}), parquet)
+    assert file_columns(parquet) == ["a", "b"]
+
+    csv_path = tmp_path / "t.csv"
+    csv_path.write_text("x,y\n1,2\n")
+    assert file_columns(csv_path) == ["x", "y"]
+
+    txt = tmp_path / "t.txt"
+    txt.write_text("nope")
+    with pytest.raises(ValueError, match="unsupported file type"):
+        file_columns(txt)
+
+
+def test_match_input_files_glob_substring_suffix_and_recursion(tmp_path: Path) -> None:
+    (tmp_path / "daily_flat.parquet").touch()
+    (tmp_path / "weekly_flat.arrow").touch()
+    (tmp_path / "raw.xml").touch()
+    (tmp_path / "flat_notes.txt").touch()  # right substring, wrong suffix
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (sub / "sub_flat.parquet").touch()
+
+    # glob (has metacharacters) restricted to parquet, recursive by default
+    got = match_input_files(tmp_path, "*_flat*.parquet", TABLE_FILE_SUFFIXES)
+    assert [p.name for p in got] == ["daily_flat.parquet", "sub_flat.parquet"]
+
+    # bare substring is case-insensitive across the accepted suffixes
+    got = match_input_files(tmp_path, "FLAT", (".parquet", ".arrow"))
+    assert {p.name for p in got} == {"daily_flat.parquet", "weekly_flat.arrow", "sub_flat.parquet"}
+
+    # suffix filter excludes the .txt even though its name matches
+    got = match_input_files(tmp_path, "flat", (".parquet",))
+    assert all(p.suffix == ".parquet" for p in got)
+
+    # no match returns empty
+    assert match_input_files(tmp_path, "zzz", TABLE_FILE_SUFFIXES) == []
+
+    # non-recursive skips the subfolder
+    got = match_input_files(tmp_path, "*_flat*", TABLE_FILE_SUFFIXES, recursive=False)
+    assert all(p.parent == tmp_path for p in got)

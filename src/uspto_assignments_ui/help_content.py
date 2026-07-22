@@ -489,7 +489,7 @@ _TEMPLATE_HELP: dict[str, _TemplateHelp] = {
         ),
         produces="flat.parquet — renamed seller_clean/seller_id/buyer_clean/buyer_id/"
         "buyer_in_gazetteer columns.",
-        needs="reference/g_assignee_disambiguated.tsv.",
+        needs="reference/reference.parquet.",
     ),
     "Buyers - firm-to-firm (recall gate: unmatched = unconfirmed) [reviewed]": _TemplateHelp(
         summary=(
@@ -500,19 +500,19 @@ _TEMPLATE_HELP: dict[str, _TemplateHelp] = {
         ),
         produces="flat.parquet — renamed seller_clean/seller_in_gazetteer/buyer_clean/"
         "buyer_in_gazetteer columns.",
-        needs="reference/g_assignee_disambiguated.tsv.",
+        needs="reference/reference.parquet.",
     ),
     "Buyer leaderboard - distinct granted documents [reviewed]": _TemplateHelp(
         summary="Hardened twin of 03 — same distinct-document counting, with the id-based "
         "self-transfer gate template 04 uses.",
         produces="buyers_by_granted_docs.csv.",
-        needs="reference/g_assignee_disambiguated.tsv.",
+        needs="reference/reference.parquet.",
     ),
     "Buyer leaderboard - deals closed [reviewed]": _TemplateHelp(
         summary="Hardened twin of 02 — dedupes to one row per deal before counting and "
         "renames the output to buyer/deals.",
         produces="buyers_by_deals.csv — buyer, deals.",
-        needs="reference/g_assignee_disambiguated.tsv.",
+        needs="reference/reference.parquet.",
     ),
     "Firm-to-firm buyers (rules only, no reference file) [reviewed]": _TemplateHelp(
         summary=(
