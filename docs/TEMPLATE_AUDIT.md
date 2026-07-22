@@ -102,3 +102,180 @@ for path in sorted(Path("templates").glob("*.json")):
         for w in warnings:
             print("      -", w)
 ```
+
+Regenerate the per-step listing in the appendix below with the engine's own step describer:
+
+```python
+from pathlib import Path
+from uspto_assignments import batch as B
+for path in sorted(Path("templates").glob("*.json")):
+    for tpl in B.load_templates(path):
+        print(f"{tpl.name}")
+        for i, s in enumerate(tpl.steps, 1):
+            print(f"  {i:2d}. {B.describe_step(s)}")
+```
+
+---
+
+# Appendix — per-template step-by-step
+
+Step labels below are the engine's own (`describe_step`), reflecting the **current** (post-fix)
+templates. To avoid repeating prose, the recurring building blocks are defined once here; each
+template then notes only its goal, its output, and anything specific.
+
+## Shared building blocks
+- **Conveyance gate (OR)** — `conveyance_text contains "ASSIGNORS INTEREST"` **or**
+  `"ASSIGNOR'S INTEREST"`. Keeps "assignment of assignor's interest" deals (the firm-to-firm sale
+  wording, ~479k rows/daily file). The apostrophe clause does the work; the no-apostrophe arm is a
+  harmless catch-all. *Correct — this is the fix for the old empty-`flat` bug.*
+- **Housekeeping gate (AND)** — `assignee_names not_empty` + `purge_indicator not_equals "Y"` +
+  `recorded_date not_empty`, and **+ `doc_kind starts_with "B"`** when the template counts granted
+  patents. Drops empty/purged/undated rows; the `B` clause restricts to grants. *`not_equals` is
+  null-safe; never uses `is_empty`, which would drop every row.*
+- **Seller gazetteer gate** — `reference_match` on `assignor_names` vs `reference.parquet`.
+  `keep_matched · mode=all` = strict (every assignor must resolve to a known org, or the deal is
+  dropped); `flag · mode=any` = soft (keeps all rows, just marks matches). Adds
+  `assignor_names_disambiguated/_matched/_assignee_id` (+ `_match_score/_match_review` when scored).
+- **Buyer classify + company/unknown filter** — `classify assignee_names → assignee_names_type`,
+  then `filter` keeps `type == company OR unknown`. Drops individual buyers; keeps brand/shell
+  buyers (the intended "company OR unknown" rule).
+- **Buyer gazetteer flag** — `reference_match` on `assignee_names` vs `reference.parquet`,
+  `flag · mode=any`. Marks whether the buyer is a known org without dropping rows.
+- **Self-transfer removal** — `compare … drop_matches` to delete intra-entity reassignments. By
+  **id** (`assignor_names_assignee_id` vs `assignee_names_assignee_id`, exact) is strongest;
+  by **canonical name** (exact, or fuzzy ≥92 in the reviewed set) is the fallback when no id exists.
+  *Two empty values never match, so id-less rows aren't nuked.*
+- **Normalize** — adds `<col>_canonical`. `· match-only` means `learn:false` (reproducible: does not
+  grow the shared entity memory).
+- **Derive year** — `transaction_date_year = year(transaction_date)`. *Correct time axis —
+  `transaction_date` = latest execution date else recorded date, not the lagging `recorded_date`.*
+
+---
+
+## 01 — Firm-to-firm transactions (clean, enriched)
+Row-level clean firm-to-firm deals, seller **and** buyer resolved against the gazetteer. → `flat.parquet`.
+1. Conveyance gate (OR).
+2. Housekeeping gate (AND).
+3. Seller gazetteer gate — `keep_matched · mode=all`, scored, `review<95`.
+4. Classify buyer → `assignee_names_type`.
+5. Company/unknown buyer filter.
+6. Buyer gazetteer flag — scored, `review<95`.
+7. Self-transfer removal **by id** (exact).
+8–9. Normalize assignor + assignee → `_canonical`.
+10. Self-transfer removal **by canonical** (exact) — second net for id-less rows.
+11. Derive year.
+12. Export `flat` (parquet), renamed to seller/buyer `_clean/_id/_match_*` columns.
+
+## 02 — Buyer leaderboard, deals closed
+Counts **distinct deals** per buyer. → `buyers_by_deals.csv`.
+1–2. Conveyance + housekeeping gates.
+3. Seller gazetteer gate (`keep_matched · mode=all`).
+4–5. Classify buyer + company/unknown filter.
+6. **Dedupe on `reel_no, frame_no`** — one row per deal *before* counting (the deal grain).
+7–8. Normalize assignor + assignee.
+9. Self-transfer removal (canonical, exact).
+10. Aggregate by `assignee_names_canonical` → `buyers_by_deals` (count = deals).
+11. Export.
+
+## 03 — Buyer leaderboard, patents (documents) acquired
+Counts **distinct granted documents** per buyer. → `buyers_by_documents.csv`.
+1. Conveyance gate. 2. Housekeeping gate **incl. `doc_kind starts_with "B"`** (grants only — the
+counting-grain rule). 3. Seller gate. 4–5. Classify + filter buyer. 6–7. Normalize. 8. Self-transfer
+(canonical). 9. Aggregate by canonical with `count_distinct = doc_number` → `buyers_by_documents`.
+10. Export (metric renamed `distinct_document_ids`).
+
+## 04 — Buyers, gazetteer-matched (entity-accurate leaderboard)  · fixed in this audit
+Groups by the gazetteer **id**, so name variants of one buyer collapse. → `matched_buyers.csv`.
+1. Conveyance gate. 2. Housekeeping gate **incl. `doc_kind starts_with "B"`** *(added by Finding A —
+now grant-gated like 03)*. 3. Seller gate. 4–5. Classify + filter buyer. 6. Buyer gazetteer flag.
+7. Keep only rows where `assignee_names_matched == true` (buyer must resolve). 8. Self-transfer
+**by id**. 9. Aggregate by `assignee_names_assignee_id, assignee_names_disambiguated` with
+`count_distinct = doc_number` → `matched_buyers`. 10. Export.
+
+## 05 — Buyers, off-gazetteer (NPEs / shells) for review
+The mirror of 01/04: keeps buyers that **don't** resolve. → `flat.csv` for manual review.
+1–2. Gates. 3. Seller gate (scored, `review<95`). 4–5. Classify + filter buyer. 6. Buyer gazetteer
+flag (scored). 7. Keep `assignee_names_matched == false` (unmatched buyers only). 8–9. Normalize.
+10. Self-transfer (canonical). 11. Sort by `assignee_names_canonical`. 12. Export selected/renamed cols.
+
+## 06 — Firm-to-firm buyers (rules only, no reference file)
+Needs no gazetteer — uses the rules classifier as the firm gate. → `flat.parquet`.
+1–2. Gates. 3. **Transfer type `company → company`** (both parties must classify as firms).
+4–5. Normalize. 6. Self-transfer (canonical). 7. Derive year. 8. Export.
+
+## 07 — CPC patent list per buyer (bridge for downstream CPC match)
+Row-level, one row per patent per confirmed buyer — the input to template 09. → `flat.csv`.
+1–2. Gates. 3. Seller gate. 4–5. Classify + filter buyer. 6. Buyer gazetteer flag. 7–8. Normalize
+(produces `assignee_names_canonical`, the buyer key 09 needs). 9. Self-transfer **by id**.
+10. Derive year. 11. Export the per-patent buyer bridge.
+
+## 08 — CPC enrich (firm-to-firm buyers + CPC codes)
+Rules-only firm-to-firm, then attaches CPC by online/cached lookup. → `flat.parquet` with CPC.
+1–2. Gates. 3. Transfer type `company → company`. 4–5. Normalize. 6. Self-transfer (canonical).
+7. Derive year. 8. **Fetch CPC** (`flat.doc_number → cpc_codes/cpc_subclasses/cpc_lookup_status`;
+offline unless the run enables network). 9. Export.
+
+## 09 — CPC match to sales-package portfolio  · needs a processed input
+Ranks buyers against a portfolio patent list. → `matched_buyers_by_portfolio_patent.csv` + overall.
+1. **CPC match** (`patent_list`, `portfolio.txt`; reads `cpc_codes` + `assignee_names_canonical`).
+2. Export both output tables. *Runs on the processed output of 07/08 — see Findings D/E; `portfolio.txt`
+is a placeholder to replace.*
+
+## 10 — Dropped sellers audit (off-gazetteer assignors)
+Surfaces assignors the gazetteer can't confirm, for review. → `flat.csv`.
+1–2. Gates. 3. Seller reference_match **`flag`** (not `keep_matched`) — scored, `review<95`.
+4. Keep `assignor_names_matched == false`. 5. Export unmatched sellers with best gazetteer score.
+
+## 11 — Attach CPC from file (firm-to-firm, offline PatSeer join)  · fixed in this audit
+Rules-only firm-to-firm, CPC joined from an uploaded file, fully offline. → `flat.csv` with CPC.
+1. Conveyance gate. 2. Housekeeping gate (incl. `doc_kind starts_with "B"`). 3. Transfer type
+`company → company`. **4–5. Normalize assignor + assignee (match-only)** and **6. self-transfer by
+canonical** *(Finding B — replaced the old raw-name compare with 13's normalize→canonical gate)*.
+7. **Attach CPC file** (`patseer_export.csv` → `cpc_codes…`). 8. Derive year. 9. Export (now includes
+`assignee_names_canonical`). *`patseer_export.csv` is a placeholder to replace.*
+
+## 12 — Convert to Parquet (all tables)
+No filtering — just re-emits every table. → all tables as parquet. Pair with **Convert mode**.
+1. Export (all tables, parquet).
+
+## 13 — Attach CPC from file → Parquet (offline, ready for match)
+Reproducible twin of 11 producing the input for 14. → `flat.parquet` with CPC.
+1–2. Gates (incl. grant `B`). 3. Transfer type `company → company`. 4–5. Normalize **match-only**
+(reproducible). 6. Self-transfer (canonical). 7. Attach CPC file. 8. Derive year. 9. Export parquet
+(carries `assignee_names_canonical` + CPC trio).
+
+## 14 — CPC match (offline footprint) + per-class matches  · needs a processed input
+Matches a portfolio footprint offline and emits per-class evidence. → three CSVs.
+1. **CPC match** (`footprint_file`, `portfolio_footprint.csv`, `emit_class_matches`). 2. Export
+`matched_buyers_by_portfolio_patent`, `matched_buyers_overall`, `matched_cpc_classes`. *Runs on 13's
+output; `portfolio_footprint.csv` is a placeholder.*
+
+---
+
+## Canonical reviewed set (`buyer_identification_templates.reviewed.json`)
+The docs-designated canonical set; all `reference_match` steps now use `reference.parquet` (Finding C),
+normalize is **match-only** (reproducible), and self-transfer removal adds a **fuzzy (≥92)** pass.
+1. **Strict gate, enriched** — 01 with id-based **and** fuzzy-canonical self-transfer removal (steps
+   9–10) and buyer/seller-renamed export.
+2. **Recall gate (unmatched = unconfirmed)** — classifies both parties by rules, only *flags* (not
+   requires) gazetteer hits, so more deals survive with weaker confirmation.
+3. **Distinct granted documents** — hardened 03: grant-gated, id-based self-transfer, counts distinct
+   granted docs → `buyers_by_granted_docs.csv`.
+4. **Deals closed** — hardened 02: id self-transfer + dedupe reel/frame before counting →
+   `buyers_by_deals.csv`.
+5. **Rules only, no reference file** — hardened 06: fuzzy (≥92) self-transfer instead of exact.
+
+## Pre-review baseline (`buyer_identification_templates.json`) — kept for comparison
+Four templates mirroring 01/03/02/06 but with a single-spelling conveyance filter, no `purge_indicator`
+gate, and (mostly) exact self-transfer removal. **Intentionally** left on the 1.1 GB
+`g_assignee_disambiguated.tsv` as the "before" reference point; prefer the numbered set or the reviewed set.
+
+## Teaching examples (`examples.json`)
+Small recipes demonstrating individual building blocks (also intentionally on the TSV):
+1. **Enrich flat** — normalize + classify both parties.
+2. **Firm-to-firm, enriched** — date-range filter, normalize, classify, `transfer_type`, year, export.
+3. **Individual-to-company** — `transfer_type individual → company`.
+4. **Remove self-transfers** — normalize then canonical compare `drop_matches`.
+5. **Top assignees** — normalize, grant filter, aggregate `count_distinct doc_number`, sort desc.
+6. **Assignments per year** — derive year, dedupe reel/frame, aggregate by year, sort.
+7. **Reference-match assignors** — a bare `keep_matched` gazetteer gate.
