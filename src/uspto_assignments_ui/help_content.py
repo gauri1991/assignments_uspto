@@ -32,6 +32,7 @@ from uspto_assignments import (
     ExportStep,
     FetchCpcStep,
     FilterStep,
+    KindFilterStep,
     LoadConfig,
     NormalizeStep,
     ReferenceMatchStep,
@@ -107,6 +108,16 @@ _STEP_HELP: dict[type[BatchStep], _StepHelp] = {
         ),
         tip="Classifies fresh every run (rules or ML) — it doesn't check a reference "
         "gazetteer the way Reference match does.",
+    ),
+    KindFilterStep: _StepHelp(
+        title="Kind code filter",
+        what=(
+            "Keeps or discards rows by document kind — pick document types "
+            "(Grant / Application / Publication / Unknown, classified robustly so Application "
+            "covers X0 serials) and/or exact kind codes (B1, B2, A1, X0, …)."
+        ),
+        tip="Grant = B1+B2. Applications split into A1 (publication) and X0 (serial), so tick "
+        "both Application and Publication for every non-grant, or use exact codes for precision.",
     ),
     ReferenceMatchStep: _StepHelp(
         title="Reference match",

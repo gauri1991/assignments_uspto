@@ -58,6 +58,7 @@ from .normalize import (
     normalize_column,
     scorer_names,
 )
+from .propid import doc_type_for
 from .reference import load_reference, match_column, matched_mask, reference_columns
 from .tables import (
     STORE_TABLES,
@@ -398,6 +399,37 @@ class TransferTypeStep:
 
 
 @dataclass(slots=True)
+class KindFilterStep:
+    """Keep or discard rows by document kind.
+
+    Selects by **document type** — ``grant``/``application``/``publication``/``unknown``, derived
+    from the kind code and number shape via :func:`~uspto_assignments.propid.doc_type_for` (so
+    ``application`` correctly covers both ``A1`` publications' siblings and ``X0`` serials) — and/or
+    by exact **raw kind codes** (``B1``, ``B2``, ``A1``, ``X0``, …). A row matches when its type is
+    in ``types`` OR its literal code is in ``codes``; ``action`` then keeps or discards the matches.
+    """
+
+    table: str = "flat"
+    column: str = "doc_kind"
+    number_column: str = "doc_number"  # helps doc_type_for classify by number shape (best-effort)
+    types: list[str] = field(default_factory=list[str])  # subset of _DOC_TYPES
+    codes: list[str] = field(default_factory=list[str])  # exact doc_kind codes, e.g. ["B2", "X0"]
+    action: str = "keep"  # keep | discard
+    enabled: bool = True
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "kind": "kind_filter",
+            "table": self.table,
+            "column": self.column,
+            "number_column": self.number_column,
+            "types": self.types,
+            "codes": self.codes,
+            "action": self.action,
+        }
+
+
+@dataclass(slots=True)
 class ReferenceMatchStep:
     """Match a name column against an external disambiguated-assignee reference (company gazetteer).
 
@@ -578,6 +610,7 @@ BatchStep = (
     | ClassifyStep
     | CompareStep
     | TransferTypeStep
+    | KindFilterStep
     | ReferenceMatchStep
     | FetchCpcStep
     | AttachCpcFileStep
@@ -608,6 +641,8 @@ _CLASSIFY_MODES = frozenset({"all", "any", "first", "majority"})
 _REFERENCE_MODES = frozenset({"any", "all"})
 _REFERENCE_ACTIONS = frozenset({"flag", "keep_matched", "drop_matched"})
 _ENTITY_TYPES = frozenset({"company", "individual", "unknown"})
+_DOC_TYPES = frozenset({"grant", "application", "publication", "unknown"})
+_KIND_FILTER_ACTIONS = frozenset({"keep", "discard"})
 _PORTFOLIO_MODES = frozenset({"patent_list", "footprint_file"})
 
 
@@ -755,6 +790,21 @@ def _decode_step(data: dict[str, Any]) -> BatchStep:  # noqa: PLR0911, PLR0912 -
             assignee_type=_expect_enum(data, "assignee_type", _ENTITY_TYPES, "company"),
             method=_expect_enum(data, "method", _CLASSIFY_METHODS, "rules"),  # type: ignore[arg-type]
         )
+    if kind == "kind_filter":
+        types = _expect_str_list(data.get("types", []), "types")
+        for value in types:
+            if value not in _DOC_TYPES:
+                raise TemplateFormatError(
+                    f"invalid kind type {value!r} (allowed: {', '.join(sorted(_DOC_TYPES))})"
+                )
+        return KindFilterStep(
+            table=str(data.get("table", "flat")),
+            column=str(data.get("column", "doc_kind")),
+            number_column=str(data.get("number_column", "doc_number")),
+            types=types,
+            codes=_expect_str_list(data.get("codes", []), "codes"),
+            action=_expect_enum(data, "action", _KIND_FILTER_ACTIONS, "keep"),
+        )
     if kind == "reference_match":
         return ReferenceMatchStep(
             table=str(data.get("table", "flat")),
@@ -862,8 +912,8 @@ def _decode_step(data: dict[str, Any]) -> BatchStep:  # noqa: PLR0911, PLR0912 -
         )
     raise TemplateFormatError(
         f"unknown step kind {kind!r} — valid kinds: filter, normalize, classify, compare, "
-        f"transfer_type, reference_match, fetch_cpc, attach_cpc_file, cpc_match, dedupe, "
-        f"select, sort, derive, aggregate, export"
+        f"transfer_type, kind_filter, reference_match, fetch_cpc, attach_cpc_file, cpc_match, "
+        f"dedupe, select, sort, derive, aggregate, export"
     )
 
 
@@ -1082,6 +1132,8 @@ def _referenced_columns(step: BatchStep) -> tuple[str, list[str]]:  # noqa: PLR0
         return step.table, [*step.group_by, *distinct]
     if isinstance(step, TransferTypeStep):
         return step.table, [step.assignor_column, step.assignee_column]
+    if isinstance(step, KindFilterStep):
+        return step.table, [step.column]
     if isinstance(step, FetchCpcStep | AttachCpcFileStep):
         return step.table, [step.column]
     if isinstance(step, CpcMatchStep):
@@ -1329,6 +1381,7 @@ def _needed_tables(template: BatchTemplate) -> set[str] | None:
             | ClassifyStep
             | CompareStep
             | TransferTypeStep
+            | KindFilterStep
             | ReferenceMatchStep
             | FetchCpcStep
             | AttachCpcFileStep
@@ -1580,6 +1633,40 @@ def _apply_transfer_type(
             f"{before:,} → {kept:,} rows",
         )
     )
+
+
+def _apply_kind_filter(tables: dict[str, pa.Table], step: KindFilterStep, emit: OnEvent) -> None:
+    table = tables.get(step.table)
+    if table is None or step.column not in table.column_names:
+        emit(BatchEvent("info", f"  skip kind filter: {step.table}.{step.column} not present"))
+        return
+    if not step.types and not step.codes:  # nothing selected — a no-op, not an empty-out
+        emit(BatchEvent("info", "  skip kind filter: no document types or codes selected"))
+        return
+    before = table.num_rows
+    kinds = pc.cast(table.column(step.column), pa.string()).to_pylist()
+    numbers: list[str | None] = (
+        pc.cast(table.column(step.number_column), pa.string()).to_pylist()
+        if step.number_column in table.column_names
+        else [None] * before
+    )
+    wanted_types, wanted_codes = set(step.types), set(step.codes)
+
+    def is_match(code: str | None, number: str | None) -> bool:
+        if code is not None and code in wanted_codes:
+            return True
+        return bool(wanted_types) and doc_type_for(number, code) in wanted_types
+
+    mask: Any = pa.array(
+        [is_match(code, number) for code, number in zip(kinds, numbers, strict=True)],
+        type=pa.bool_(),
+    )
+    if step.action == "discard":
+        mask = pc.invert(mask)
+    tables[step.table] = table.filter(mask)
+    kept = tables[step.table].num_rows
+    picks = ", ".join([*step.types, *step.codes])
+    emit(BatchEvent("info", f"  kind filter ({step.action} {picks}): {before:,} → {kept:,} rows"))
 
 
 def _apply_reference_match(
@@ -2060,6 +2147,8 @@ def _apply_step(  # noqa: PLR0912, PLR0913 - one branch per step kind
         _apply_compare(tables, step, emit)
     elif isinstance(step, TransferTypeStep):
         _apply_transfer_type(tables, step, emit)
+    elif isinstance(step, KindFilterStep):
+        _apply_kind_filter(tables, step, emit)
     elif isinstance(step, ReferenceMatchStep):
         _apply_reference_match(tables, step, emit)
     elif isinstance(step, FetchCpcStep):
@@ -2984,6 +3073,9 @@ def describe_step(step: BatchStep) -> str:  # noqa: PLR0911, PLR0912 - one line 
         )
     if isinstance(step, TransferTypeStep):
         return f"Transfer type · {step.table} · {step.assignor_type} → {step.assignee_type}"
+    if isinstance(step, KindFilterStep):
+        picks = ", ".join([*step.types, *step.codes]) or "(none)"
+        return f"Kind filter · {step.table} · {step.action} {picks}"
     if isinstance(step, ReferenceMatchStep):
         ref = Path(step.reference_path).name or "(no file)"
         return (

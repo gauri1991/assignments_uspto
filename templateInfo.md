@@ -182,9 +182,18 @@ memory between experiments. Treat a run as reproducible only under `learn: false
 Each step is an object with a `"kind"` discriminator. **The complete, closed set of valid kinds:**
 
 ```
-filter · normalize · classify · compare · transfer_type · reference_match ·
-fetch_cpc · cpc_match · dedupe · select · sort · derive · aggregate · export
+filter · normalize · classify · compare · transfer_type · kind_filter · reference_match ·
+fetch_cpc · attach_cpc_file · cpc_match · dedupe · select · sort · derive · aggregate · export
 ```
+
+`kind_filter` keeps or discards rows by document kind — pick document **types**
+(`grant`/`application`/`publication`/`unknown`, classified via `doc_type_for` so `application`
+covers `X0` serials and `publication` covers `A1`) in `types`, and/or exact **codes** (`B1`,`B2`,
+`A1`,`X0`,…) in `codes`; a row matches when its type ∈ `types` OR its code ∈ `codes`, and
+`action` (`keep`/`discard`) filters. Config: `table` (default `flat`), `column` (default
+`doc_kind`), `number_column` (default `doc_number`), `types`, `codes`, `action`. It's the
+convenient alternative to a raw `filter` clause on `doc_kind` and correctly handles the `A1`-vs-`X0`
+application split.
 
 Anything else (e.g. `resolve`, `ledger`, `join`, `dictionary`) is **not a template step** and will
 fail to import — those capabilities exist as CLI subcommands, not steps (see §9). Note that

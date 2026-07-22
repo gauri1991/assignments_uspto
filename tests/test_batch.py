@@ -30,6 +30,7 @@ from uspto_assignments import (
     ExportStep,
     FilterClause,
     FilterStep,
+    KindFilterStep,
     LoadConfig,
     NormalizeStep,
     ReferenceMatchStep,
@@ -1144,6 +1145,66 @@ def test_run_batch_flat_output_dedupes_same_stem_sources(tmp_path: Path) -> None
     names = sorted(p.name for p in out.iterdir())
     assert "x_flat.parquet" in names
     assert "x (1)_flat.parquet" in names  # second same-stem source deduped, not overwritten
+
+
+def _kind_flat() -> pa.Table:
+    """A flat table carrying one of each real doc_kind (grant B1/B2, publication A1, serial X0)."""
+    return pa.table(
+        {
+            "doc_kind": ["B1", "B2", "A1", "X0"],
+            "doc_number": ["4392759", "6534515", "20010040008", "06232459"],
+        }
+    )
+
+
+def _run_kind_filter(tmp_path: Path, step: KindFilterStep) -> list[str]:
+    src = tmp_path / f"k{id(step)}.parquet"
+    pq.write_table(_kind_flat(), src)
+    template = BatchTemplate(name="k", steps=[step, ExportStep(fmt="csv", tables=["flat"])])
+    out = tmp_path / f"o{id(step)}"
+    run_batch(template, [src], out, timestamp="kf", flat_output=True)
+    rows = list(csv.DictReader((out / f"k{id(step)}.csv").read_text().splitlines()))
+    return [r["doc_kind"] for r in rows]
+
+
+def test_kind_filter_by_type_keep_and_discard(tmp_path: Path) -> None:
+    assert _run_kind_filter(tmp_path, KindFilterStep(types=["grant"], action="keep")) == [
+        "B1",
+        "B2",
+    ]
+    assert _run_kind_filter(tmp_path, KindFilterStep(types=["grant"], action="discard")) == [
+        "A1",
+        "X0",
+    ]
+    # A1 classifies as publication, X0 as application — the two are distinct types
+    assert _run_kind_filter(tmp_path, KindFilterStep(types=["application"])) == ["X0"]
+    assert _run_kind_filter(tmp_path, KindFilterStep(types=["publication"])) == ["A1"]
+
+
+def test_kind_filter_by_exact_code_and_combined(tmp_path: Path) -> None:
+    assert _run_kind_filter(tmp_path, KindFilterStep(codes=["B2"])) == ["B2"]
+    # type OR exact-code: grants plus the X0 serial
+    got = _run_kind_filter(tmp_path, KindFilterStep(types=["grant"], codes=["X0"]))
+    assert got == ["B1", "B2", "X0"]
+    # nothing selected → no-op (all rows kept, not emptied)
+    assert _run_kind_filter(tmp_path, KindFilterStep()) == ["B1", "B2", "A1", "X0"]
+
+
+def test_kind_filter_decode_validates_types_and_roundtrips(tmp_path: Path) -> None:
+    step = KindFilterStep(
+        table="flat", types=["grant", "publication"], codes=["X0"], action="discard"
+    )
+    path = tmp_path / "t.json"
+    dump_templates([BatchTemplate(name="t", steps=[step])], path)
+    back = load_templates(path)[0].steps[0]
+    assert isinstance(back, KindFilterStep)
+    assert back.types == ["grant", "publication"] and back.codes == ["X0"]
+    assert back.action == "discard"
+    # an invalid document type is rejected at import
+    bad = tmp_path / "bad.json"
+    bad.write_text('[{"name":"b","steps":[{"kind":"kind_filter","types":["bogus"]}]}]')
+    with pytest.raises(TemplateFormatError, match="invalid kind type 'bogus'"):
+        load_templates(bad)
 
 
 def _one_table_convert() -> BatchTemplate:

@@ -55,6 +55,17 @@
     "combine": "and"
    },
    {
+    "kind": "kind_filter",
+    "table": "flat",
+    "column": "doc_kind",
+    "number_column": "doc_number",
+    "types": [
+     "grant"
+    ],
+    "codes": [],
+    "action": "keep"
+   },
+   {
     "kind": "reference_match",
     "table": "flat",
     "column": "assignor_names",

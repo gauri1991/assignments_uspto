@@ -723,6 +723,16 @@ Fields: `table` (default `flat`), `assignor_column` (`assignor_names`), `assigne
 (`assignee_names`), `assignor_type` (default `company`), `assignee_type` (default `company`),
 `method`. Example: `company → company` keeps only firm-to-firm transfers.
 
+#### Kind code filter (keep / discard)
+Keep or discard rows by document kind — the convenient alternative to a raw `filter` clause on
+`doc_kind`. Pick one or more **document types** (Grant / Application / Publication / Unknown,
+classified via `doc_type_for`) and/or exact **kind codes** (`B1`, `B2`, `A1`, `X0`, …); a row
+matches when its type **or** its exact code is selected, and the **action** keeps or discards the
+matches. Fields: `table` (default `flat`), `column` (default `doc_kind`), `number_column` (default
+`doc_number`), `types`, `codes`, `action` (`keep`/`discard`). Handy because *Grant* = `B1`+`B2`,
+while *applications* split into `A1` (publication) and `X0` (serial) — tick both to capture every
+non-grant. CPC is grant-only, so gate to Grant before CPC steps.
+
 #### Match against reference
 Match a name column against a disambiguated-assignee reference file (see
 [Reference matching](#9-reference-matching-patentsview-disambiguated-assignees)).

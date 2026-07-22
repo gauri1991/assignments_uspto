@@ -26,6 +26,7 @@ from uspto_assignments import (
     ExportStep,
     FilterClause,
     FilterStep,
+    KindFilterStep,
     LoadConfig,
     NormalizeStep,
     ReferenceMatchStep,
@@ -53,6 +54,7 @@ from uspto_assignments_ui.widgets.batch_dialog import (
     DeriveStepDialog,
     ExportStepDialog,
     FilterStepDialog,
+    KindFilterStepDialog,
     NormalizeStepDialog,
     ReferenceMatchStepDialog,
     SelectStepDialog,
@@ -256,6 +258,20 @@ def test_trace_format_dropdown_defaults_parquet_and_gates_on_checkbox(
     assert dialog._trace_format.isEnabled()
     dialog._save_steps.setChecked(False)
     assert not dialog._trace_format.isEnabled()
+
+
+def test_kind_filter_step_dialog_roundtrips(qtbot: Any) -> None:
+    create_app([])
+    original = KindFilterStep(
+        table="flat", types=["grant", "publication"], codes=["X0"], action="discard"
+    )
+    dialog = KindFilterStepDialog(original)
+    qtbot.addWidget(dialog)
+    built = dialog.step()
+    assert built.action == "discard"
+    assert set(built.types) == {"grant", "publication"}
+    assert built.codes == ["X0"]
+    assert built.column == "doc_kind" and built.number_column == "doc_number"
 
 
 def test_convert_options_default_and_gate_on_checkbox(qtbot: Any, tmp_path: Path) -> None:

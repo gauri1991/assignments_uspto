@@ -61,6 +61,7 @@ from uspto_assignments import (
     ExportStep,
     FetchCpcStep,
     FilterStep,
+    KindFilterStep,
     LoadConfig,
     NormalizeStep,
     ReferenceMatchStep,
@@ -141,6 +142,13 @@ _COMBINE_MODES: list[tuple[str, str]] = [
     ("Majority", "majority"),
 ]
 _ENTITY_TYPES: list[str] = ["company", "individual", "unknown"]
+# Document-type groups for the kind-code filter, with the codes each typically covers (label only).
+_DOC_TYPE_CHOICES: list[tuple[str, str]] = [
+    ("Grant (B1, B2)", "grant"),
+    ("Application (X0)", "application"),
+    ("Publication (A1)", "publication"),
+    ("Unknown", "unknown"),
+]
 _COMPARE_METHODS: list[tuple[str, str]] = [
     ("Exact (fast; ideal on canonical columns)", "exact"),
     ("Fuzzy (rapidfuzz ≥ threshold)", "fuzzy"),
@@ -1197,6 +1205,89 @@ class TransferTypeStepDialog(QDialog):
         )
 
 
+class KindFilterStepDialog(QDialog):
+    """Keep or discard rows by document kind — pick document types and/or exact kind codes."""
+
+    def __init__(self, step: KindFilterStep | None = None, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Kind code filter step")
+        self.setMinimumWidth(460)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(10)
+        layout.addWidget(SectionLabel("Kind code filter (keep or discard by document kind)"))
+
+        form = QFormLayout()
+        self._table = QComboBox()
+        self._table.addItems(list(STORE_TABLES))
+        self._table.setCurrentText("flat")
+        self._column = QComboBox()
+        self._number_column = QComboBox()
+        self._action = QComboBox()
+        self._action.addItem("Keep matching rows", "keep")
+        self._action.addItem("Discard matching rows", "discard")
+        form.addRow("Table", self._table)
+        form.addRow("Kind column", self._column)
+        form.addRow("Number column", self._number_column)
+        form.addRow("Action", self._action)
+        layout.addLayout(form)
+
+        layout.addWidget(SectionLabel("Document types (grouped, robust to A1/X0)"))
+        types_row = QHBoxLayout()
+        self._type_checks: dict[str, QCheckBox] = {}
+        for label, value in _DOC_TYPE_CHOICES:
+            box = QCheckBox(label)
+            self._type_checks[value] = box
+            types_row.addWidget(box)
+        types_row.addStretch(1)
+        layout.addLayout(types_row)
+
+        codes_form = QFormLayout()
+        self._codes = QLineEdit()
+        self._codes.setPlaceholderText("exact codes, comma-separated — e.g. B2, X0, S1")
+        codes_form.addRow("Exact kind codes", self._codes)
+        layout.addLayout(codes_form)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self._table.currentIndexChanged.connect(self._rebuild_columns)
+        self._rebuild_columns()
+
+        if step is not None:
+            self._table.setCurrentText(step.table)
+            self._column.setCurrentText(step.column)
+            self._number_column.setCurrentText(step.number_column)
+            self._action.setCurrentIndex(max(0, self._action.findData(step.action)))
+            for value, box in self._type_checks.items():
+                box.setChecked(value in step.types)
+            self._codes.setText(", ".join(step.codes))
+
+    def _rebuild_columns(self) -> None:
+        cols = _cols(self._table.currentText())
+        for combo, default in ((self._column, "doc_kind"), (self._number_column, "doc_number")):
+            combo.clear()
+            combo.addItems(cols)
+            if default in cols:
+                combo.setCurrentText(default)
+
+    def step(self) -> KindFilterStep:
+        """Return the configured kind-code filter step."""
+        codes = [c.strip() for c in self._codes.text().split(",") if c.strip()]
+        return KindFilterStep(
+            table=self._table.currentText(),
+            column=self._column.currentText(),
+            number_column=self._number_column.currentText(),
+            types=[value for value, box in self._type_checks.items() if box.isChecked()],
+            codes=codes,
+            action=self._action.currentData(),
+        )
+
+
 class ReferenceMatchStepDialog(QDialog):
     """Configure a reference-match step: match a name column against a disambiguated reference."""
 
@@ -1632,6 +1723,7 @@ _StepDialog = (
     | ClassifyStepDialog
     | CompareStepDialog
     | TransferTypeStepDialog
+    | KindFilterStepDialog
     | ReferenceMatchStepDialog
     | FetchCpcStepDialog
     | AttachCpcFileStepDialog
@@ -1646,6 +1738,7 @@ _STEP_DIALOGS: list[tuple[str, type[_StepDialog]]] = [
     ("Classify entity type…", ClassifyStepDialog),
     ("Compare columns…", CompareStepDialog),
     ("Transfer type (firm→firm…)…", TransferTypeStepDialog),
+    ("Kind code filter (keep/discard)…", KindFilterStepDialog),
     ("Match against reference…", ReferenceMatchStepDialog),
     ("Fetch CPC codes…", FetchCpcStepDialog),
     ("Attach CPC from file…", AttachCpcFileStepDialog),
@@ -1665,6 +1758,7 @@ _EDIT_DIALOGS: dict[type[BatchStep], type[_StepDialog]] = {
     ClassifyStep: ClassifyStepDialog,
     CompareStep: CompareStepDialog,
     TransferTypeStep: TransferTypeStepDialog,
+    KindFilterStep: KindFilterStepDialog,
     ReferenceMatchStep: ReferenceMatchStepDialog,
     FetchCpcStep: FetchCpcStepDialog,
     AttachCpcFileStep: AttachCpcFileStepDialog,
