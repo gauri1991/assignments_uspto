@@ -260,6 +260,26 @@ def test_trace_format_dropdown_defaults_parquet_and_gates_on_checkbox(
     assert not dialog._trace_format.isEnabled()
 
 
+def test_steps_list_multi_select_remove(qtbot: Any, tmp_path: Path) -> None:
+    create_app([])
+    dialog = BatchDialog(BatchTemplateStore(tmp_path / "batch.json"))
+    qtbot.addWidget(dialog)
+    dialog._steps = [
+        FilterStep(table="flat", clauses=[FilterClause("doc_kind", "starts_with", "B")]),
+        NormalizeStep(table="flat", column="assignor_names"),
+        NormalizeStep(table="flat", column="assignee_names"),
+        ExportStep(fmt="parquet", tables=["flat"]),
+    ]
+    dialog._refresh_steps_list()
+    assert dialog._steps_list.count() == 4
+    for i in (1, 2):  # select the two normalize steps (non-adjacent to export)
+        dialog._steps_list.item(i).setSelected(True)  # type: ignore[union-attr]
+    dialog._remove_step()
+    kinds = [type(s).__name__ for s in dialog._steps]
+    assert kinds == ["FilterStep", "ExportStep"]  # both normalize steps dropped at once
+    assert dialog._steps_list.count() == 2
+
+
 def test_kind_filter_step_dialog_roundtrips(qtbot: Any) -> None:
     create_app([])
     original = KindFilterStep(

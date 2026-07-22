@@ -1922,6 +1922,8 @@ class BatchDialog(QDialog):
         column.addWidget(SectionLabel("Steps (double-click to edit)"))
         self._steps_list = QListWidget()
         self._steps_list.setProperty("panel", "true")
+        # Extended selection so Remove can drop several steps at once (Ctrl/Shift-click).
+        self._steps_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._steps_list.itemDoubleClicked.connect(self._edit_step)
         column.addWidget(self._steps_list, 2)
 
@@ -2329,9 +2331,19 @@ class BatchDialog(QDialog):
             self._steps_list.setCurrentRow(row)
 
     def _remove_step(self) -> None:
-        row = self._steps_list.currentRow()
-        if 0 <= row < len(self._steps):
-            del self._steps[row]
+        rows = sorted(
+            (self._steps_list.row(item) for item in self._steps_list.selectedItems()),
+            reverse=True,  # delete high indices first so earlier ones stay valid
+        )
+        if not rows:  # nothing multi-selected — fall back to the current row
+            current = self._steps_list.currentRow()
+            rows = [current] if 0 <= current < len(self._steps) else []
+        removed = False
+        for row in rows:
+            if 0 <= row < len(self._steps):
+                del self._steps[row]
+                removed = True
+        if removed:
             self._refresh_steps_list()
 
     def _move_step(self, delta: int) -> None:

@@ -134,6 +134,29 @@ QComboBox QAbstractItemView {
     selection-color: #FFFFFF;
 }
 
+/* Spin box increment buttons: flat grey squares with CSS-triangle arrows (visible & clickable). */
+QSpinBox::up-button, QSpinBox::down-button {
+    subcontrol-origin: border;
+    background-color: #CCCCCC;
+    border: none;
+    width: 20px;
+}
+QSpinBox::up-button { subcontrol-position: top right; }
+QSpinBox::down-button { subcontrol-position: bottom right; }
+QSpinBox::up-button:hover, QSpinBox::down-button:hover { background-color: #BFBFBF; }
+QSpinBox::up-button:pressed, QSpinBox::down-button:pressed { background-color: #0078D7; }
+QSpinBox::up-arrow {
+    width: 0; height: 0;
+    border-left: 4px solid transparent; border-right: 4px solid transparent;
+    border-bottom: 5px solid #1D1D1D;
+}
+QSpinBox::down-arrow {
+    width: 0; height: 0;
+    border-left: 4px solid transparent; border-right: 4px solid transparent;
+    border-top: 5px solid #1D1D1D;
+}
+QSpinBox::up-arrow:disabled, QSpinBox::down-arrow:disabled { border-bottom-color: #ABABAB; border-top-color: #ABABAB; }
+
 /* ---- Tabs: no folder shape; 3px bottom border, accent when selected ------- */
 QTabWidget::pane {
     border: none;
@@ -258,6 +281,7 @@ QCheckBox::indicator:hover, QRadioButton::indicator:hover {
 QCheckBox::indicator:checked, QRadioButton::indicator:checked {
     background-color: #0078D7;
     border-color: #0078D7;
+    image: url("@RESOURCES@/check.svg");   /* white tick — styling the indicator drops the native one */
 }
 
 /* ---- Tiles: square 140x140, no border, text bottom-left ------------------- */

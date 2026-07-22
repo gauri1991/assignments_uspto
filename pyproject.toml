@@ -68,7 +68,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 uspto_assignments = ["resources/*.json.gz"]  # vendored built-in ML classifier weights
-uspto_assignments_ui = ["resources/*.qss"]
+uspto_assignments_ui = ["resources/*.qss", "resources/*.svg"]
 
 # NOTE: this project uses venv + pip (uv was not installed at scaffold time).
 # Install editable with dev extras: .venv/bin/pip install -e ".[dev]"
